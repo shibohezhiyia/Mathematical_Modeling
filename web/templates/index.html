@@ -1,0 +1,1311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能图表 - 自动化机器学习平台</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <!-- echarts-gl 按需动态加载，默认不引入 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2">
+</head>
+<body>
+    <!-- 顶部标题栏 -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">📊 智能图表</div>
+            <span class="subtitle">自动化机器学习平台</span>
+        </div>
+        <div class="header-right">
+            <span id="data-status">未加载数据</span>
+            <button class="btn btn-sm" onclick="toggleDependencyPanel()">📦 依赖管理</button>
+            <button class="btn btn-sm" onclick="toggleSettingsPanel()">⚙️ 设置</button>
+            <button class="btn btn-sm" onclick="resetAll()">🔄 重置</button>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <!-- 左侧导航 -->
+        <nav class="sidebar">
+            <div class="step-item active" data-step="1" onclick="goStep(1)">
+                <div class="step-num">1</div>
+                <div class="step-info">
+                    <div class="step-title">数据上传</div>
+                    <div class="step-desc">CSV / Excel / JSON</div>
+                </div>
+            </div>
+            <div class="step-item" data-step="2" onclick="goStep(2)">
+                <div class="step-num">2</div>
+                <div class="step-info">
+                    <div class="step-title">数据概览</div>
+                    <div class="step-desc">EDA & 类型识别</div>
+                </div>
+            </div>
+            <div class="step-item" data-step="3" onclick="goStep(3)">
+                <div class="step-num">2.5</div>
+                <div class="step-info">
+                    <div class="step-title">报表设计</div>
+                    <div class="step-desc">拖拽 & 组合报表</div>
+                </div>
+            </div>
+            <div class="step-item" data-step="4" onclick="goStep(4)">
+                <div class="step-num">3</div>
+                <div class="step-info">
+                    <div class="step-title">建模配置</div>
+                    <div class="step-desc">策略 & 参数设置</div>
+                </div>
+            </div>
+            <div class="step-item" data-step="5" onclick="goStep(5)">
+                <div class="step-num">4</div>
+                <div class="step-info">
+                    <div class="step-title">训练与评估</div>
+                    <div class="step-desc">自动训练 & 决策</div>
+                </div>
+            </div>
+            <div class="step-item" data-step="6" onclick="goStep(6)">
+                <div class="step-num">5</div>
+                <div class="step-info">
+                    <div class="step-title">结果可视化</div>
+                    <div class="step-desc">图表 & 预测</div>
+                </div>
+            </div>
+            <div class="step-item" data-step="7" onclick="goStep(7)">
+                <div class="step-num">6</div>
+                <div class="step-info">
+                    <div class="step-title">AI 智能分析</div>
+                    <div class="step-desc">大模型深度解读</div>
+                </div>
+            </div>
+            <div class="sidebar-divider"></div>
+            <div class="sidebar-footer">
+                <button class="sidebar-btn" onclick="toggleLogPanel()">
+                    <span class="sidebar-btn-icon">📋</span>
+                    <span class="sidebar-btn-text">运行日志</span>
+                </button>
+            </div>
+        </nav>
+
+        <!-- 主内容区 -->
+        <main class="content" id="main-content">
+            <!-- Step 1: 数据上传 -->
+            <section class="step-panel active" id="step-1">
+                <h2>📁 数据上传</h2>
+                <div class="upload-area" id="upload-area">
+                    <div class="upload-icon">📤</div>
+                    <p>拖拽文件到此处，或 <label class="link">点击上传<input type="file" id="file-input" accept=".csv,.xlsx,.xls,.json,.parquet" multiple hidden></label></p>
+                    <p class="hint">支持 CSV, Excel(多sheet), JSON, Parquet · 可多选文件</p>
+                </div>
+                <div id="upload-progress" class="progress-bar hidden">
+                    <div class="progress-fill"></div>
+                </div>
+                
+                <!-- 建模助手 -->
+                <div class="card" style="margin-top:16px;">
+                    <h3>🧠 建模助手</h3>
+                    <p style="font-size:13px;color:var(--text-light);margin-bottom:10px;">没有数据文件？输入题目描述，获取建模方案、公式推导和代码框架。</p>
+                    <div class="form-row" style="align-items:flex-end;">
+                        <div class="form-group" style="flex:1;">
+                            <textarea id="problem-description" rows="3" placeholder="例如：炮弹以初速度100m/s、45度角发射，考虑空气阻力，建立轨迹模型并计算射程..." style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;resize:vertical;"></textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="analyzeProblem()" style="margin-left:10px;">分析题目</button>
+                    </div>
+                    <div id="problem-result" style="margin-top:12px;display:none;">
+                        <div id="problem-result-content"></div>
+                    </div>
+                </div>
+                
+                <!-- 多表数据面板 -->
+                <div id="multi-table-panel" class="card hidden">
+                    <h3>📊 多表数据管理</h3>
+                    <div id="file-sheet-list"></div>
+                    
+                    <!-- 合并/关联操作区 -->
+                    <div class="multi-table-ops" id="multi-table-ops" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>操作</label>
+                                <select id="multi-op-type" onchange="onMultiOpChange()">
+                                    <option value="">选择操作...</option>
+                                    <option value="merge">📎 合并多个表</option>
+                                    <option value="join">🔗 关联两个表</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- 合并选项 -->
+                        <div id="merge-options" class="hidden">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>合并方向</label>
+                                    <select id="merge-axis">
+                                        <option value="0">⬇ 纵向拼接（增加行）</option>
+                                        <option value="1">➡ 横向拼接（增加列）</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <p class="hint">勾选上方表格的复选框，选择要合并的sheet</p>
+                            <button class="btn btn-primary" onclick="executeMerge()">执行合并</button>
+                        </div>
+                        
+                        <!-- 关联选项 -->
+                        <div id="join-options" class="hidden">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>左表</label>
+                                    <select id="join-left"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>右表</label>
+                                    <select id="join-right"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>关联键</label>
+                                    <select id="join-on">
+                                        <option value="">先选择左右表</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>关联方式</label>
+                                    <select id="join-how">
+                                        <option value="inner">inner · 交集</option>
+                                        <option value="left">left · 左表为主</option>
+                                        <option value="right">right · 右表为主</option>
+                                        <option value="outer">outer · 并集</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <button class="btn btn-primary" onclick="executeJoin()">执行关联</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="upload-result" class="card hidden">
+                    <h3>当前数据预览</h3>
+                    <div id="upload-preview"></div>
+                </div>
+            </section>
+
+            <!-- Step 2: 数据概览 -->
+            <section class="step-panel" id="step-2">
+                <h2>📋 数据概览</h2>
+                <div id="eda-loading" class="loading">正在分析数据...</div>
+                <div id="eda-content" class="hidden">
+                    <div class="grid-2">
+                        <div class="card">
+                            <h3>基本信息</h3>
+                            <div id="basic-info"></div>
+                        </div>
+                        <div class="card">
+                            <h3>类型分布</h3>
+                            <div id="type-distribution"></div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>字段详情</h3>
+                        <div class="table-wrapper">
+                            <table id="column-table" class="data-table">
+                                <thead></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>相关性热力图</h3>
+                        <div id="correlation-chart" style="width:100%;height:400px;"></div>
+                    </div>
+                    
+                    <!-- 数据质量报告 -->
+                    <div class="card" id="data-quality-card" style="display:none;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                            <h3>📋 数据质量报告</h3>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                <label style="font-size:12px;color:var(--text-light);"><input type="checkbox" id="autofix-outliers" style="margin-right:4px;">Fix outliers</label>
+                                <button class="btn btn-sm btn-primary" onclick="autofixData()">🔧 一键修复</button>
+                            </div>
+                        </div>
+                        <div id="data-quality-content">
+                            <div class="hint">Loading quality report...</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 数据筛选与自动分析 -->
+                    <div class="card" id="data-filter-card">
+                        <h3>🔧 数据筛选</h3>
+                        <div class="filter-status" id="filter-status" style="display:none;margin-bottom:12px;padding:8px 12px;background:#e3f2fd;border-radius:6px;font-size:13px;color:#1565c0;"></div>
+                        
+                        <!-- 自动分析结果 -->
+                        <div id="column-quality-panel">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                                <h4 style="margin:0;font-size:14px;">列质量分析</h4>
+                                <button class="btn btn-sm" onclick="loadColumnQuality()">🔄 刷新分析</button>
+                            </div>
+                            <div id="column-quality-list" class="column-quality-list">
+                                <div class="hint">点击刷新分析列质量</div>
+                            </div>
+                        </div>
+                        
+                        <!-- 行筛选 -->
+                        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+                            <h4 style="margin:0 0 10px;font-size:14px;">行筛选条件</h4>
+                            <div id="row-filters-list"></div>
+                            <button class="btn btn-sm" onclick="addRowFilter()" style="margin-top:8px;">➕ 添加条件</button>
+                        </div>
+                        
+                        <!-- 操作按钮 -->
+                        <div style="margin-top:16px;display:flex;gap:10px;">
+                            <button class="btn btn-primary" onclick="applyDataFilter()">✅ 应用筛选</button>
+                            <button class="btn btn-secondary" onclick="resetDataFilter()">↩️ 重置</button>
+                        </div>
+                    </div>
+                    
+                    <!-- 高级统计分析 -->
+                    <div class="card" id="advanced-analytics-card">
+                        <h3>🔬 高级统计分析</h3>
+                        <div class="analytics-toolbar">
+                            <div class="form-row" style="align-items:flex-end;">
+                                <div class="form-group">
+                                    <label>分析类型</label>
+                                    <select id="analytics-type" onchange="onAnalyticsTypeChange()">
+                                        <option value="">选择分析...</option>
+                                        <option value="descriptive">📊 扩展描述统计</option>
+                                        <option value="pca">🎯 主成分分析(PCA)</option>
+                                        <option value="factor">🔍 因子分析</option>
+                                        <option value="correlation">🔗 相关性分析</option>
+                                        <option value="anova">📈 方差分析(ANOVA)</option>
+                                        <option value="chi2">🧪 卡方检验</option>
+                                        <option value="outliers">⚠️ 异常值检测</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" id="analytics-params"></div>
+                                <button class="btn btn-primary" onclick="runAdvancedAnalytics()">执行分析</button>
+                            </div>
+                        </div>
+                        <div id="analytics-result" style="margin-top:16px;"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 3: 报表设计 -->
+            <section class="step-panel" id="step-3">
+                <h2>🎨 报表设计</h2>
+                
+                <!-- 模式切换 -->
+                <div class="report-mode-tabs">
+                    <button class="btn btn-sm active" id="tab-pivot" onclick="switchReportMode('pivot')">📊 数据透视表</button>
+                    <button class="btn btn-sm" id="tab-free" onclick="switchReportMode('free')">📝 自由报表</button>
+                </div>
+                
+                <!-- 报表设计器主体 -->
+                <div class="report-designer">
+                    <!-- 左侧字段面板 -->
+                    <div class="field-panel">
+                        <h4>可用字段</h4>
+                        <div id="field-list">
+                            <div class="loading">请先上传数据</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 中间画布 -->
+                    <div class="canvas-area">
+                        <!-- 透视表模式 -->
+                        <div id="pivot-panel">
+                            <div class="drop-zones">
+                                <div class="drop-zone" id="zone-rows" ondragover="onDragOver(event)" ondrop="onDropZone(event, 'row_fields')">
+                                    <div class="zone-label">📑 行字段 <small>(拖拽字段到此处)</small></div>
+                                    <div class="zone-items" id="row-items"></div>
+                                </div>
+                                <div class="drop-zone" id="zone-cols" ondragover="onDragOver(event)" ondrop="onDropZone(event, 'col_fields')">
+                                    <div class="zone-label">📊 列字段 <small>(拖拽字段到此处)</small></div>
+                                    <div class="zone-items" id="col-items"></div>
+                                </div>
+                                <div class="drop-zone" id="zone-values" ondragover="onDragOver(event)" ondrop="onDropZone(event, 'value_fields')">
+                                    <div class="zone-label">🔢 值字段 <small>(拖拽字段到此处)</small></div>
+                                    <div class="zone-items" id="value-items"></div>
+                                </div>
+                            </div>
+                            
+                            <!-- 图表配置区域 -->
+                            <div class="card" style="margin-top:12px;">
+                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                                    <h4 style="margin:0;">📈 图表配置</h4>
+                                    <button class="btn btn-sm btn-primary" onclick="addChart()">➕ 添加图表</button>
+                                </div>
+                                <div id="chart-list">
+                                    <p style="color:#999;font-size:13px;">点击"添加图表"创建数据可视化</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 自由报表模式 -->
+                        <div id="free-panel" class="hidden">
+                            <div class="free-toolbar">
+                                <button class="btn btn-sm" onclick="mergeCells()">➕ 合并单元格</button>
+                                <button class="btn btn-sm" onclick="splitCell()">➖ 拆分单元格</button>
+                                <button class="btn btn-sm" onclick="insertRow()">⬇️ 插入行</button>
+                                <button class="btn btn-sm" onclick="deleteRow()">🗑️ 删除行</button>
+                            </div>
+                            <div class="free-canvas-wrapper">
+                                <table id="free-canvas" class="free-canvas"></table>
+                            </div>
+                        </div>
+                        
+                        <!-- 操作按钮 -->
+                        <div class="report-actions">
+                            <button class="btn btn-primary" onclick="previewReport()">👁 预览报表</button>
+                            <button class="btn btn-secondary" onclick="exportReport('excel')">📥 Excel</button>
+                            <button class="btn btn-secondary" onclick="exportReport('pdf')">📄 PDF</button>
+                        </div>
+                        
+                        <!-- 预览区域 -->
+                        <div class="report-preview hidden" id="report-preview-area">
+                            <div class="report-preview-header">
+                                <h4 style="margin:0;">预览</h4>
+                                <div class="zoom-controls">
+                                    <button class="btn btn-sm" onclick="zoomReport(-1)" title="缩小">➖</button>
+                                    <span id="zoom-level" style="font-size:13px;color:var(--text-light);min-width:50px;text-align:center;">100%</span>
+                                    <button class="btn btn-sm" onclick="zoomReport(1)" title="放大">➕</button>
+                                    <button class="btn btn-sm" onclick="resetZoom()" title="还原">⟲</button>
+                                </div>
+                            </div>
+                            <div class="report-preview-img-wrapper" id="report-preview-wrapper">
+                                <img id="report-preview-img" src="" alt="报表预览">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 右侧属性面板 -->
+                    <div class="property-panel" id="property-panel">
+                        <h4>属性</h4>
+                        <div id="property-content">
+                            <p style="color:#999;font-size:13px;">选中值字段或单元格以编辑属性</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 4: 建模配置 -->
+            <section class="step-panel" id="step-4">
+                <h2>⚙️ 建模配置</h2>
+                
+                <!-- 自动推荐面板 -->
+                <div class="decision-panel" id="auto-recommend-panel">
+                    <div class="decision-header">
+                        <span class="badge badge-green">🤖 自动推荐</span>
+                        <span class="decision-desc">系统已根据您的数据自动推荐最佳配置</span>
+                    </div>
+                    <div id="auto-config-display" class="config-display"></div>
+                    <button class="btn btn-primary" onclick="acceptAutoConfig()">✅ 接受推荐配置</button>
+                    <button class="btn btn-secondary" onclick="showManualConfig()">⚙️ 手动调整</button>
+                </div>
+
+                <!-- 手动配置面板 -->
+                <div class="config-form hidden" id="manual-config-panel">
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 2;">
+                            <label>目标列（按住 Ctrl 多选）</label>
+                            <select id="cfg-target" multiple size="4" style="min-width: 180px;"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>任务类型</label>
+                            <select id="cfg-task">
+                                <option value="">自动推断</option>
+                                <option value="classification">分类</option>
+                                <option value="regression">回归</option>
+                                <option value="clustering">聚类</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>决策模式</label>
+                            <select id="cfg-decision-mode">
+                                <option value="balanced">平衡模式</option>
+                                <option value="accuracy_first">精度优先</option>
+                                <option value="speed_first">速度优先</option>
+                                <option value="stability_first">稳定性优先</option>
+                                <option value="simplicity_first">简单优先</option>
+                            </select>
+                            <span class="hint-text" id="mode-hint">综合考虑精度、速度、稳定性</span>
+                        </div>
+                        <div class="form-group">
+                            <label>编码策略</label>
+                            <select id="cfg-encoding">
+                                <option value="auto">自动</option>
+                                <option value="onehot">OneHot</option>
+                                <option value="label">Label</option>
+                                <option value="target">Target</option>
+                                <option value="none">不编码</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>特征选择</label>
+                            <select id="cfg-fs">
+                                <option value="mi">互信息 (MI)</option>
+                                <option value="variance">方差阈值</option>
+                                <option value="model_based">模型重要性</option>
+                                <option value="correlation">相关性过滤</option>
+                                <option value="pca">PCA</option>
+                                <option value="none">不选择</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>融合策略</label>
+                            <select id="cfg-ensemble">
+                                <option value="weighted">加权平均</option>
+                                <option value="voting_hard">硬投票</option>
+                                <option value="voting_soft">软投票</option>
+                                <option value="stacking">堆叠(Stacking)</option>
+                                <option value="best_single">最优单模型</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>特征工程</label>
+                            <select id="cfg-feature-engineering">
+                                <option value="false">关闭</option>
+                                <option value="true">开启（数值交叉+目标编码+统计聚合）</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>伪标签增强</label>
+                            <select id="cfg-pseudo-labeling">
+                                <option value="false">关闭</option>
+                                <option value="true">开启（需上传测试集）</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>CV策略</label>
+                            <select id="cfg-fold-type">
+                                <option value="default">默认 (Stratified/KFold)</option>
+                                <option value="group">GroupKFold（防止同组泄漏）</option>
+                                <option value="time">TimeSeriesSplit（时间序列）</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>CV折数</label>
+                            <input type="number" id="cfg-cv" value="5" min="2" max="10">
+                        </div>
+                        <div class="form-group">
+                            <label>最大样本数（降采样）</label>
+                            <input type="number" id="cfg-max-samples" value="50000" min="1000" max="1000000" step="1000">
+                            <span class="hint-text">大数据自动降采样到该值</span>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="cfg-hyperopt"> 启用超参优化
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>指定模型（可选，留空则全部）</label>
+                            <input type="text" id="cfg-models" placeholder="例如: lr, xgb, rf">
+                        </div>
+                    </div>
+                    
+                    <!-- 深度学习选项 -->
+                    <div class="card" style="margin-top:16px;background:#f8f9fa;">
+                        <h4 style="margin:0 0 12px;font-size:14px;">🧠 深度学习 & 强化学习</h4>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>深度学习模型</label>
+                                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                                    <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="cfg-dl-mlp" checked> PyTorch-MLP
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="cfg-dl-cnn"> PyTorch-CNN1D
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="cfg-dl-lstm"> PyTorch-LSTM
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>优化器</label>
+                                <select id="cfg-optimizer">
+                                    <option value="bayesian">贝叶斯优化 (Optuna)</option>
+                                    <option value="rl">强化学习 (DQN)</option>
+                                    <option value="both">两者结合</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>降维/特征学习</label>
+                                <select id="cfg-dim-reduction">
+                                    <option value="none">不使用</option>
+                                    <option value="pca">PCA</option>
+                                    <option value="autoencoder">自编码器 (AutoEncoder)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" onclick="startTraining()">🚀 开始训练</button>
+                        <button class="btn btn-secondary" onclick="hideManualConfig()">返回自动推荐</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 5: 训练与评估 -->
+            <section class="step-panel" id="step-5">
+                <h2>🎯 训练与评估</h2>
+                <div id="train-status-panel">
+                    <div class="train-layout">
+                        <div class="train-left">
+                            <div class="progress-ring" id="train-spinner">
+                                <div class="spinner"></div>
+                                <p id="train-status-text">正在训练模型，请稍候...</p>
+                                <div class="progress-bar" id="train-progress-bar" style="width:100%;max-width:400px;margin-top:16px;">
+                                    <div class="progress-fill" id="train-progress-fill" style="width:0%"></div>
+                                </div>
+                                <p id="train-progress-detail" style="color:var(--text-light);font-size:13px;margin-top:8px;"></p>
+                            </div>
+                            <div style="display:flex;justify-content:flex-end;padding:4px 0;">
+                                <button class="btn btn-sm" onclick="copyTrainLogs()">📋 复制训练日志</button>
+                            </div>
+                            <div id="train-log-panel" class="train-log-panel"></div>
+                        </div>
+                        <div class="train-right">
+                            <div class="live-leaderboard" id="live-leaderboard">
+                                <h4>实时排行榜</h4>
+                                <div id="live-leaderboard-content">
+                                    <p style="color:var(--text-light);font-size:13px;text-align:center;padding:20px;">等待模型完成...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="train-result" class="hidden">
+                    <!-- 决策报告 -->
+                    <div class="decision-panel decision-highlight" id="decision-report">
+                        <div class="decision-header">
+                            <span class="badge badge-green">🏆 推荐模型</span>
+                            <span id="dec-confidence" class="confidence">置信度 0%</span>
+                        </div>
+                        <div id="dec-content"></div>
+                    </div>
+                    
+                    <!-- 伪标签报告 -->
+                    <div class="card hidden" id="pseudo-label-card" style="background:linear-gradient(135deg, #ecfdf5, #d1fae5);border-left:4px solid #10b981;">
+                        <h3>🔄 伪标签增强报告</h3>
+                        <div id="pseudo-label-content"></div>
+                    </div>
+                    
+                    <!-- 排行榜 -->
+                    <div class="card">
+                        <h3>模型排行榜</h3>
+                        <div class="table-wrapper">
+                            <table id="leaderboard-table" class="data-table"></table>
+                        </div>
+                    </div>
+                    
+                    <!-- AutoML 决策解释 -->
+                    <div class="card hidden" id="automl-decision-card">
+                        <h3>🤖 AutoML 决策解释</h3>
+                        <div id="automl-decision-content"></div>
+                    </div>
+                    
+                    <!-- 预处理报告 -->
+                    <div class="card" id="preprocessing-report-card">
+                        <h3>🔄 预处理流程</h3>
+                        <div id="preprocessing-flow"></div>
+                        <div id="preprocessing-encoding" class="hidden" style="margin-top:12px;"></div>
+                        <div id="preprocessing-fs" class="hidden" style="margin-top:12px;"></div>
+                    </div>
+                    
+                    <!-- Permutation Importance -->
+                    <div class="card hidden" id="permutation-importance-card">
+                        <h3>🎯 Permutation Importance（Top 20）</h3>
+                        <div id="permutation-importance-chart" style="width:100%;height:350px;"></div>
+                    </div>
+                    
+                    <!-- SHAP Explanation -->
+                    <div class="card hidden" id="shap-card">
+                        <h3>🔬 SHAP 模型解释</h3>
+                        <div id="shap-chart" style="width:100%;height:300px;"></div>
+                        <div id="shap-content" style="margin-top:10px;">
+                            <div class="hint">Select a model to view SHAP explanation.</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 采样报告 -->
+                    <div class="card hidden" id="sampling-report-card">
+                        <h3>降采样报告</h3>
+                        <div id="sampling-content"></div>
+                    </div>
+                    
+                    <!-- 模型对比 -->
+                    <div class="card" id="model-comparison-card">
+                        <h3>📊 模型对比</h3>
+                        <div class="chart-tabs" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
+                            <button class="btn btn-sm chart-tab active" data-tab="bar" onclick="switchModelCompTab('bar')">📊 分数</button>
+                            <button class="btn btn-sm chart-tab" data-tab="radar" onclick="switchModelCompTab('radar')">🎯 雷达</button>
+                            <button class="btn btn-sm chart-tab" data-tab="box" onclick="switchModelCompTab('box')">📦 CV分布</button>
+                            <button class="btn btn-sm chart-tab" data-tab="scatter" onclick="switchModelCompTab('scatter')">⚡ 速度-精度</button>
+                        </div>
+                        <div id="model-comparison-chart" style="width:100%;height:350px;"></div>
+                    </div>
+                    
+                    <!-- 模型排行榜 -->
+                    <div class="card" id="model-leaderboard-card">
+                        <h3>🏆 模型排行榜</h3>
+                        <div class="table-wrapper" style="max-height:400px;overflow:auto;">
+                            <table id="model-leaderboard-table" class="data-table"></table>
+                        </div>
+                    </div>
+                    
+                    <!-- 风险与建议 -->
+                    <div class="card" id="risk-card">
+                        <h3>⚠️ 风险提示与建议</h3>
+                        <div id="risk-content"></div>
+                    </div>
+                    
+                    <!-- 超参优化可视化 -->
+                    <div class="card hidden" id="hyperopt-history-card">
+                        <h3>🔬 超参数优化</h3>
+                        <div id="hyperopt-summary" style="margin-bottom:12px;font-size:13px;color:var(--text-light);"></div>
+                        <div id="hyperopt-model-tabs" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;"></div>
+                        
+                        <!-- 图表区域 -->
+                        <div class="hyperopt-charts">
+                            <div class="hyperopt-chart-box">
+                                <h4>Trial Score 趋势</h4>
+                                <div id="hyperopt-score-chart" style="width:100%;height:280px;"></div>
+                            </div>
+                            <div class="hyperopt-chart-box">
+                                <h4>参数 Slice 分析</h4>
+                                <select id="hyperopt-slice-param" onchange="renderHyperoptSliceChart()" style="margin-bottom:8px;font-size:12px;padding:4px 8px;">
+                                    <option value="">-- 选择参数 --</option>
+                                </select>
+                                <div id="hyperopt-slice-chart" style="width:100%;height:245px;"></div>
+                            </div>
+                        </div>
+                        <div class="hyperopt-chart-box" style="margin-top:12px;">
+                            <h4>🔬 多维参数全景（平行坐标图）</h4>
+                            <div id="hyperopt-parallel-chart" style="width:100%;height:320px;"></div>
+                        </div>
+                        <div class="hyperopt-chart-box" style="margin-top:12px;">
+                            <h4>🧊 3D 搜索空间</h4>
+                            <div id="hyperopt-3d-placeholder" style="text-align:center;padding:60px 0;">
+                                <div style="color:var(--text-light);font-size:13px;margin-bottom:12px;">
+                                    3D 视图需要加载 ECharts GL (~300KB)<br/>
+                                    <span style="font-size:11px;">老旧设备或禁用了 WebGL 的浏览器可能无法使用</span>
+                                </div>
+                                <button class="btn btn-primary" onclick="enableHyperopt3D()" style="font-size:13px;">🔍 开启 3D 视图</button>
+                            </div>
+                            <div id="hyperopt-3d-controls" class="hidden" style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+                                <select id="hyperopt-3d-x" onchange="renderHyperopt3DChart()" style="font-size:12px;padding:4px 8px;">
+                                    <option value="">X 轴</option>
+                                </select>
+                                <select id="hyperopt-3d-y" onchange="renderHyperopt3DChart()" style="font-size:12px;padding:4px 8px;">
+                                    <option value="">Y 轴</option>
+                                </select>
+                                <button class="btn btn-sm" onclick="autoSelect3DAxes()" style="padding:4px 10px;font-size:12px;">🎲 自动选择</button>
+                                <span id="hyperopt-3d-hint" style="font-size:11px;color:var(--text-light);"></span>
+                            </div>
+                            <div id="hyperopt-3d-chart" class="hidden" style="width:100%;height:380px;"></div>
+                        </div>
+                        
+                        <div class="table-wrapper" style="max-height:300px;overflow:auto;margin-top:12px;">
+                            <table id="hyperopt-table" class="data-table"></table>
+                        </div>
+                    </div>
+                    
+                    <!-- 手动调参面板 -->
+                    <div class="card hidden" id="manual-tune-card">
+                        <h3>🎛️ 手动调参</h3>
+                        <div class="tune-form">
+                            <div class="form-row">
+                                <div class="form-group" style="flex:1;min-width:200px;">
+                                    <label>选择模型</label>
+                                    <select id="tune-model-select" onchange="onTuneModelChange()">
+                                        <option value="">-- 选择模型 --</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-row" style="margin-bottom:8px;">
+                                <div class="tune-live-toggle">
+                                    <label class="toggle-label">
+                                        <input type="checkbox" id="tune-live-eval" onchange="onLiveEvalToggle()">
+                                        <span class="toggle-slider"></span>
+                                        <span class="toggle-text">实时评估</span>
+                                    </label>
+                                    <div class="toggle-hint">参数变化后自动重新评估（较耗时）</div>
+                                </div>
+                            </div>
+                            <div id="tune-params-container"></div>
+                            <div class="tune-actions">
+                                <button class="btn btn-primary" onclick="evaluateTuneParams()">
+                                    ▶️ 评估模型
+                                </button>
+                                <button class="btn btn-secondary" onclick="resetTuneParams()">
+                                    🔄 重置参数
+                                </button>
+                            </div>
+                            <div id="tune-explore-chart" style="width:100%;height:320px;margin-top:16px;background:#fafbfc;border:1px solid var(--border);border-radius:var(--radius);"></div>
+                            <div id="tune-result" class="hidden" style="margin-top:16px;"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- 公平性检查 -->
+                    <div class="card hidden" id="fairness-card">
+                        <h3>⚖️ 公平性检查</h3>
+                        <div class="form-row" style="margin-bottom:12px;">
+                            <div class="form-group">
+                                <label>选择模型</label>
+                                <select id="fairness-model-select" onchange="loadFairnessReport()">
+                                    <option value="">-- 选择模型 --</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>敏感属性（可选）</label>
+                                <input type="text" id="fairness-attr-input" placeholder="自动检测" style="width:120px;">
+                            </div>
+                            <div class="form-group" style="display:flex;align-items:flex-end;">
+                                <button class="btn btn-sm btn-primary" onclick="loadFairnessReport()">🔄 分析</button>
+                            </div>
+                        </div>
+                        <div id="fairness-status" style="color:var(--text-light);font-size:13px;margin-bottom:8px;"></div>
+                        <div id="fairness-content" class="hidden">
+                            <div id="fairness-summary" style="margin-bottom:12px;padding:10px;border-radius:6px;"></div>
+                            <div class="table-wrapper">
+                                <table id="fairness-table" class="data-table"></table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 模型解释 (SHAP/LIME) -->
+                    <div class="card" id="model-explain-card">
+                        <h3>🔍 模型解释</h3>
+                        <div class="form-row" style="margin-bottom:12px;">
+                            <div class="form-group">
+                                <label>选择模型</label>
+                                <select id="explain-model-select" onchange="loadModelExplain()">
+                                    <option value="">-- 选择模型 --</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>样本索引</label>
+                                <input type="number" id="explain-instance-index" value="0" min="0" style="width:80px;" onchange="loadModelExplain()">
+                            </div>
+                            <div class="form-group" style="display:flex;align-items:flex-end;">
+                                <button class="btn btn-sm btn-primary" onclick="loadModelExplain()">🔄 刷新解释</button>
+                            </div>
+                        </div>
+                        <div id="explain-status" style="color:var(--text-light);font-size:13px;margin-bottom:8px;"></div>
+                        
+                        <!-- 全局特征重要性 -->
+                        <div id="explain-global-section" class="hidden">
+                            <h4 style="font-size:14px;margin:12px 0 8px;">📊 全局特征重要性 (SHAP)</h4>
+                            <div class="table-wrapper" style="max-height:300px;overflow:auto;">
+                                <table id="explain-global-table" class="data-table"></table>
+                            </div>
+                        </div>
+                        
+                        <!-- 单样本解释 -->
+                        <div id="explain-instance-section" class="hidden">
+                            <h4 style="font-size:14px;margin:16px 0 8px;">🔎 单样本解释 (LIME/SHAP)</h4>
+                            <div id="explain-prediction" style="margin-bottom:8px;font-size:13px;"></div>
+                            <div class="table-wrapper">
+                                <table id="explain-instance-table" class="data-table"></table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 用户覆盖选择 -->
+                    <div class="card" id="override-card">
+                        <h3>🎛️ 覆盖自动选择</h3>
+                        <p>对自动推荐不满意？您可以手动选择最终模型：</p>
+                        <div id="override-options"></div>
+                        <button class="btn btn-primary" onclick="confirmOverride()">确认选择</button>
+                    </div>
+                    
+                    <!-- 导出摘要与代码 -->
+                    <div class="card hidden" id="export-card">
+                        <h3>📦 导出模型</h3>
+                        <p style="font-size:13px;color:var(--text-light);margin-bottom:10px;">已选定最终模型，可生成摘要报告或可复用 Python 代码。</p>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <button class="btn btn-primary" onclick="exportModel('summary')">📋 生成摘要</button>
+                            <button class="btn btn-secondary" onclick="exportModel('code')">💾 导出代码</button>
+                            <button class="btn btn-secondary" onclick="saveModelSnapshot()">📸 保存快照</button>
+                            <button class="btn btn-secondary" onclick="generateReport('html')">📄 报告</button>
+                            <button class="btn btn-secondary" onclick="deployModel()">🚀 部署</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 6: 结果可视化 -->
+            <section class="step-panel" id="step-6">
+                <h2>📈 结果可视化</h2>
+                <div class="chart-toolbar">
+                    <button class="btn btn-sm" onclick="loadChart('leaderboard')">🏆 排行榜</button>
+                    <button class="btn btn-sm" onclick="loadChart('feature_importance')">⭐ 特征重要性</button>
+                    <button class="btn btn-sm" onclick="loadChart('decision_radar')">🎯 决策雷达</button>
+                    <button class="btn btn-sm" onclick="loadChart('score_breakdown')">📊 得分分解</button>
+                    <button class="btn btn-sm" onclick="loadChart('cv_boxplot')">📦 CV箱线</button>
+                    <button class="btn btn-sm" onclick="loadChart('correlation')">🔗 相关性</button>
+                    <button class="btn btn-sm" onclick="loadChart('missing')">❓ 缺失值</button>
+                    <button class="btn btn-sm" onclick="loadChart('hyperopt_history')">🔬 优化曲线</button>
+                    <button class="btn btn-sm" onclick="loadChart('reward_curve')">🧬 RL曲线</button>
+                    <button class="btn btn-sm" onclick="loadChart('autoencoder')">📉 AutoEncoder</button>
+                    <button class="btn btn-sm btn-secondary" onclick="toggleExperimentsPanel()">📜 实验历史</button>
+                </div>
+                <div class="chart-container">
+                    <img id="chart-image" src="" alt="图表" class="hidden">
+                    <div id="chart-placeholder">请选择上方图表类型</div>
+                </div>
+                
+                <!-- 实验历史 -->
+                <div class="card hidden" id="experiments-card" style="margin-top:20px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                        <h3>📜 实验历史</h3>
+                        <div style="display:flex;gap:8px;">
+                            <button class="btn btn-sm" onclick="compareSelectedExperiments()">Compare</button>
+                            <button class="btn btn-sm btn-secondary" onclick="loadExperiments()">Refresh</button>
+                        </div>
+                    </div>
+                    <p style="font-size:13px;color:var(--text-light);margin-bottom:10px;">查看历史训练实验，勾选多行后点击 Compare 对比，点击 Reproduce 可加载配置。</p>
+                    <div id="experiments-table-container" style="overflow-x:auto;">
+                        <table class="data-table" id="experiments-table">
+                            <thead>
+                                <tr><th><input type="checkbox" id="exp-select-all" onclick="toggleSelectAllExperiments()"></th><th>ID</th><th>时间</th><th>任务</th><th>最佳模型</th><th>分数</th><th>耗时</th><th>操作</th></tr>
+                            </thead>
+                            <tbody id="experiments-tbody">
+                                <tr><td colspan="8" style="text-align:center;color:var(--text-light);">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- 鲁棒性测试 -->
+                <div class="card hidden" id="robustness-card" style="margin-top:20px;">
+                    <h3>🛡️ 鲁棒性测试</h3>
+                    <p style="font-size:13px;color:var(--text-light);">测试模型在噪声、缺失值、特征扰动下的表现。</p>
+                    <button class="btn btn-primary" onclick="runRobustnessTest()">运行测试</button>
+                    <div id="robustness-content" style="margin-top:8px;font-size:13px;"></div>
+                </div>
+                
+                <!-- 增量学习 -->
+                <div class="card hidden" id="incremental-card" style="margin-top:20px;">
+                    <h3>🔄 增量学习</h3>
+                    <p style="font-size:13px;color:var(--text-light);">使用当前数据对模型进行增量更新（仅支持 SGD、PassiveAggressive 等支持 partial_fit 的模型）。</p>
+                    <button class="btn btn-primary" onclick="runIncrementalLearning()">更新模型</button>
+                    <div id="incremental-result" style="margin-top:8px;font-size:13px;"></div>
+                </div>
+                
+                <!-- 预测区域 -->
+                <div class="card" style="margin-top:20px;">
+                    <h3>🔮 批量预测</h3>
+                    <p>上传测试集进行预测（需与训练集特征一致）：</p>
+                    <div class="upload-area-small" id="predict-upload">
+                        <label class="link">选择测试文件<input type="file" id="predict-input" accept=".csv,.xlsx" hidden></label>
+                    </div>
+                    <div id="predict-result" class="hidden">
+                        <div class="table-wrapper">
+                            <table id="predict-table" class="data-table"></table>
+                        </div>
+                        <a id="download-link" class="btn btn-primary" href="#" target="_blank">⬇️ 下载预测结果</a>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 7: AI 智能分析 -->
+            <section class="step-panel" id="step-7">
+                <h2>🤖 AI 智能分析</h2>
+                
+                <!-- 大模型配置 -->
+                <div class="card">
+                    <h3>大模型配置</h3>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Provider</label>
+                            <select id="llm-provider" onchange="onLLMProviderChange()">
+                                <option value="openai">OpenAI 兼容 API</option>
+                                <option value="ollama">Ollama 本地模型</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Base URL</label>
+                            <input type="text" id="llm-base-url" value="https://api.openai.com/v1" placeholder="https://api.openai.com/v1">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group" id="llm-api-key-group">
+                            <label>API Key</label>
+                            <input type="password" id="llm-api-key" placeholder="sk-...">
+                        </div>
+                        <div class="form-group" id="llm-model-group">
+                            <label>模型名称</label>
+                            <div class="model-input-wrap">
+                                <input type="text" id="llm-model-name" value="gpt-4o" placeholder="gpt-4o / llama3">
+                                <button type="button" class="btn btn-secondary btn-sm" id="llm-browse-btn" onclick="openModelBrowser()" title="浏览本地模型">
+                                    📁 浏览
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 分析类型选择 -->
+                <div class="card">
+                    <h3>选择分析类型</h3>
+                    <div class="analysis-type-grid">
+                        <div class="analysis-card" id="card-eda" onclick="selectAnalysisType('eda')">
+                            <div class="analysis-icon">📋</div>
+                            <div class="analysis-title">数据集解读</div>
+                            <div class="analysis-desc">让大模型分析数据质量、特征分布、相关性，给出特征工程建议</div>
+                        </div>
+                        <div class="analysis-card" id="card-result" onclick="selectAnalysisType('result')">
+                            <div class="analysis-icon">🏆</div>
+                            <div class="analysis-title">训练结果分析</div>
+                            <div class="analysis-desc">让大模型解读模型排行榜、推荐模型、给出调参和优化建议</div>
+                        </div>
+                        <div class="analysis-card" id="card-error" onclick="selectAnalysisType('error')">
+                            <div class="analysis-icon">🔧</div>
+                            <div class="analysis-title">错误诊断</div>
+                            <div class="analysis-desc">让大模型分析训练失败的错误日志，给出根因和修复建议</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-actions" style="margin-top:20px;">
+                        <button class="btn btn-primary" onclick="startLLMAnalysis()" id="llm-analyze-btn">
+                            🚀 开始分析
+                        </button>
+                        <span id="llm-status-text" style="color:var(--text-light);font-size:13px;"></span>
+                    </div>
+                </div>
+                
+                <!-- 分析结果 -->
+                <div class="card hidden" id="llm-result-card">
+                    <h3>分析结果</h3>
+                    <div id="llm-result-content" class="md-content"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!--  toast 提示 -->
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- 运行日志面板（终端风格） -->
+    <div id="log-panel" class="log-panel-overlay hidden">
+        <div class="log-panel-container">
+            <div class="log-panel-header">
+                <h3>📋 平台日志</h3>
+                <div class="log-panel-actions">
+                    <label class="log-auto-scroll-toggle">
+                        <input type="checkbox" id="log-auto-refresh" checked onchange="toggleLogAutoRefresh()">
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label">自动滚动</span>
+                    </label>
+                    <button class="btn btn-sm" onclick="copyAllLogs()">📋 复制全部</button>
+                    <button class="btn btn-sm" onclick="clearLogs()">🗑️ 清空</button>
+                    <button class="btn btn-sm" onclick="toggleLogPanel()">✕</button>
+                </div>
+            </div>
+            <div class="log-panel-toolbar">
+                <div class="log-filter-group">
+                    <button class="log-filter-btn active" data-level="ALL" onclick="filterLogs('ALL')">全部 <span id="log-count-all">0</span></button>
+                    <button class="log-filter-btn" data-level="DEBUG" onclick="filterLogs('DEBUG')">DEBUG <span id="log-count-debug">0</span></button>
+                    <button class="log-filter-btn" data-level="INFO" onclick="filterLogs('INFO')">INFO <span id="log-count-info">0</span></button>
+                    <button class="log-filter-btn" data-level="WARNING" onclick="filterLogs('WARNING')">WARNING <span id="log-count-warning">0</span></button>
+                    <button class="log-filter-btn" data-level="ERROR" onclick="filterLogs('ERROR')">ERROR <span id="log-count-error">0</span></button>
+                    <button class="log-filter-btn" data-level="CRITICAL" onclick="filterLogs('CRITICAL')">CRITICAL <span id="log-count-critical">0</span></button>
+                </div>
+            </div>
+            <div class="log-panel-body" id="log-list">
+                <div class="log-empty">加载日志中...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 依赖管理弹窗 -->
+    <div id="dependency-panel" class="modal-overlay hidden" onclick="closeDependencyPanel(event)">
+        <div class="modal-container" style="max-width:560px;" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3>📦 依赖管理</h3>
+                <button class="btn btn-sm" onclick="closeDependencyPanel()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div style="margin-bottom:12px;">
+                    <label style="font-size:12px;color:#666;">安装路径（留空使用默认）</label>
+                    <input type="text" id="dependency-target-dir" placeholder="third_party/" style="width:100%;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;box-sizing:border-box;">
+                </div>
+                <p class="hint" style="margin-bottom:12px;">以下可选依赖缺失，安装后将自动加入模型库。</p>
+                <div id="dependency-list">
+                    <div class="loading">检测中...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 实验对比弹窗 -->
+    <div id="experiment-compare-modal" class="modal-overlay hidden" onclick="closeExperimentCompareModal(event)">
+        <div class="modal-container" style="max-width:720px;" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3>🔬 实验对比</h3>
+                <button class="btn btn-sm" onclick="closeExperimentCompareModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div id="experiment-compare-content" style="overflow-x:auto;">
+                    <p style="color:var(--text-light);">Select experiments to compare.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 实验详情弹窗 -->
+    <div id="experiment-detail-modal" class="modal-overlay hidden" onclick="closeExperimentDetailModal(event)">
+        <div class="modal-container" style="max-width:600px;" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3>📋 实验详情</h3>
+                <button class="btn btn-sm" onclick="closeExperimentDetailModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <pre id="experiment-detail-content" style="background:#f8f9fa;padding:12px;border-radius:6px;font-size:12px;overflow:auto;max-height:400px;"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置面板弹窗 -->
+    <div id="settings-panel" class="modal-overlay hidden" onclick="closeSettingsPanel(event)">
+        <div class="modal-container settings-container" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3>⚙️ 设置</h3>
+                <button class="btn btn-sm" onclick="closeSettingsPanel()">✕</button>
+            </div>
+            <div class="modal-body settings-body">
+                <!-- 左侧 Tab 导航 -->
+                <div class="settings-tabs">
+                    <button class="settings-tab-btn active" data-tab="network" onclick="switchSettingsTab('network')">🌐 网络</button>
+                    <button class="settings-tab-btn" data-tab="sidebar" onclick="switchSettingsTab('sidebar')">📑 侧边栏</button>
+                    <button class="settings-tab-btn" data-tab="theme" onclick="switchSettingsTab('theme')">🎨 主题</button>
+                    <button class="settings-tab-btn" data-tab="system" onclick="switchSettingsTab('system')">🔧 系统</button>
+                    <button class="settings-tab-btn" data-tab="backup" onclick="switchSettingsTab('backup')">💾 备份与恢复</button>
+                    <button class="settings-tab-btn" data-tab="apikey" onclick="switchSettingsTab('apikey')">🔑 开发者密钥</button>
+                </div>
+                <!-- 右侧内容区 -->
+                <div class="settings-content">
+                    <!-- 网络 -->
+                    <div class="settings-panel active" id="settings-tab-network">
+                        <h4>🌐 网络设置</h4>
+                        <div class="form-group">
+                            <label>API Base URL</label>
+                            <input type="text" id="setting-api-base-url" placeholder="http://localhost:5000" value="http://localhost:5000">
+                        </div>
+                        <div class="form-group">
+                            <label>HTTP 代理</label>
+                            <input type="text" id="setting-http-proxy" placeholder="http://proxy.example.com:8080">
+                        </div>
+                        <div class="form-group">
+                            <label>请求超时（秒）</label>
+                            <input type="number" id="setting-request-timeout" value="30" min="5" max="300">
+                        </div>
+                    </div>
+                    <!-- 侧边栏 -->
+                    <div class="settings-panel" id="settings-tab-sidebar">
+                        <h4>📑 侧边栏设置</h4>
+                        <div class="form-group">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="setting-sidebar-visible" checked>
+                                <span class="toggle-slider"></span>
+                                显示侧边栏
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>侧边栏宽度（px）</label>
+                            <input type="range" id="setting-sidebar-width" min="180" max="300" value="220">
+                            <span id="setting-sidebar-width-val">220</span>px
+                        </div>
+                        <div class="form-group">
+                            <label>步骤显示</label>
+                            <div class="checkbox-group">
+                                <label><input type="checkbox" class="setting-step-visible" value="1" checked> 数据上传</label>
+                                <label><input type="checkbox" class="setting-step-visible" value="2" checked> 数据概览</label>
+                                <label><input type="checkbox" class="setting-step-visible" value="3" checked> 报表设计</label>
+                                <label><input type="checkbox" class="setting-step-visible" value="4" checked> 建模配置</label>
+                                <label><input type="checkbox" class="setting-step-visible" value="5" checked> 训练与评估</label>
+                                <label><input type="checkbox" class="setting-step-visible" value="6" checked> 结果可视化</label>
+                                <label><input type="checkbox" class="setting-step-visible" value="7" checked> AI 智能分析</label>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- 主题 -->
+                    <div class="settings-panel" id="settings-tab-theme">
+                        <h4>🎨 主题设置</h4>
+                        <div class="form-group">
+                            <label>配色模式</label>
+                            <div class="radio-group">
+                                <label><input type="radio" name="theme-mode" value="light" checked> ☀️ 亮色</label>
+                                <label><input type="radio" name="theme-mode" value="dark"> 🌙 暗色</label>
+                                <label><input type="radio" name="theme-mode" value="auto"> 🔄 跟随系统</label>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>主色调</label>
+                            <div class="color-picker-group">
+                                <button class="color-btn active" data-color="#2E86AB" style="background:#2E86AB"></button>
+                                <button class="color-btn" data-color="#1e5a75" style="background:#1e5a75"></button>
+                                <button class="color-btn" data-color="#A23B72" style="background:#A23B72"></button>
+                                <button class="color-btn" data-color="#28A745" style="background:#28A745"></button>
+                                <button class="color-btn" data-color="#F18F01" style="background:#F18F01"></button>
+                                <button class="color-btn" data-color="#C73E1D" style="background:#C73E1D"></button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>字体大小</label>
+                            <div class="radio-group">
+                                <label><input type="radio" name="font-size" value="small"> 小</label>
+                                <label><input type="radio" name="font-size" value="medium" checked> 中</label>
+                                <label><input type="radio" name="font-size" value="large"> 大</label>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>背景图片</label>
+                            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+                                <input type="file" id="setting-bg-file" accept="image/*" style="display:none;" onchange="onBgFileSelected(event)">
+                                <button class="btn btn-sm btn-secondary" onclick="document.getElementById('setting-bg-file').click()">
+                                    📁 上传图片
+                                </button>
+                                <button class="btn btn-sm btn-secondary" onclick="clearBgImage()">
+                                    ❌ 清除
+                                </button>
+                            </div>
+                            <input type="text" id="setting-bg-url" placeholder="或输入图片 URL" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+                            <div id="setting-bg-preview" style="margin-top:8px;height:80px;border-radius:6px;background-size:cover;background-position:center;border:1px solid var(--border);display:none;"></div>
+                        </div>
+                    </div>
+                    <!-- 系统 -->
+                    <div class="settings-panel" id="settings-tab-system">
+                        <h4>🔧 系统设置</h4>
+                        <div class="form-group">
+                            <label>界面语言</label>
+                            <select id="setting-language">
+                                <option value="zh-CN" selected>简体中文</option>
+                                <option value="en-US">English</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>默认日志级别</label>
+                            <select id="setting-log-level">
+                                <option value="DEBUG">DEBUG</option>
+                                <option value="INFO" selected>INFO</option>
+                                <option value="WARNING">WARNING</option>
+                                <option value="ERROR">ERROR</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="setting-auto-save" checked>
+                                <span class="toggle-slider"></span>
+                                自动保存配置
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="setting-performance-mode">
+                                <span class="toggle-slider"></span>
+                                性能模式（减少动画）
+                            </label>
+                        </div>
+                    </div>
+                    <!-- 备份与恢复 -->
+                    <div class="settings-panel" id="settings-tab-backup">
+                        <h4>💾 数据备份与恢复</h4>
+                        <div class="form-group">
+                            <p class="hint">导出当前所有配置、数据集元信息和训练结果为 JSON 文件。</p>
+                            <button class="btn btn-primary" onclick="exportBackup()">📥 导出备份</button>
+                        </div>
+                        <div class="form-group">
+                            <p class="hint">从 JSON 备份文件恢复配置和数据集元信息。</p>
+                            <input type="file" id="backup-file-input" accept=".json" hidden onchange="importBackup(this)">
+                            <button class="btn btn-primary" onclick="document.getElementById('backup-file-input').click()">📤 导入恢复</button>
+                        </div>
+                        <div class="form-group">
+                            <p class="hint">危险操作：清空所有本地数据（不可逆）。</p>
+                            <button class="btn btn-danger" onclick="clearAllData()">🗑️ 清空所有数据</button>
+                        </div>
+                    </div>
+                    <!-- 开发者密钥 -->
+                    <div class="settings-panel" id="settings-tab-apikey">
+                        <h4>🔑 开发者访问密钥</h4>
+                        <div class="form-group">
+                            <label>API Key</label>
+                            <div class="input-group">
+                                <input type="password" id="setting-api-key" readonly placeholder="点击生成获取密钥">
+                                <button class="btn btn-sm" onclick="toggleApiKeyVisibility()">👁️</button>
+                                <button class="btn btn-sm" onclick="copyApiKey()">📋</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <button class="btn btn-primary" onclick="generateApiKey()">🔄 生成新密钥</button>
+                            <button class="btn btn-danger" onclick="revokeApiKey()">🚫 撤销密钥</button>
+                        </div>
+                        <div class="form-group">
+                            <p class="hint">API Key 用于第三方应用或脚本访问平台接口。请妥善保管。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer settings-footer">
+                <button class="btn btn-secondary" onclick="closeSettingsPanel()">取消</button>
+                <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 本地模型选择弹窗 -->
+    <div id="model-browser-overlay" class="modal-overlay hidden" onclick="closeModelBrowser(event)">
+        <div class="modal-container model-browser" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3>📁 选择本地模型</h3>
+                <button class="btn btn-sm" onclick="closeModelBrowser()">✕</button>
+            </div>
+            <div class="modal-body">
+                <!-- 标签页切换 -->
+                <div class="model-browser-tabs">
+                    <button class="tab-btn active" data-tab="ollama" onclick="switchModelTab('ollama')">
+                        🦙 Ollama 已安装
+                    </button>
+                    <button class="tab-btn" data-tab="folder" onclick="switchModelTab('folder')">
+                        📂 本地文件夹
+                    </button>
+                </div>
+                
+                <!-- Ollama 已安装模型 -->
+                <div class="tab-panel active" id="tab-ollama">
+                    <div class="model-browser-toolbar">
+                        <button class="btn btn-primary btn-sm" onclick="refreshOllamaModels()">
+                            🔄 刷新列表
+                        </button>
+                        <span class="model-browser-hint" id="ollama-hint">点击刷新获取已安装模型</span>
+                    </div>
+                    <div class="model-list" id="ollama-model-list">
+                        <div class="model-list-empty">点击上方按钮获取模型列表</div>
+                    </div>
+                </div>
+                
+                <!-- 本地文件夹扫描 -->
+                <div class="tab-panel" id="tab-folder">
+                    <div class="model-browser-toolbar">
+                        <input type="text" id="local-model-path" placeholder="输入模型文件夹路径，如 C:\models" style="flex:1;">
+                        <button class="btn btn-primary btn-sm" onclick="scanLocalFolder()">
+                            🔍 扫描
+                        </button>
+                    </div>
+                    <div class="model-list" id="folder-model-list">
+                        <div class="model-list-empty">输入路径后点击扫描</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=2"></script>
+</body>
+</html>

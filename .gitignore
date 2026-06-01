@@ -1,0 +1,109 @@
+# ============================================================
+# Python
+# ============================================================
+
+# 字节码 / 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 测试与类型检查缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+ENV/
+
+# 打包 / 分发
+dist/
+build/
+*.egg-info/
+*.egg
+*.whl
+*.manifest
+*.spec
+pip-wheel-metadata/
+
+# ============================================================
+# 项目输出（大文件 / 临时文件 / 敏感文件）
+# ============================================================
+
+# 第三方依赖（vendor 目录，体积过大）
+third_party/
+
+# 数据 / 日志 / 数据库
+data/
+workspace/
+logs/
+cache/
+temp/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.tsv
+*.csv
+!test_data.csv
+
+# 压缩包 / 归档
+*.zip
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tar.xz
+*.rar
+*.7z
+
+# 模型 / 序列化文件
+*.joblib
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+*.safetensors
+catboost_info/
+
+# 环境变量 / 密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# ============================================================
+# IDE / 编辑器
+# ============================================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ============================================================
+# 系统文件
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================
+# 测试覆盖率
+# ============================================================
+coverage_html/
+.coverage
+htmlcov/
+.coverage.*
+nosetests.xml
+coverage.xml
