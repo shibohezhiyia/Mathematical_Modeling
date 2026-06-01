@@ -1,4 +1,4 @@
-# 智能图表 - 文档中心
+# Mathematical Modeling - 文档中心
 
 ## 文档索引
 
