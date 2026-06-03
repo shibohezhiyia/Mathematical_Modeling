@@ -257,7 +257,7 @@ class DriftDetector:
         new = new[common_cols]
 
         # 构建 train=0, test=1 的标签
-        X_combined = pd.concat([ref, new], ignore_index=True)
+        X_combined = pd.concat([ref, new], ignore_index=True, copy=False)
         y_combined = np.array([0] * len(ref) + [1] * len(new))
 
         # 编码类别特征

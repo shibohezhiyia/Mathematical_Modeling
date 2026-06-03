@@ -339,7 +339,7 @@ class TimeSeriesForecaster:
             predictions.append(pred)
             
             new_row[cfg.target_col] = pred
-            current = pd.concat([current, new_row], ignore_index=True)
+            current = pd.concat([current, new_row], ignore_index=True, copy=False)
         
         return predictions
     

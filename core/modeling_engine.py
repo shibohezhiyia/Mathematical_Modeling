@@ -2455,7 +2455,7 @@ class ModelingEngine:
         
         ensemble_fi = None
         if all_fi:
-            combined = pd.concat(all_fi)
+            combined = pd.concat(all_fi, copy=False)
             ensemble_fi = combined.groupby('feature')['importance'].mean().reset_index()
             ensemble_fi = ensemble_fi.sort_values('importance', ascending=False)
         
@@ -2494,8 +2494,8 @@ class ModelingEngine:
                     if task_type == TaskType.CLASSIFICATION and self._label_encoder is not None:
                         y_pseudo = self._label_encoder.transform(pd.Series(y_pseudo).astype(str))
                     
-                    X_combined = pd.concat([X_sel, X_pseudo], ignore_index=True)
-                    y_combined = pd.concat([pd.Series(y), pd.Series(y_pseudo)], ignore_index=True)
+                    X_combined = pd.concat([X_sel, X_pseudo], ignore_index=True, copy=False)
+                    y_combined = pd.concat([pd.Series(y), pd.Series(y_pseudo)], ignore_index=True, copy=False)
                     best_model.fit(X_combined, y_combined)
                     
                     # 更新最佳模型的最后一个 fold 模型为增强版

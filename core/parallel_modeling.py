@@ -870,7 +870,7 @@ class ParallelModelingEngine:
         if not all_fi:
             return pd.DataFrame()
         
-        combined = pd.concat(all_fi)
+        combined = pd.concat(all_fi, copy=False)
         ensemble = combined.groupby('feature')['importance'].mean().reset_index()
         ensemble = ensemble.sort_values('importance', ascending=False).head(top_n)
         

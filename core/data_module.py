@@ -189,7 +189,7 @@ class DataLoader:
                 return pd.DataFrame()
             
             # 合并所有分块
-            df = pd.concat(chunks, axis=0, ignore_index=True)
+            df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
             
             # 内存优化
             from core.accelerators import optimize_memory
@@ -204,7 +204,7 @@ class DataLoader:
             chunks = []
             for chunk in progress_iter(reader(file_path, **default_kwargs), desc="读取", disable=not verbose):
                 chunks.append(chunk)
-            df = pd.concat(chunks, axis=0, ignore_index=True)
+            df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
             from core.accelerators import optimize_memory
             df = optimize_memory(df, verbose=verbose)
             return df
@@ -221,7 +221,7 @@ class DataLoader:
             df = self.load(fp, **kwargs)
             dfs.append(df)
         
-        combined = pd.concat(dfs, axis=concat_axis, ignore_index=(concat_axis == 0))
+        combined = pd.concat(dfs, axis=concat_axis, ignore_index=(concat_axis == 0), copy=False)
         log_info(f"合并后数据形状: {combined.shape}")
         return combined
 
