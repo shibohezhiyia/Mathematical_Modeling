@@ -1635,6 +1635,44 @@ class CrossValidator:
         elif self.fold_type == 'time':
             from sklearn.model_selection import TimeSeriesSplit
             kfold = TimeSeriesSplit(n_splits=self.n_splits)
+        elif self.fold_type == 'repeated':
+            # 重复交叉验证：多次KFold取平均，降低方差
+            from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
+            if task_type == TaskType.CLASSIFICATION:
+                y_series = pd.Series(y).reset_index(drop=True)
+                min_class_count = y_series.value_counts().min() if len(y_series) > 0 else 0
+                if min_class_count >= 2:
+                    kfold = RepeatedStratifiedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
+                else:
+                    kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
+            else:
+                kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
+        elif self.fold_type == 'repeated':
+            # 重复交叉验证：多次KFold取平均，降低方差
+            from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
+            if task_type == TaskType.CLASSIFICATION:
+                y_series = pd.Series(y).reset_index(drop=True)
+                min_class_count = y_series.value_counts().min() if len(y_series) > 0 else 0
+                if min_class_count >= 2:
+                    kfold = RepeatedStratifiedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
+                else:
+                    kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
+            else:
+                kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
+        elif self.fold_type == 'stratified':
+            # 显式分层KFold（类别不平衡数据优化）
+            y_series = pd.Series(y).reset_index(drop=True)
+            min_class_count = y_series.value_counts().min() if len(y_series) > 0 else 0
+            effective_splits = min(self.n_splits, max(2, int(min_class_count)))
+            if effective_splits < self.n_splits:
+                log_warning(f"[CrossValidator] 分层KFold自动降折数: {self.n_splits} → {effective_splits}")
+            if min_class_count < 2:
+                log_warning(f"[CrossValidator] 某类别仅{min_class_count}样本，回退到KFold")
+                kfold = KFold(n_splits=max(2, min(self.n_splits, len(y_series)//2)), shuffle=self.shuffle,
+                             random_state=self.random_state)
+            else:
+                kfold = StratifiedKFold(n_splits=effective_splits, shuffle=self.shuffle, 
+                                        random_state=self.random_state)
         elif task_type == TaskType.CLASSIFICATION:
             # 检查最小类别样本数，避免StratifiedKFold因某类样本不足而报错
             y_series = pd.Series(y).reset_index(drop=True)
