@@ -70,7 +70,32 @@ KERNEL_APPROX_COMPONENTS = 512
 
 
 def _create_kernel_approximation(X_tr, X_val, orig_kernel, kernel_params, n_components: int = KERNEL_APPROX_COMPONENTS):
-    """Create approximate kernel feature maps for large datasets."""
+    """
+    Create approximate kernel feature maps for large datasets.
+    
+    自适应 n_components：根据数据有效秩（effective rank）调整组件数，
+    避免过度近似或不足近似。
+    """
+    # 自适应调整 n_components
+    n_samples = X_tr.shape[0]
+    n_features = X_tr.shape[1]
+    
+    # 计算有效秩：基于数据的奇异值衰减
+    if n_samples > 100 and n_features > 10:
+        try:
+            # 使用随机 SVD 快速估计有效秩
+            from sklearn.utils.extmath import randomized_svd
+            U, S, Vt = randomized_svd(X_tr.values, n_components=min(50, n_samples, n_features), random_state=42)
+            # 有效秩：累积奇异值能量达到 90% 的位置
+            total_energy = np.sum(S ** 2)
+            cumsum = np.cumsum(S ** 2)
+            effective_rank = np.searchsorted(cumsum, 0.9 * total_energy) + 1
+            # 自适应 n_components：有效秩的 1.5~3 倍，但不超过样本数的 1/4
+            adaptive_n = min(max(int(effective_rank * 2), 128), n_samples // 4, KERNEL_APPROX_COMPONENTS)
+            n_components = min(n_components, adaptive_n)
+        except Exception:
+            pass
+    
     if orig_kernel == 'rbf':
         transformer = RBFSampler(
             gamma=kernel_params.get('gamma', 1.0),
@@ -1826,7 +1851,7 @@ class EnsembleBuilder:
         }
     
     def _compute_weights(self, cv_results: List[CVResult], task_type: TaskType) -> np.ndarray:
-        """基于CV分数计算权重"""
+        """基于CV分数计算权重，添加负相关惩罚（diversity bonus）"""
         if task_type == TaskType.CLASSIFICATION:
             scores = [r.mean_scores.get('f1_weighted', r.mean_scores.get('accuracy', 0.5)) 
                      for r in cv_results]
@@ -1845,7 +1870,50 @@ class EnsembleBuilder:
                 scores = [0.6 * max(s, 0) + 0.4 * inv for s, inv in zip(scores, inv_rmse)]
         
         scores = np.array([max(s, 0.01) for s in scores])
-        return scores / scores.sum()
+        
+        # 负相关惩罚：如果模型间预测高度相关，降低其权重
+        # 鼓励选择 diverse 的模型组合
+        n_models = len(cv_results)
+        if n_models > 1:
+            # 收集每个模型最后一个 fold 的 OOF 预测
+            oof_preds = []
+            for r in cv_results:
+                if r.oof_predictions is not None and len(r.oof_predictions) > 0:
+                    oof_preds.append(np.asarray(r.oof_predictions).ravel())
+            
+            if len(oof_preds) > 1:
+                # 计算模型间预测相关性矩阵
+                corr_penalty = np.zeros(n_models)
+                for i in range(n_models):
+                    if i >= len(oof_preds):
+                        continue
+                    # 计算该模型与其他模型的平均绝对相关性
+                    corrs = []
+                    for j in range(len(oof_preds)):
+                        if i == j:
+                            continue
+                        # 皮尔逊相关系数
+                        p_i = oof_preds[i]
+                        p_j = oof_preds[j]
+                        min_len = min(len(p_i), len(p_j))
+                        if min_len < 2:
+                            continue
+                        c = np.corrcoef(p_i[:min_len], p_j[:min_len])[0, 1]
+                        if not np.isnan(c):
+                            corrs.append(abs(c))
+                    if corrs:
+                        avg_corr = np.mean(corrs)
+                        # 相关性越高，惩罚越大（最多降低 30% 权重）
+                        corr_penalty[i] = 0.3 * avg_corr
+                
+                # 应用惩罚：权重与 (1 - corr_penalty) 成正比
+                scores = scores * (1.0 - corr_penalty)
+        
+        # 重新归一化
+        total = scores.sum()
+        if total > 0:
+            return scores / total
+        return np.ones(n_models) / n_models
     
     def _blend_test(self, cv_results: List[CVResult], X_test: pd.DataFrame,
                     weights: np.ndarray, task_type: TaskType) -> np.ndarray:

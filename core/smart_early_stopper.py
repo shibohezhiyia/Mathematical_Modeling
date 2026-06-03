@@ -66,6 +66,11 @@ class SmartEarlyStopConfig:
     fold: FoldEarlyStopConfig = field(default_factory=FoldEarlyStopConfig)
     model: ModelEarlyStopConfig = field(default_factory=ModelEarlyStopConfig)
     direction: str = 'maximize'       # 'maximize' 或 'minimize'
+    # 新增：多目标早停配置（精度+速度权衡）
+    multi_objective: bool = False
+    time_weight: float = 0.3        # 时间在综合评分中的权重
+    score_weight: float = 0.7         # 分数在综合评分中的权重
+    max_time_per_trial: Optional[float] = None  # 每个 trial 最大时间（秒）
 
 
 class TrialEarlyStopper:
@@ -86,6 +91,8 @@ class TrialEarlyStopper:
         self.direction = direction
         self.scores: List[float] = []
         self._stopped_trials: int = 0
+        # 新增：概率性早停的历史记录
+        self._prob_history: List[float] = []
     
     def should_stop(self, current_score: float) -> tuple:
         """
@@ -125,6 +132,29 @@ class TrialEarlyStopper:
                 if not is_better:
                     self._stopped_trials += 1
                     return True, StopReason.ABSOLUTE_THRESHOLD
+        
+        # 概率性早停：基于历史分布计算当前 trial 的 p-value
+        # 如果当前分数显著差（p < 0.1），以概率方式早停，避免过度保守
+        if len(scores) >= 10:
+            from scipy import stats
+            if self.direction == 'maximize':
+                # 计算当前分数在历史分布中的百分位
+                percentile = stats.percentileofscore(scores, current_score, kind='rank')
+                # 如果低于 10% 分位，以 50% 概率早停
+                if percentile < 10:
+                    prob = 0.5 + (10 - percentile) / 20  # 10% -> 0.5, 0% -> 1.0
+                    self._prob_history.append(prob)
+                    if len(self._prob_history) > 1 and np.random.random() < prob:
+                        self._stopped_trials += 1
+                        return True, StopReason.TRIAL_PERCENTILE
+            else:
+                percentile = 100 - stats.percentileofscore(scores, current_score, kind='rank')
+                if percentile < 10:
+                    prob = 0.5 + (10 - percentile) / 20
+                    self._prob_history.append(prob)
+                    if len(self._prob_history) > 1 and np.random.random() < prob:
+                        self._stopped_trials += 1
+                        return True, StopReason.TRIAL_PERCENTILE
         
         return False, StopReason.NONE
     
@@ -353,14 +383,58 @@ class SmartEarlyStopper:
             self.config.fold, self.config.direction
         )
         self.model_stopper = ModelEarlyStopper(self.config.model)
+        
+        # 多目标早停追踪
+        self._trial_start_time: Optional[float] = None
+        self._trial_scores: List[float] = []
+        self._trial_times: List[float] = []
     
     # -------------------------------------------------------------------------
     # Trial 级接口
     # -------------------------------------------------------------------------
     
+    def trial_start(self) -> None:
+        """标记 trial 开始（用于多目标时间追踪）"""
+        self._trial_start_time = time.time()
+        self._trial_scores.clear()
+        self._trial_times.clear()
+    
     def trial_check(self, current_score: float) -> tuple:
-        """检查 trial 是否应该早停"""
-        return self.trial_stopper.should_stop(current_score)
+        """
+        检查 trial 是否应该早停
+        
+        支持多目标：如果启用了 multi_objective，同时考虑时间成本。
+        """
+        # 标准单目标早停
+        should_stop, reason = self.trial_stopper.should_stop(current_score)
+        if should_stop:
+            return True, reason
+        
+        # 多目标早停：考虑时间成本
+        if self.config.multi_objective and self._trial_start_time is not None:
+            elapsed = time.time() - self._trial_start_time
+            self._trial_scores.append(current_score)
+            self._trial_times.append(elapsed)
+            
+            if len(self._trial_scores) >= 3 and self.config.max_time_per_trial is not None:
+                # 计算边际收益：每单位时间带来的分数提升
+                recent_scores = np.array(self._trial_scores[-3:])
+                recent_times = np.array(self._trial_times[-3:])
+                
+                if self.config.direction == 'maximize':
+                    score_gain = recent_scores[-1] - recent_scores[0]
+                else:
+                    score_gain = recent_scores[0] - recent_scores[-1]
+                
+                time_cost = recent_times[-1] - recent_times[0]
+                
+                if time_cost > 0:
+                    marginal_improvement = score_gain / time_cost
+                    # 如果边际收益低于阈值且已超时的 50%，概率性早停
+                    if marginal_improvement < 1e-4 and elapsed > self.config.max_time_per_trial * 0.5:
+                        return True, StopReason.TRIAL_MEDIAN
+        
+        return False, StopReason.NONE
     
     def trial_report(self, score: float) -> None:
         """报告 trial 最终分数"""
