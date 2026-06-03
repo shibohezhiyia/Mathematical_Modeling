@@ -210,7 +210,25 @@ class OTReweighter(BaseEstimator):
         reg = 1e-3
         K_ss_reg = K_ss + reg * np.eye(n_source)
         try:
-            weights = np.linalg.solve(K_ss_reg, kappa)
+            # 数值稳定性：正则化 + 条件数检查
+            n = K_ss.shape[0]
+            K_ss_reg = K_ss + 1e-6 * np.eye(n)
+            try:
+                # 检查矩阵条件数
+                s = np.linalg.svd(K_ss_reg, compute_uv=False)
+                if s[-1] > 0:
+                    cond = s[0] / s[-1]
+                    if cond < 1e12:
+                        # 条件良好，直接求解
+                        weights = np.linalg.solve(K_ss_reg, kappa)
+                    else:
+                        # 条件数过高，使用最小二乘
+                        weights = np.linalg.lstsq(K_ss_reg, kappa, rcond=None)[0]
+                else:
+                    # 完全奇异，回退到伪逆
+                    weights = np.linalg.pinv(K_ss_reg) @ kappa
+            except np.linalg.LinAlgError:
+                weights = np.linalg.pinv(K_ss_reg) @ kappa
         except np.linalg.LinAlgError:
             weights = np.ones(n_source)
 

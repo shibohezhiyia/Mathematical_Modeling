@@ -543,8 +543,8 @@ class IntegratedPipeline:
         
         if r.feature_importance is not None and not r.feature_importance.empty:
             print(f"\n【Top 10 重要特征】")
-            for _, row in r.feature_importance.head(10).iterrows():
-                print(f"  {row['feature']:30s}: {row['importance']:.4f}")
+            for row in r.feature_importance.head(10).itertuples(index=False):
+                print(f"  {row.feature:30s}: {row.importance:.4f}")
         
         print("\n" + "=" * 70)
     

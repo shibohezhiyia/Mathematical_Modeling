@@ -264,8 +264,8 @@ class ExplainabilityEngine:
         for model_key, model in models.items():
             fi = self._get_builtin_importance(model, fnames)
             if fi is not None:
-                for _, row in fi.iterrows():
-                    all_importance[row['feature']][model_key] = row['importance']
+                for row in fi.itertuples(index=False):
+                    all_importance[row.feature][model_key] = row.importance
         
         rows = []
         for feat, scores in all_importance.items():
@@ -300,8 +300,8 @@ class ExplainabilityEngine:
         
         if explanation.global_importance is not None and not explanation.global_importance.empty:
             lines.append(f"\n【全局特征重要性 (Top {self.max_display})】")
-            for _, row in explanation.global_importance.head(self.max_display).iterrows():
-                lines.append(f"  {row['feature']:30s}: {row['importance']:.4f}")
+            for row in explanation.global_importance.head(self.max_display).itertuples(index=False):
+                lines.append(f"  {row.feature:30s}: {row.importance:.4f}")
         
         report_text = "\n".join(lines)
         

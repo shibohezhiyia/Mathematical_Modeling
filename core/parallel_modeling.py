@@ -896,8 +896,8 @@ class ParallelModelingEngine:
         fi = self.get_feature_importance_ensemble(top_n=10)
         if not fi.empty:
             print(f"\nTop 10 重要特征:")
-            for _, row in fi.iterrows():
-                print(f"  {row['feature']:30s}: {row['importance']:.4f}")
+            for row in fi.itertuples(index=False):
+                print(f"  {row.feature:30s}: {row.importance:.4f}")
         
         print("\n" + "=" * 70)
 
