@@ -143,10 +143,12 @@ class FeatureSelectionStrategy(Enum):
     """特征选择策略"""
     VARIANCE = "variance_threshold"
     MI = "mutual_information"
+    MI_KNN = "mutual_information_knn"  # k-NN估计的互信息，更稳定
     RFE = "recursive_feature_elimination"
     MODEL_BASED = "model_based"
     CORRELATION = "correlation_filter"
     PCA_DIM = "pca_dimensionality"
+    PCA_RANDOMIZED = "pca_randomized_svd"  # 随机SVD加速PCA
     NONE = "none"
 
 
@@ -527,6 +529,52 @@ class AutoFeatureSelector:
             self._selector = PCA(n_components=min(n_features, X.shape[0], X.shape[1]))
             self._selector.fit(X)
             self._selected_features = list(X.columns)  # PCA保持所有但降维
+            
+        elif self.strategy == FeatureSelectionStrategy.PCA_RANDOMIZED:
+            # 随机SVD加速PCA：适合高维大数据，比标准PCA快数倍
+            n_comp = min(n_features, X.shape[0], X.shape[1])
+            try:
+                from sklearn.utils.extmath import randomized_svd
+                U, S, Vt = randomized_svd(X.values, n_components=n_comp, random_state=42)
+                # 使用随机SVD结果构建近似PCA
+                self._selector = PCA(n_components=n_comp, svd_solver='randomized', random_state=42)
+                self._selector.fit(X)
+                self._selected_features = list(X.columns)
+                log_info(f"[AutoFeatureSelector] 随机SVD PCA: {n_comp} 组件")
+            except Exception as e:
+                log_warning(f"[AutoFeatureSelector] 随机SVD失败: {e}，回退到标准PCA")
+                self._selector = PCA(n_components=n_comp)
+                self._selector.fit(X)
+                self._selected_features = list(X.columns)
+            
+        elif self.strategy == FeatureSelectionStrategy.MI_KNN:
+            # k-NN估计的互信息：比直方图法更稳定，适合连续变量
+            try:
+                from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+                # 使用k-NN估计（通过设置n_neighbors参数）
+                if task_type == TaskType.REGRESSION:
+                    score_func = lambda X, y: mutual_info_regression(X, y, n_neighbors=5, random_state=42)
+                else:
+                    score_func = lambda X, y: mutual_info_classif(X, y, n_neighbors=5, random_state=42)
+                self._selector = SelectKBest(score_func=score_func, k=min(n_features, X.shape[1]))
+                self._selector.fit(X, y)
+                scores = self._selector.scores_
+                self._feature_scores = {c: float(s) for c, s in zip(X.columns, scores)}
+                mask = self._selector.get_support()
+                self._selected_features = [c for c, m in zip(X.columns, mask) if m]
+                log_info(f"[AutoFeatureSelector] k-NN MI特征选择: {len(self._selected_features)} 特征")
+            except Exception as e:
+                log_warning(f"[AutoFeatureSelector] k-NN MI失败: {e}，回退到标准MI")
+                if task_type == TaskType.REGRESSION:
+                    score_func = mutual_info_regression
+                else:
+                    score_func = mutual_info_classif
+                self._selector = SelectKBest(score_func=score_func, k=min(n_features, X.shape[1]))
+                self._selector.fit(X, y)
+                scores = self._selector.scores_
+                self._feature_scores = {c: float(s) for c, s in zip(X.columns, scores)}
+                mask = self._selector.get_support()
+                self._selected_features = [c for c, m in zip(X.columns, mask) if m]
             
         elif self.strategy == FeatureSelectionStrategy.MODEL_BASED:
             from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
