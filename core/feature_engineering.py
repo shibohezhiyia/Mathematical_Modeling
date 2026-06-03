@@ -278,15 +278,15 @@ class AutoFeatureEngineer(BaseEstimator, TransformerMixin):
             for c1, c2, op in candidates:
                 try:
                     if op == 'add':
-                        v = X[c1] + X[c2]
+                        v = X[c1].values + X[c2].values
                     elif op == 'sub':
-                        v = X[c1] - X[c2]
+                        v = X[c1].values - X[c2].values
                     elif op == 'mul':
-                        v = X[c1] * X[c2]
+                        v = X[c1].values * X[c2].values
                     else:
-                        v = X[c1] / X[c2].replace(0, np.nan)
-                    corr = v.corr(y)
-                    scores.append(abs(corr) if pd.notna(corr) else 0)
+                        v = X[c1].values / np.where(X[c2].values == 0, np.nan, X[c2].values)
+                    corr = np.corrcoef(v, y.values)[0, 1] if len(v) == len(y) else 0.0
+                    scores.append(abs(corr) if not np.isnan(corr) else 0)
                 except Exception:
                     scores.append(0)
             # 按绝对相关性排序取 top
@@ -298,17 +298,14 @@ class AutoFeatureEngineer(BaseEstimator, TransformerMixin):
         return pairs
 
     def _fit_target_encoding(self, series: pd.Series, y: pd.Series) -> Dict[Any, float]:
-        """计算目标编码映射（全局均值 + 平滑）"""
+        """计算目标编码映射（全局均值 + 平滑）—— 向量化实现"""
         global_mean = y.mean()
-        mapping = {}
-        for val in series.dropna().unique():
-            mask = series == val
-            n = mask.sum()
-            local_mean = y[mask].mean()
-            # 平滑
-            smoothing = self.te_smoothing
-            mapping[val] = (n * local_mean + smoothing * global_mean) / (n + smoothing)
-        return mapping
+        # 使用 groupby 向量化计算，避免 Python 级循环
+        grouped = y.groupby(series).agg(['mean', 'count'])
+        # 平滑公式：(n * local_mean + smoothing * global_mean) / (n + smoothing)
+        smoothing = self.te_smoothing
+        smoothed = (grouped['count'] * grouped['mean'] + smoothing * global_mean) / (grouped['count'] + smoothing)
+        return smoothed.to_dict()
 
     def get_feature_names_out(self, input_features=None):
         # 简化：返回 transform 后的列名
@@ -371,10 +368,7 @@ class KFoldTargetEncoder(BaseEstimator, TransformerMixin):
 
     def _compute_map(self, series: pd.Series, y: pd.Series) -> Dict[Any, float]:
         global_mean = y.mean()
-        mapping = {}
-        for val in series.dropna().unique():
-            mask = series == val
-            n = mask.sum()
-            local_mean = y[mask].mean()
-            mapping[val] = (n * local_mean + self.smoothing * global_mean) / (n + self.smoothing)
-        return mapping
+        # Vectorized using groupby — O(n_unique) loop → O(n log n) vectorized
+        grouped = y.groupby(series).agg(['mean', 'count'])
+        smoothed = (grouped['count'] * grouped['mean'] + self.smoothing * global_mean) / (grouped['count'] + self.smoothing)
+        return smoothed.to_dict()

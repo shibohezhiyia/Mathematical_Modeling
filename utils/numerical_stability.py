@@ -165,29 +165,35 @@ def stable_ensemble_weights(scores: np.ndarray,
     # 基础权重：softmax 平滑化
     weights = softmax_with_temperature(scores, temperature=0.5)
     
-    # 如果提供了相关性矩阵，应用多样性调整
+    # 如果提供了相关性矩阵，应用多样性调整（向量化避免 O(n²) Python 循环）
     if correlations is not None and correlations.ndim == 2:
         n = len(scores)
-        for i in range(n):
-            # 计算该模型与其他高权重模型的平均相关性
-            for j in range(n):
-                if i != j and weights[j] > 0.1:
-                    corr = abs(correlations[i, j])
-                    # 高相关性降低权重
-                    weights[i] *= (1.0 - diversity_penalty * corr)
-        
-        # 重新归一化
-        weights = np.maximum(weights, 0.01)  # 最小权重保护
-        weights = weights / weights.sum()
+        # 创建高权重掩码
+        high_weight_mask = weights > 0.1
+        if np.any(high_weight_mask):
+            # 向量化：对每一行，计算与所有高权重模型的平均相关性
+            # 只考虑上三角（排除对角线自相关）
+            corr_abs = np.abs(correlations)
+            np.fill_diagonal(corr_abs, 0.0)
+            # 只保留高权重模型的列
+            masked_corr = np.where(high_weight_mask, corr_abs, 0.0)
+            # 计算每个模型与其他高权重模型的平均相关性
+            avg_corr = masked_corr.sum(axis=1) / np.maximum(high_weight_mask.sum(), 1)
+            # 高相关性降低权重
+            weights *= (1.0 - diversity_penalty * avg_corr)
+            
+            # 重新归一化
+            weights = np.maximum(weights, 0.01)  # 最小权重保护
+            weights = weights / weights.sum()
     
     return weights
 
 
 def stable_variance(x: np.ndarray, ddof: int = 1) -> float:
     """
-    稳定的方差计算（Welford 算法）
+    稳定的方差计算
     
-    比 np.var 更数值稳定，特别适用于大数据量
+    小数组（<=10000）使用 numpy 高效计算；大数组使用 Welford 算法保证数值稳定性。
     """
     x = np.asarray(x, dtype=np.float64)
     n = len(x)
@@ -195,6 +201,11 @@ def stable_variance(x: np.ndarray, ddof: int = 1) -> float:
     if n <= ddof:
         return 0.0
     
+    # 小数组直接用 numpy（C 级实现，更快）
+    if n <= 10000:
+        return float(np.var(x, ddof=ddof))
+    
+    # 大数组使用 Welford 算法（避免数值溢出）
     mean = 0.0
     M2 = 0.0
     

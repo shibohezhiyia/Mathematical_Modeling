@@ -228,8 +228,10 @@ def fast_mutual_info(X: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
     比 sklearn 的 mutual_info_regression 更快，适合大批量特征筛选
     """
     # 将连续变量分箱
-    x_binned = np.digitize(X, np.histogram_bin_edges(X, bins=n_bins))
-    y_binned = np.digitize(y, np.histogram_bin_edges(y, bins=n_bins))
+    x_edges = np.histogram_bin_edges(X, bins=n_bins)
+    y_edges = np.histogram_bin_edges(y, bins=n_bins)
+    x_binned = np.digitize(X, x_edges)
+    y_binned = np.digitize(y, y_edges)
     
     # 联合直方图
     joint_hist, _, _ = np.histogram2d(x_binned, y_binned, bins=n_bins)
@@ -239,11 +241,18 @@ def fast_mutual_info(X: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
     x_prob = joint_prob.sum(axis=1)
     y_prob = joint_prob.sum(axis=0)
     
-    # 互信息
-    mi = 0.0
-    for i in range(n_bins):
-        for j in range(n_bins):
-            if joint_prob[i, j] > 0 and x_prob[i] > 0 and y_prob[j] > 0:
-                mi += joint_prob[i, j] * np.log(joint_prob[i, j] / (x_prob[i] * y_prob[j]))
+    # 互信息 - 向量化计算（避免 Python 嵌套循环）
+    # 只计算非零项
+    mask = joint_prob > 0
+    x_prob_safe = np.where(x_prob > 0, x_prob, 1.0)
+    y_prob_safe = np.where(y_prob > 0, y_prob, 1.0)
+    
+    # 广播得到联合分母
+    denom = np.outer(x_prob_safe, y_prob_safe)
+    denom = np.where(denom > 0, denom, 1.0)
+    
+    mi_vals = np.zeros_like(joint_prob)
+    mi_vals[mask] = joint_prob[mask] * np.log(joint_prob[mask] / denom[mask])
+    mi = mi_vals.sum()
     
     return max(0.0, mi)

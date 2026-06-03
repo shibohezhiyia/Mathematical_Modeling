@@ -167,8 +167,11 @@ class DriftDetector:
         pvalues = []
 
         for col in self._num_cols:
-            ref_vals = self._reference[col].dropna()
-            new_vals = X[col].dropna() if col in X.columns else pd.Series([], dtype=float)
+            ref_vals = self._reference[col].dropna().values
+            if col in X.columns:
+                new_vals = X[col].dropna().values
+            else:
+                new_vals = np.array([], dtype=float)
             if len(ref_vals) == 0 or len(new_vals) == 0:
                 continue
             stat, pvalue = stats.ks_2samp(ref_vals, new_vals)
@@ -197,14 +200,14 @@ class DriftDetector:
         )
 
     def _detect_psi(self, X: pd.DataFrame, bins: int = 10) -> DriftReport:
-        """PSI（Population Stability Index）"""
+        """PSI（Population Stability Index）——向量化实现"""
         feature_scores = {}
         total_psi = 0.0
         valid_cols = 0
 
         for col in self._num_cols:
-            ref_vals = self._reference[col].dropna()
-            new_vals = X[col].dropna() if col in X.columns else pd.Series([], dtype=float)
+            ref_vals = self._reference[col].dropna().values
+            new_vals = X[col].dropna().values if col in X.columns else np.array([], dtype=float)
             if len(ref_vals) == 0 or len(new_vals) == 0:
                 continue
 
@@ -219,12 +222,13 @@ class DriftDetector:
             ref_pct = ref_counts / ref_counts.sum()
             new_pct = new_counts / new_counts.sum()
 
-            # 避免除零
+            # 避免除零：向量化 clamp
             ref_pct = np.where(ref_pct == 0, 1e-10, ref_pct)
             new_pct = np.where(new_pct == 0, 1e-10, new_pct)
 
-            psi = np.sum((new_pct - ref_pct) * np.log(new_pct / ref_pct))
-            feature_scores[col] = float(psi)
+            # 向量化 PSI 计算
+            psi = float(np.sum((new_pct - ref_pct) * np.log(new_pct / ref_pct)))
+            feature_scores[col] = psi
             total_psi += psi
             valid_cols += 1
 
@@ -299,20 +303,23 @@ class DriftDetector:
         )
 
     def _detect_wasserstein(self, X: pd.DataFrame) -> DriftReport:
-        """Wasserstein Distance（最优传输距离）"""
+        """Wasserstein Distance（最优传输距离）——原地标准化避免内存拷贝"""
         feature_scores = {}
         total_wd = 0.0
         valid_cols = 0
 
         for col in self._num_cols:
-            ref_vals = self._reference[col].dropna()
-            new_vals = X[col].dropna() if col in X.columns else pd.Series([], dtype=float)
+            ref_vals = self._reference[col].dropna().values
+            new_vals = X[col].dropna().values if col in X.columns else np.array([], dtype=float)
             if len(ref_vals) == 0 or len(new_vals) == 0:
                 continue
 
-            # 标准化后计算 Wasserstein-1 距离
+            # 原地标准化后计算 Wasserstein-1 距离，避免创建新数组
             ref_std = ref_vals.std() or 1.0
-            wd = stats.wasserstein_distance(ref_vals / ref_std, new_vals / ref_std)
+            if ref_std != 1.0:
+                ref_vals = ref_vals / ref_std
+                new_vals = new_vals / ref_std
+            wd = stats.wasserstein_distance(ref_vals, new_vals)
             feature_scores[col] = float(wd)
             total_wd += wd
             valid_cols += 1

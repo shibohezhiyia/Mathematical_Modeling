@@ -230,21 +230,21 @@ class AutoResidualStacker:
         return self.best_estimator_.predict_components(X)
 
     def _cv_score(self, estimator, X: pd.DataFrame, y: np.ndarray) -> float:
-        """交叉验证评估"""
+        """交叉验证评估（使用多进程加速）"""
         from sklearn.model_selection import cross_val_score
         if self.metric == 'rmse':
             scores = cross_val_score(estimator, X, y, cv=self.cv,
                                      scoring='neg_root_mean_squared_error',
-                                     n_jobs=1)
+                                     n_jobs=-1)
             return -scores.mean()
         elif self.metric == 'mae':
             scores = cross_val_score(estimator, X, y, cv=self.cv,
                                      scoring='neg_mean_absolute_error',
-                                     n_jobs=1)
+                                     n_jobs=-1)
             return -scores.mean()
         elif self.metric == 'r2':
             scores = cross_val_score(estimator, X, y, cv=self.cv,
-                                     scoring='r2', n_jobs=1)
+                                     scoring='r2', n_jobs=-1)
             return -scores.mean()  # 统一按越小越好
         else:
             raise ValueError(f"未知指标: {self.metric}")
