@@ -2046,18 +2046,32 @@ class EnsembleBuilder:
         """
         训练 stacking 元学习器
         
-        使用OOF预测作为元特征，训练一个简单线性模型
+        优化：使用 RidgeCV 自动选择正则化强度，添加多项式特征捕捉非线性交互。
         """
         if self.meta_model is None:
             if task_type == TaskType.CLASSIFICATION:
-                from sklearn.linear_model import LogisticRegression
-                self.meta_model = LogisticRegression(max_iter=1000, C=1.0)
+                from sklearn.linear_model import LogisticRegressionCV
+                self.meta_model = LogisticRegressionCV(
+                    Cs=10, cv=3, max_iter=1000, scoring='f1_weighted' if task_type == TaskType.CLASSIFICATION else 'r2',
+                    random_state=42
+                )
             else:
-                from sklearn.linear_model import Ridge
-                self.meta_model = Ridge(alpha=1.0)
+                from sklearn.linear_model import RidgeCV
+                self.meta_model = RidgeCV(alphas=np.logspace(-3, 3, 13), cv=3)
         
         # 构建元特征
         meta_features = np.column_stack([r.oof_pred for r in cv_results])
+        
+        # 新增：添加多项式特征（捕捉模型间的非线性交互）
+        if meta_features.shape[1] >= 2 and meta_features.shape[1] <= 20:
+            from sklearn.preprocessing import PolynomialFeatures
+            self._poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+            meta_features_poly = self._poly.fit_transform(meta_features)
+            # 限制特征数避免过拟合
+            if meta_features_poly.shape[1] <= 100:
+                meta_features = meta_features_poly
+                log_info(f"[EnsembleBuilder] Stacking 使用多项式特征: {meta_features.shape[1]} 维")
+        
         self.meta_model.fit(meta_features, y)
         self._meta_fitted = True
         
