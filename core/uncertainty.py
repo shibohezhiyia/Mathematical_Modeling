@@ -274,12 +274,9 @@ class ConformalPredictor:
         proba = self.model_.predict_proba(X)
         classes = self.model_.classes_
 
-        result_sets = []
-        for i in range(len(X)):
-            # 包含所有满足 1 - p_y <= q_hat 的类别
-            # 即 p_y >= 1 - q_hat
-            included = classes[proba[i] >= (1 - self.q_hat_)]
-            result_sets.append(set(included))
+        # 向量化：列表推导式替代显式循环
+        threshold = 1 - self.q_hat_
+        result_sets = [set(classes[p >= threshold]) for p in proba]
         return result_sets
 
     def predict_with_interval(self, X: Union[pd.DataFrame, np.ndarray]) -> Dict[str, np.ndarray]:
