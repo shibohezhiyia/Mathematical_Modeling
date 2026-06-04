@@ -103,31 +103,26 @@ def _correlation_report(df: pd.DataFrame, target_col: Optional[str] = None) -> D
     if numeric_df.shape[1] < 2:
         return {'high_correlation_pairs': [], 'target_correlations': []}
     corr = numeric_df.corr().abs()
-    # High correlation pairs (|r| > 0.95)
-    pairs = []
-    cols = corr.columns.tolist()
-    for i in range(len(cols)):
-        for j in range(i + 1, len(cols)):
-            r = corr.iloc[i, j]
-            if r > 0.95:
-                pairs.append({
-                    'col1': cols[i],
-                    'col2': cols[j],
-                    'correlation': round(float(r), 4)
-                })
-    # Target correlations
+    # High correlation pairs (|r| > 0.95) — 向量化提取上三角
+    mask = (corr.values > 0.95) & np.triu(np.ones_like(corr, dtype=bool), k=1)
+    rows, cols_idx = np.where(mask)
+    pairs = [
+        {
+            'col1': corr.index[i],
+            'col2': corr.columns[j],
+            'correlation': round(float(corr.iloc[i, j]), 4)
+        }
+        for i, j in zip(rows, cols_idx)
+    ]
+    # Target correlations — 向量化：直接从 corr 矩阵提取
     target_cors = []
     if target_col and target_col in numeric_df.columns:
-        target_series = numeric_df[target_col]
-        for col in numeric_df.columns:
-            if col == target_col:
-                continue
-            r = numeric_df[col].corr(target_series)
-            if not np.isnan(r):
-                target_cors.append({
-                    'column': col,
-                    'correlation': round(float(abs(r)), 4)
-                })
+        target_corr = corr[target_col].drop(target_col, errors='ignore')
+        target_cors = [
+            {'column': col, 'correlation': round(float(val), 4)}
+            for col, val in target_corr.items()
+            if not np.isnan(val)
+        ]
         target_cors.sort(key=lambda x: x['correlation'], reverse=True)
     return {
         'high_correlation_pairs': pairs,

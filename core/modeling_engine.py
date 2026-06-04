@@ -1967,32 +1967,23 @@ class EnsembleBuilder:
                     oof_preds.append(np.asarray(r.oof_predictions).ravel())
             
             if len(oof_preds) > 1:
-                # 计算模型间预测相关性矩阵
-                corr_penalty = np.zeros(n_models)
-                for i in range(n_models):
-                    if i >= len(oof_preds):
-                        continue
-                    # 计算该模型与其他模型的平均绝对相关性
-                    corrs = []
-                    for j in range(len(oof_preds)):
-                        if i == j:
-                            continue
-                        # 皮尔逊相关系数
-                        p_i = oof_preds[i]
-                        p_j = oof_preds[j]
-                        min_len = min(len(p_i), len(p_j))
-                        if min_len < 2:
-                            continue
-                        c = np.corrcoef(p_i[:min_len], p_j[:min_len])[0, 1]
-                        if not np.isnan(c):
-                            corrs.append(abs(c))
-                    if corrs:
-                        avg_corr = np.mean(corrs)
-                        # 相关性越高，惩罚越大（最多降低 30% 权重）
-                        corr_penalty[i] = 0.3 * avg_corr
-                
-                # 应用惩罚：权重与 (1 - corr_penalty) 成正比
-                scores = scores * (1.0 - corr_penalty)
+                # 向量化计算模型间预测相关性矩阵
+                # 统一截断到相同长度
+                min_len = min(len(p) for p in oof_preds)
+                if min_len >= 2:
+                    pred_matrix = np.vstack([p[:min_len] for p in oof_preds])  # (n_models, min_len)
+                    # 计算相关性矩阵（向量化）
+                    corr_matrix = np.corrcoef(pred_matrix)  # (n_models, n_models)
+                    # 取绝对值并排除对角线
+                    np.fill_diagonal(corr_matrix, 0)
+                    corr_matrix = np.abs(corr_matrix)
+                    # 每个模型与其他模型的平均相关性（只考虑有效的 oof_preds 对应的模型）
+                    valid_n = len(oof_preds)
+                    avg_corrs = corr_matrix[:valid_n, :valid_n].sum(axis=1) / (valid_n - 1)
+                    corr_penalty = np.zeros(n_models)
+                    corr_penalty[:valid_n] = 0.3 * avg_corrs
+                    # 应用惩罚：权重与 (1 - corr_penalty) 成正比
+                    scores = scores * (1.0 - corr_penalty)
         
         # 重新归一化
         total = scores.sum()

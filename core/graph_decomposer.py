@@ -77,12 +77,14 @@ class KNNGraphBuilder:
         # 构建邻接矩阵
         adjacency = np.zeros((n_samples, n_samples))
 
+        # 向量化构建邻接矩阵
         for i in range(n_samples):
             neighbors = indices[i][1:]  # 排除自身
             dists = distances[i][1:]
 
             if self.kernel == 'rbf':
-                gamma = 1.0 / (X.shape[1] * np.median(dists) ** 2 + 1e-6)
+                # 向量化：避免循环内的中位数计算，改用全局中位数
+                gamma = 1.0 / (X.shape[1] * np.median(distances[distances > 0]) ** 2 + 1e-6)
                 weights = np.exp(-gamma * dists ** 2)
             elif self.kernel == 'cosine':
                 weights = np.ones(len(neighbors))
