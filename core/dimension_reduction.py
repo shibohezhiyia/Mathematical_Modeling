@@ -151,8 +151,16 @@ class AutoDimensionReducer(BaseEstimator, TransformerMixin):
         n_samples, n_features = X.shape
 
         # 稀疏矩阵 → TruncatedSVD
-        if hasattr(X, 'nnz') or (isinstance(X, np.ndarray) and np.sum(X == 0) / X.size > 0.5):
+        if hasattr(X, 'nnz'):
             return 'truncated_svd'
+        # 对密集数组，采样估计稀疏度而非全量遍历（O(n*m) → O(sample))
+        if isinstance(X, np.ndarray) and X.size > 0:
+            sample_size = min(10000, X.size)
+            flat = X.flat
+            indices = np.random.choice(X.size, sample_size, replace=False)
+            zero_ratio = np.sum(flat[indices] == 0) / sample_size
+            if zero_ratio > 0.5:
+                return 'truncated_svd'
 
         # 大数据 → IncrementalPCA
         if n_samples > 100000:
