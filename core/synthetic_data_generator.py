@@ -112,8 +112,8 @@ def generate_from_description(description: str, **overrides) -> pd.DataFrame:
         params['task_type'] = 'time_series'
     
     # Extract numbers
-    import re
-    numbers = re.findall(r'(\d+)', desc)
+    _NUMBER_RE = re.compile(r'(\d+)')
+    numbers = _NUMBER_RE.findall(desc)
     if len(numbers) >= 1:
         params['n_samples'] = int(numbers[0])
     if len(numbers) >= 2:
