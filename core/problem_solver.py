@@ -5,6 +5,19 @@ Analyzes any text-based modeling problem and recommends
 a general modeling framework, not domain-specific templates.
 """
 import re
+# 预编译正则表达式，避免每次调用时重新编译
+_PROBLEM_TYPE_PATTERNS = {
+    'optimization': re.compile(r'最大|最小|最优|优化|分配|调度|规划|配置|路径|成本|利润|效费|节约|资源|约束|方案|策略|尽可能|尽量|投放点|起爆点|航向|飞行方向|速度'),
+    'differential_equations': re.compile(r'变化|增长|传播|扩散|动态|演化|速率|随时间|导数|微分|方程|运动|轨迹|弹道'),
+    'prediction_forecast': re.compile(r'预测|预报|估计|趋势|未来|下一|将|会达到|销量|人口|疫情'),
+    'classification': re.compile(r'分类|识别|判别|诊断|判断|是否|好坏|等级|类型'),
+    'clustering': re.compile(r'聚类|分组|划分|聚成|相似|类别|群落'),
+    'simulation': re.compile(r'模拟|仿真|蒙特卡洛|随机|概率|风险|不确定|抽样'),
+    'graph_network': re.compile(r'网络|图|节点|边|路径|流量|连接|路线|拓扑|最短|联通'),
+    'statistical_inference': re.compile(r'显著|相关|回归|检验|置信|假设|分布|频率|统计'),
+    'evaluation_ranking': re.compile(r'评价|评估|排名|排序|指标|得分|综合|优劣'),
+}
+_ENTITY_PATTERN = re.compile(r'([A-Z]{1,3}\d{1,3})[（\(]([\d\-,.\s]+)[）\)]')
 from typing import Any, Dict, List
 
 
@@ -57,31 +70,31 @@ def _identify_task_type(desc: str) -> str:
     }
     
     # Optimization
-    scores['optimization'] += len(re.findall(r'最大|最小|最优|优化|分配|调度|规划|配置|路径|成本|利润|效费|节约|资源|约束|方案|策略|尽可能|尽量|投放点|起爆点|航向|飞行方向|速度', desc))
+    scores['optimization'] += len(_PROBLEM_TYPE_PATTERNS['optimization'].findall(desc))
     
     # Differential equations / dynamics
-    scores['differential_equations'] += len(re.findall(r'变化|增长|传播|扩散|动态|演化|速率|随时间|导数|微分|方程|运动|轨迹|弹道', desc))
+    scores['differential_equations'] += len(_PROBLEM_TYPE_PATTERNS['differential_equations'].findall(desc))
     
     # Prediction / forecasting
-    scores['prediction_forecast'] += len(re.findall(r'预测|预报|估计|趋势|未来|下一|将|会达到|销量|人口|疫情', desc))
+    scores['prediction_forecast'] += len(_PROBLEM_TYPE_PATTERNS['prediction_forecast'].findall(desc))
     
     # Classification / recognition
-    scores['classification'] += len(re.findall(r'分类|识别|判别|诊断|判断|是否|好坏|等级|类型', desc))
+    scores['classification'] += len(_PROBLEM_TYPE_PATTERNS['classification'].findall(desc))
     
     # Clustering / grouping
-    scores['clustering'] += len(re.findall(r'聚类|分组|划分|聚成|相似|类别|群落', desc))
+    scores['clustering'] += len(_PROBLEM_TYPE_PATTERNS['clustering'].findall(desc))
     
     # Simulation
-    scores['simulation'] += len(re.findall(r'模拟|仿真|蒙特卡洛|随机|概率|风险|不确定|抽样', desc))
+    scores['simulation'] += len(_PROBLEM_TYPE_PATTERNS['simulation'].findall(desc))
     
     # Graph / network
-    scores['graph_network'] += len(re.findall(r'网络|图|节点|边|路径|流量|连接|路线|拓扑|最短|联通', desc))
+    scores['graph_network'] += len(_PROBLEM_TYPE_PATTERNS['graph_network'].findall(desc))
     
     # Statistical inference
-    scores['statistical_inference'] += len(re.findall(r'显著|相关|回归|检验|置信|假设|分布|频率|统计', desc))
+    scores['statistical_inference'] += len(_PROBLEM_TYPE_PATTERNS['statistical_inference'].findall(desc))
     
     # Evaluation / ranking
-    scores['evaluation_ranking'] += len(re.findall(r'评价|评估|排名|排序|指标|得分|综合|优劣', desc))
+    scores['evaluation_ranking'] += len(_PROBLEM_TYPE_PATTERNS['evaluation_ranking'].findall(desc))
     
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else 'evaluation_ranking'
