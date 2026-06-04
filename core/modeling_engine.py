@@ -2460,7 +2460,7 @@ class ModelingEngine:
                 # 深度学习模型专用 trial 限制
                 DL_KEYS = {'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'torch_ae', 'torch_resmlp', 'tabnet'}
                 
-                for idx, key in enumerate(progress_iter(list(models.keys()), desc="超参优化", disable=not self.verbose)):
+                for idx, key in enumerate(progress_iter(models.keys(), desc="超参优化", disable=not self.verbose)):
                     if self.progress_callback:
                         self.progress_callback('hyperopt', idx + 1, len(models), f"优化 {key} 中...")
                     
@@ -2543,7 +2543,7 @@ class ModelingEngine:
         # 多模态模型需要的特殊列
         MULTIModal_COLS = {'image_resnet': 'image_path', 'text_bert': 'text'}
         
-        for idx, (key, spec) in enumerate(progress_iter(list(models.items()), desc="模型训练", total=len(models), disable=not self.verbose)):
+        for idx, (key, spec) in enumerate(progress_iter(models.items(), desc="模型训练", total=len(models), disable=not self.verbose)):
             if self.progress_callback:
                 self.progress_callback('training', idx + 1, len(models), f"训练 {spec.name} 中...")
             
