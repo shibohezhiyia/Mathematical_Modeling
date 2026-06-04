@@ -18,6 +18,18 @@ _PROBLEM_TYPE_PATTERNS = {
     'evaluation_ranking': re.compile(r'评价|评估|排名|排序|指标|得分|综合|优劣'),
 }
 _ENTITY_PATTERN = re.compile(r'([A-Z]{1,3}\d{1,3})[（\(]([\d\-,.\s]+)[）\)]')
+# 预编译 _extract_variables / _extract_constraints 正则
+_VAR_PATTERNS = [
+    re.compile(r'(\d+(?:\.\d+)?)\s*(m/s|km/h|kg|t|s|min|h|m|km|℃|°|度|个|架|枚)'),
+    re.compile(r'([一-龥]+?)(?:分别为|为|是|等于|约|大概)\s*(\d+(?:\.\d+)?)'),
+    re.compile(r'坐标[为是]\s*\(?\s*([\d\-,\.\s]+)\s*\)?'),
+]
+_RANGE_PATTERN = re.compile(r'([\d\.]+)\s*[~到-]\s*([\d\.]+)\s*(m/s|km/h|kg|t|s|min|h|m|km)')
+_MAX_PATTERN = re.compile(r'(?:至多|最多|不超过|不大于|≤|<=)\s*(\d+)')
+_MIN_PATTERN = re.compile(r'(?:至少|最少|不低于|不小于|≥|>=)\s*(\d+)')
+_INTERVAL_PATTERN = re.compile(r'间隔\s*(\d+(?:\.\d+)?)\s*s?')
+_MAXIMIZE_PATTERN = re.compile(r'(?:使|让|求|要)(.*?)(?:尽可能大|最大|最长|最高|最优|最好)')
+_MINIMIZE_PATTERN = re.compile(r'(?:使|让|求|要)(.*?)(?:尽可能小|最小|最短|最低|最少)')
 from typing import Any, Dict, List
 
 
@@ -112,8 +124,8 @@ def _extract_variables(desc: str) -> List[str]:
         r'坐标[为是]\s*\(?\s*([\d\-,\.\s]+)\s*\)?',
     ]
     
-    for pat in patterns:
-        for m in re.finditer(pat, desc):
+    for pat in _VAR_PATTERNS:
+        for m in pat.finditer(desc):
             variables.append(m.group(0))
     
     # Look for entities
@@ -129,17 +141,17 @@ def _extract_constraints(desc: str) -> List[str]:
     constraints = []
     
     # Range constraints
-    for m in re.finditer(r'([\d\.]+)\s*[~到-]\s*([\d\.]+)\s*(m/s|km/h|kg|t|s|min|h|m|km)', desc):
+    for m in _RANGE_PATTERN.finditer(desc):
         constraints.append(f"范围约束: {m.group(1)} ~ {m.group(2)} {m.group(3)}")
     
     # At most / at least
-    for m in re.finditer(r'(?:至多|最多|不超过|不大于|≤|<=)\s*(\d+)', desc):
+    for m in _MAX_PATTERN.finditer(desc):
         constraints.append(f"上限约束: ≤ {m.group(1)}")
-    for m in re.finditer(r'(?:至少|最少|不低于|不小于|≥|>=)\s*(\d+)', desc):
+    for m in _MIN_PATTERN.finditer(desc):
         constraints.append(f"下限约束: ≥ {m.group(1)}")
     
     # Time interval
-    for m in re.finditer(r'间隔\s*(\d+(?:\.\d+)?)\s*s?', desc):
+    for m in _INTERVAL_PATTERN.finditer(desc):
         constraints.append(f"时间间隔约束: ≥ {m.group(1)} s")
     
     # Spatial
@@ -154,11 +166,11 @@ def _extract_objectives(desc: str) -> List[str]:
     objectives = []
     
     # Maximization
-    for m in re.finditer(r'(?:使|让|求|要)(.*?)(?:尽可能大|最大|最长|最高|最优|最好)', desc):
+    for m in _MAXIMIZE_PATTERN.finditer(desc):
         objectives.append(f"最大化: {m.group(1).strip()}")
     
     # Minimization
-    for m in re.finditer(r'(?:使|让|求|要)(.*?)(?:尽可能小|最小|最短|最低|最少)', desc):
+    for m in _MINIMIZE_PATTERN.finditer(desc):
         objectives.append(f"最小化: {m.group(1).strip()}")
     
     # Generic goals
