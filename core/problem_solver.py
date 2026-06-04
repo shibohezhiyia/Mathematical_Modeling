@@ -117,7 +117,7 @@ def _extract_variables(desc: str) -> List[str]:
             variables.append(m.group(0))
     
     # Look for entities
-    entities = re.findall(r'([A-Z]{1,3}\d{1,3})[（\(]([\d\-,\.\s]+)[）\)]', desc)
+    entities = _ENTITY_PATTERN.findall(desc)
     for e in entities:
         variables.append(f"{e[0]}: ({e[1]})")
     
