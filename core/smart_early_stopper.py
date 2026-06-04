@@ -225,13 +225,13 @@ class FoldEarlyStopper:
             self._fold_scores.append(float(current_score))
             if len(self._fold_scores) >= self.config.degrade_patience + 1:
                 recent = self._fold_scores[-(self.config.degrade_patience + 1):]
-                # 检测连续下降
+                # 检测连续下降 — 使用 zip 配对避免索引访问
                 degrades = 0
-                for i in range(1, len(recent)):
+                for prev, curr in zip(recent, recent[1:]):
                     if self.direction == 'maximize':
-                        drop = (recent[i - 1] - recent[i]) / (abs(recent[i - 1]) + 1e-10)
+                        drop = (prev - curr) / (abs(prev) + 1e-10)
                     else:
-                        drop = (recent[i] - recent[i - 1]) / (abs(recent[i - 1]) + 1e-10)
+                        drop = (curr - prev) / (abs(prev) + 1e-10)
                     if drop > self.config.degrade_threshold:
                         degrades += 1
                 if degrades >= self.config.degrade_patience:
