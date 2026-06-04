@@ -277,7 +277,7 @@ class MultiscaleTimeDecomposer(BaseEstimator, TransformerMixin):
                 features[f'holiday_{name}'] = mask.astype('float64')
 
         # 节假日窗口（节前3天 + 节后3天）
-        for col_name in list(features.keys()):
+        for col_name in features.keys():
             if col_name.startswith('holiday_'):
                 # 节前节后冲击
                 holiday_mask = features[col_name].astype(bool)
