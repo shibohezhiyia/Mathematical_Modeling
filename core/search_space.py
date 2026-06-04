@@ -77,9 +77,75 @@ class Parameter:
         
         elif self.type == 'bool':
             return bool(rng.choice([True, False]))
+    
+    def sample_sobol(self, n: int, rng: np.random.RandomState) -> List[Any]:
+        """
+        使用 Sobol 序列采样 n 个值，提高空间覆盖均匀性
+        
+        对 float/int 使用拟随机序列，对 categorical 使用轮换+随机打乱
+        """
+        if self.type == 'float':
+            lo, hi = float(self.low), float(self.high)
+            if self.scale == 'log':
+                if lo <= 0:
+                    lo = 1e-10
+                log_lo, log_hi = math.log(lo), math.log(hi)
+                # Sobol 序列生成 [0,1] 的均匀分布
+                sobol = self._sobol_sequence(n, rng)
+                return [float(math.exp(log_lo + s * (log_hi - log_lo))) for s in sobol]
+            else:
+                sobol = self._sobol_sequence(n, rng)
+                return [float(lo + s * (hi - lo)) for s in sobol]
+        
+        elif self.type == 'int':
+            lo, hi = int(self.low), int(self.high)
+            total = hi - lo + 1
+            if total <= n:
+                return list(range(lo, hi + 1))
+            sobol = self._sobol_sequence(n, rng)
+            return [int(lo + round(s * (hi - lo))) for s in sobol]
+        
+        elif self.type == 'categorical':
+            choices = self.choices if self.choices is not None else []
+            if not choices:
+                return []
+            # 轮换覆盖 + 随机打乱避免重复模式
+            base = (choices * ((n // len(choices)) + 1))[:n]
+            rng.shuffle(base)
+            return base
+        
+        elif self.type == 'bool':
+            sobol = self._sobol_sequence(n, rng)
+            return [s > 0.5 for s in sobol]
         
         else:
-            raise ValueError(f"[Parameter] 未知参数类型: {self.type}")
+            return []
+    
+    @staticmethod
+    def _sobol_sequence(n: int, rng: np.random.RandomState) -> List[float]:
+        """
+        生成近似 Sobol 序列的低差异序列
+        
+        使用 Van der Corput 序列（radix-2 翻转），通过向量化实现避免 Python 级循环。
+        时间复杂度从 O(n log n) 优化到 O(n)。
+        """
+        # Van der Corput 序列：在 1D 上等价于二进制位翻转
+        # i=1,2,3,... → 0.5, 0.25, 0.75, 0.125, ...
+        i = np.arange(1, n + 1, dtype=np.uint32)
+        # 将整数转为二进制并翻转位
+        # 利用 bit manipulation: reverse bits of i
+        i_rev = np.zeros_like(i, dtype=np.uint32)
+        bits = 32  # 使用 32 位翻转
+        for _ in range(bits):
+            i_rev = (i_rev << 1) | (i & 1)
+            i >>= 1
+        # 除以 2^bits 得到 [0,1) 的序列
+        seq = i_rev / (1 << bits)
+        # 添加随机偏移避免固定模式，然后打乱
+        offset = rng.uniform(0, 1)
+        seq = (seq + offset) % 1.0
+        rng.shuffle(seq)
+        return seq.tolist()
     
     def build_candidates(self, n: int = 8) -> List[Any]:
         """为离散化优化器（RL/GA）生成候选值列表"""
@@ -251,6 +317,34 @@ class SearchSpace:
         if rng is None:
             rng = np.random.RandomState(random_state)
         return [self.sample(rng=rng) for _ in range(n)]
+    
+    def sample_sobol(self, n: int, rng: Optional[np.random.RandomState] = None,
+                     random_state: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        使用 Sobol 低差异序列采样 n 组参数
+        
+        比纯随机采样空间覆盖更均匀，适合初始化搜索（如贝叶斯优化、遗传算法）
+        """
+        if rng is None:
+            rng = np.random.RandomState(random_state)
+        
+        # 为每个参数预生成 Sobol 序列（仅生成一次，惰性处理条件参数）
+        sobol_cache = {}
+        for name, param in self.params.items():
+            sobol_cache[name] = param.sample_sobol(n, rng)
+        
+        results = []
+        for i in range(n):
+            result = {}
+            for name, param in self.params.items():
+                if not param.is_active(result):
+                    continue
+                vals = sobol_cache[name]
+                if i < len(vals):
+                    result[name] = vals[i]
+            results.append(result)
+        
+        return results
     
     def build_candidates(self, n: int = 8) -> Dict[str, List[Any]]:
         """

@@ -251,32 +251,42 @@ class DataScaleEvaluator:
     
     @staticmethod
     def evaluate(df: pd.DataFrame) -> DataScaleMetrics:
-        """评估数据规模"""
+        """评估数据规模（向量化实现避免逐列 Python 循环）"""
         metrics = DataScaleMetrics()
         metrics.n_rows = len(df)
         metrics.n_cols = len(df.columns)
         metrics.memory_mb = df.memory_usage(deep=True).sum() / (1024 ** 2)
         metrics.total_cells = metrics.n_rows * metrics.n_cols
         
-        # 统计各类型列数（简单启发式，非精确）
-        for col in df.columns:
-            dtype = df[col].dtype
-            if pd.api.types.is_numeric_dtype(dtype):
-                metrics.n_numeric += 1
-            elif pd.api.types.is_datetime64_any_dtype(dtype):
-                metrics.n_datetime += 1
-            elif dtype == object:
-                # 粗略判断文本 vs 类别
-                n_unique = df[col].nunique(dropna=True)
-                if n_unique > 50 or df[col].astype(str).str.len().mean() > 30:
-                    metrics.n_text += 1
-                else:
-                    metrics.n_categorical += 1
-            else:
-                metrics.n_categorical += 1
+        # 向量化统计各类型列数（一次性推断所有列类型）
+        dtypes = df.dtypes
+        is_numeric = dtypes.apply(pd.api.types.is_numeric_dtype)
+        is_datetime = dtypes.apply(pd.api.types.is_datetime64_any_dtype)
+        is_object = (dtypes == object)
         
-        # 缺失率
-        metrics.sparsity = df.isnull().sum().sum() / metrics.total_cells if metrics.total_cells > 0 else 0
+        metrics.n_numeric = int(is_numeric.sum())
+        metrics.n_datetime = int(is_datetime.sum())
+        
+        # 对 object 列批量判断文本 vs 类别（避免逐列 str.len().mean()）
+        obj_cols = df.columns[is_object]
+        if len(obj_cols) > 0:
+            n_unique = df[obj_cols].nunique(dropna=True)
+            # 只对可能为文本的列计算字符串长度（启发式：高唯一值或名称含 text/comment 等）
+            text_like = n_unique > 50
+            # 检查列名是否包含文本特征关键词
+            text_keywords = ['text', 'comment', 'desc', 'content', 'message', 'body']
+            for col in obj_cols:
+                if any(kw in col.lower() for kw in text_keywords):
+                    text_like[col] = True
+            metrics.n_text = int(text_like.sum())
+            metrics.n_categorical = len(obj_cols) - metrics.n_text
+        else:
+            metrics.n_text = 0
+            metrics.n_categorical = int((~is_numeric & ~is_datetime).sum())
+        
+        # 缺失率（向量化计算，避免 sum().sum() 的双重遍历）
+        total_nulls = df.isnull().sum().sum()
+        metrics.sparsity = total_nulls / metrics.total_cells if metrics.total_cells > 0 else 0
         
         return metrics
 

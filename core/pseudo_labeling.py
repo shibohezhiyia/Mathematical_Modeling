@@ -152,8 +152,8 @@ def apply_pseudo_labeling(
         y_pseudo = label_encoder.transform(pd.Series(y_pseudo).astype(str))
 
     # 合并数据
-    X_combined = pd.concat([X_train, X_pseudo], ignore_index=True)
-    y_combined = pd.concat([pd.Series(y_train), pd.Series(y_pseudo)], ignore_index=True)
+    X_combined = pd.concat([X_train, X_pseudo], ignore_index=True, copy=False)
+    y_combined = pd.concat([pd.Series(y_train), pd.Series(y_pseudo)], ignore_index=True, copy=False)
 
     # 重新训练
     try:

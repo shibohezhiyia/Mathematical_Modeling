@@ -184,13 +184,15 @@ class BaseOptimizer(ABC):
             from core.result_cache import get_result_cache
             cache = get_result_cache()
             
-            # 构建缓存键：模型类名 + 参数 + 数据形状 + 任务类型 + metric
+            # 构建缓存键：模型类名 + 排序后的参数 + 数据形状 + 数据指纹 + 任务类型 + metric
             model_params = getattr(model, 'get_params', lambda: {})()
+            # 使用 numpy 数组切片作为数据指纹，避免 list() 转换开销
+            y_fingerprint = tuple(y.values[:100]) if len(y) >= 100 else tuple(y.values)
             cache_key = cache._make_key(
                 model.__class__.__name__,
-                sorted(model_params.items()),
+                tuple(sorted(model_params.items())),
                 X.shape,
-                list(y.values[:100]),  # 取前100个标签值作为数据指纹
+                y_fingerprint,
                 task_type.value,
                 scoring,
                 self.cv_folds,

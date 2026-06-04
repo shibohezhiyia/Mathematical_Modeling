@@ -57,7 +57,7 @@ def generate_html_report(
             for col in df.columns:
                 lines.append(f'<th>{col}</th>')
             lines.append('</tr></thead><tbody>')
-            for _, row in df.iterrows():
+            for row in df.itertuples(index=False):
                 lines.append('<tr>' + ''.join(f'<td>{v}</td>' for v in row) + '</tr>')
             lines.append('</tbody></table>')
     

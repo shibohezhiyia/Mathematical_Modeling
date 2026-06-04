@@ -173,6 +173,22 @@ class CommunityDetector:
         self.centers_ = np.array([
             X[self.labels_ == c].mean(axis=0) for c in np.unique(self.labels_)
         ])
+        
+        # 新增：计算社区质量指标（轮廓系数）
+        from sklearn.metrics import silhouette_score
+        if len(np.unique(self.labels_)) > 1 and len(np.unique(self.labels_)) < n_samples:
+            try:
+                self.silhouette_score_ = silhouette_score(X, self.labels_)
+                log_info(f"[CommunityDetector] 社区轮廓系数: {self.silhouette_score_:.3f}")
+            except Exception:
+                self.silhouette_score_ = None
+        
+        # 新增：自适应社区数调整 - 如果轮廓系数过低，尝试减少社区数
+        if hasattr(self, 'silhouette_score_') and self.silhouette_score_ is not None and self.silhouette_score_ < 0.1:
+            if self.n_communities > 2:
+                log_warning(f"[CommunityDetector] 轮廓系数 {self.silhouette_score_:.3f} 过低，尝试减少社区数")
+                self.n_communities = max(2, self.n_communities - 1)
+                return self.detect(X, adjacency)
 
         log_info(f"[CommunityDetector] {self.method}: 发现 {self.n_communities} 个社区")
         for c in np.unique(self.labels_):
