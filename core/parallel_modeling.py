@@ -65,6 +65,7 @@ class ModelRegistry:
     """
     
     _models: Dict[str, ModelConfig] = {}
+    _name_to_key: Dict[str, str] = {}
     _initialized = False
     
     @classmethod
@@ -247,6 +248,8 @@ class ModelRegistry:
         except ImportError:
             pass
         
+        # 构建名称到 key 的映射，用于 O(1) 查找
+        cls._name_to_key = {config.name: key for key, config in cls._models.items()}
         cls._initialized = True
         log_info(f"[ModelRegistry] 已注册 {len(cls._models)} 个模型: {list(cls._models.keys())}")
     
@@ -397,11 +400,12 @@ class HyperparameterSearch:
                 params[key] = rng.choice(values)
             
             try:
+                # 优化：O(1) 名称到 key 查找，替代 O(n) 列表推导
+                model_key = ModelRegistry._name_to_key.get(model_config.name)
+                if not model_key:
+                    continue
                 model = ModelRegistry.create_model(
-                    list(ModelRegistry._models.keys())[
-                        [v.name for v in ModelRegistry._models.values()].index(model_config.name)
-                    ],
-                    task_type, use_gpu=use_gpu, **params
+                    model_key, task_type, use_gpu=use_gpu, **params
                 )
                 
                 score = self._cv_score(model, X, y, task_type, cv_folds)
