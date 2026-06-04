@@ -349,7 +349,7 @@ class PredictionIntervalReporter:
         }
 
         if y_true is not None:
-            covered = [y_true[i] in prediction_sets[i] for i in range(len(y_true))]
+            covered = [yt in ps for yt, ps in zip(y_true, prediction_sets)]
             report['actual_coverage'] = float(np.mean(covered))
             report['coverage_error'] = float(report['actual_coverage'] - (1 - alpha))
 
