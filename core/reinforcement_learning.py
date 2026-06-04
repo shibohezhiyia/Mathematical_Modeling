@@ -144,6 +144,7 @@ class _ParamActionSpace:
     def __init__(self, param_candidates: Dict[str, List]) -> None:
         self.param_candidates = param_candidates
         self.param_names = list(param_candidates.keys())
+        self._param_count = len(self.param_names)  # cache count for repeated use
         
         # 扁平动作列表: [(param_name, candidate_value, param_idx, cand_idx), ...]
         self.actions = []

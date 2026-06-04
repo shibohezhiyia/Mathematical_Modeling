@@ -397,11 +397,10 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
         return population[best]
     
     def _crossover(self, p1: List[float], p2: List[float]) -> Tuple[List[float], List[float]]:
-        """单点交叉"""
+        """单点交叉 - 列表切片，O(k) 其中 k=point"""
         point = self.rng.randint(1, len(p1))
-        c1 = p1[:point] + p2[point:]
-        c2 = p2[:point] + p1[point:]
-        return c1, c2
+        # 切片创建新列表，避免逐个元素复制
+        return p1[:point] + p2[point:], p2[:point] + p1[point:]
     
     def _mutate(self, chrom: List[float], search_space: SearchSpace) -> List[float]:
         """变异：随机替换某个基因"""
