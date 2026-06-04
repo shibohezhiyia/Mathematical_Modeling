@@ -25,10 +25,13 @@ def analyze_time_series(
     result['min'] = round(float(series.min()), 4)
     result['max'] = round(float(series.max()), 4)
     
+    # Cache cleaned series to avoid repeated dropna()
+    series_clean = series.dropna()
+    
     # Stationarity test (ADF)
     try:
         from statsmodels.tsa.stattools import adfuller
-        adf = adfuller(series.dropna())
+        adf = adfuller(series_clean)
         result['adf_statistic'] = round(float(adf[0]), 4)
         result['adf_pvalue'] = round(float(adf[1]), 4)
         result['is_stationary'] = adf[1] < 0.05
@@ -40,8 +43,9 @@ def analyze_time_series(
     # Autocorrelation
     try:
         from statsmodels.tsa.stattools import acf, pacf
-        acf_vals = acf(series.dropna(), nlags=min(20, len(series)//2), fft=True)
-        pacf_vals = pacf(series.dropna(), nlags=min(20, len(series)//2))
+        nlags = min(20, len(series_clean)//2)
+        acf_vals = acf(series_clean, nlags=nlags, fft=True)
+        pacf_vals = pacf(series_clean, nlags=nlags)
         result['acf'] = [round(float(v), 4) for v in acf_vals[:10]]
         result['pacf'] = [round(float(v), 4) for v in pacf_vals[:10]]
     except Exception:
@@ -53,10 +57,10 @@ def analyze_time_series(
         freq_map = {'D': 7, 'W': 52, 'M': 12, 'Q': 4, 'H': 24}
         period = freq_map.get(freq, None)
     
-    if period and len(series) >= period * 2:
+    if period and len(series_clean) >= period * 2:
         try:
             from statsmodels.tsa.seasonal import seasonal_decompose
-            decomp = seasonal_decompose(series.dropna(), model='additive', period=period)
+            decomp = seasonal_decompose(series_clean, model='additive', period=period)
             result['trend'] = [round(float(v), 4) for v in decomp.trend.dropna().values[:50]]
             result['seasonal'] = [round(float(v), 4) for v in decomp.seasonal.dropna().values[:50]]
             result['resid'] = [round(float(v), 4) for v in decomp.resid.dropna().values[:50]]
