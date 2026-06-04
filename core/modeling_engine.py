@@ -23,7 +23,6 @@ from copy import deepcopy
 from enum import Enum
 
 import numpy as np
-import os
 from sklearn.metrics import pairwise_kernels
 from sklearn.kernel_approximation import Nystroem, RBFSampler
 from core.kernel_cache import KernelCache
