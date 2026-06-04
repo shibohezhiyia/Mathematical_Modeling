@@ -3,6 +3,9 @@
 """
 import os
 import re
+
+# Pre-compile commonly used regex to avoid recompilation per column
+_RE_ID_LIKE = re.compile(r"\bid\b|_id$|id_$")
 import json
 from typing import Dict, List, Union, Optional, Tuple, Any
 from dataclasses import dataclass, field
@@ -281,7 +284,7 @@ class TypeDetector:
             return DataType.CONSTANT, profile
         
         # ID列检测（列名包含id且唯一值比例高）
-        is_id_like = bool(re.search(r'\bid\b|_id$|id_$', col_name.lower()))
+        is_id_like = bool(_RE_ID_LIKE.search(col_name.lower()))
         if is_id_like and profile.unique_rate >= 0.9:
             profile.inferred_type = DataType.ID
             profile.suggestions.append("疑似ID列，通常不作为特征使用")
