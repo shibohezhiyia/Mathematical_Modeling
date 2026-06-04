@@ -807,9 +807,10 @@ class RLOptimizer(BaseOptimizer):
                 config_scores[cfg_key] = h['score']
                 config_params[cfg_key] = h['params']
         
-        # 按 score 排序，取 top-K
+        # 按 score 排序，取 top-K — 使用 heapq.nlargest，O(n log k) 优于 sorted 的 O(n log n)
         top_k = min(self.n_parallel * 2, len(config_scores))
-        top_configs = sorted(config_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        import heapq
+        top_configs = heapq.nlargest(top_k, config_scores.items(), key=lambda x: x[1])
         
         if len(top_configs) <= 1:
             return current_best_score, current_best_params
