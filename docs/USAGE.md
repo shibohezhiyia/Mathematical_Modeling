@@ -1,4 +1,4 @@
-# 智能图表 - 使用指南
+# Mathematical Modeling - 使用指南
 
 ## 快速开始
 

@@ -102,7 +102,7 @@ def extract_module_docs(module_name: str) -> Dict[str, Any]:
 def generate_markdown(docs: List[Dict[str, Any]]) -> str:
     """生成 Markdown 文档"""
     lines = []
-    lines.append('# 智能图表 API 文档')
+    lines.append('# Mathematical Modeling API 文档')
     lines.append('')
     lines.append('> 自动生成于 API 文档生成脚本')
     lines.append('')

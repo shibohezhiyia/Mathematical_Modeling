@@ -1,5 +1,5 @@
 """
-智能图表 Web 前端
+Mathematical Modeling Web 前端
 
 Flask 后端 API，为单页应用提供数据服务。
 

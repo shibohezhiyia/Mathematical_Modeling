@@ -5,7 +5,7 @@
 ## 项目结构
 
 ```
-智能图表/
+Mathematical Modeling/
 ├── core/                          # 核心模块
 │   ├── __init__.py
 │   ├── data_module.py             # 数据模块（加载/识别/清洗）

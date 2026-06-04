@@ -1,4 +1,4 @@
-# 智能图表 API 文档
+# Mathematical Modeling API 文档
 
 > 自动生成于 API 文档生成脚本
 
@@ -15107,7 +15107,7 @@ Special type indicating an unconstrained type.
 
 ## `core.visualization`
 
-智能图表 - 可视化模块
+Mathematical Modeling - 可视化模块
 
 提供数据探索、模型结果、自动评估决策的全方位可视化能力。
 
