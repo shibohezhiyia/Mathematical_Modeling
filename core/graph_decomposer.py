@@ -340,7 +340,10 @@ class GraphDecomposer(BaseEstimator, RegressorMixin):
         return predictions
 
     def _predict_soft(self, X: np.ndarray) -> np.ndarray:
-        """软加权：按到社区中心的距离加权所有专家的预测"""
+        """软加权：按到社区中心的距离加权所有专家的预测
+        
+        优化：收集所有专家预测到矩阵，然后向量化加权求和。
+        """
         if self.detector_.centers_ is None:
             return self.global_model_.predict(X)
 
@@ -352,12 +355,15 @@ class GraphDecomposer(BaseEstimator, RegressorMixin):
         similarities = np.exp(-distances / (distances.std() + 1e-6))
         similarities = similarities / (similarities.sum(axis=1, keepdims=True) + 1e-10)
 
-        predictions = np.zeros(len(X))
+        # 向量化：收集所有专家预测到矩阵，然后加权求和
+        # 注意：experts_ 的键可能不连续，需要映射到 similarities 的列索引
+        expert_preds = np.zeros((len(X), similarities.shape[1]))
         for c, expert in self.experts_.items():
             if c < similarities.shape[1]:
-                pred_c = expert.predict(X)
-                predictions += similarities[:, c] * pred_c
-
+                expert_preds[:, c] = expert.predict(X)
+        
+        # 向量化加权求和
+        predictions = (expert_preds * similarities).sum(axis=1)
         return predictions
 
     def _create_expert(self) -> Any:
