@@ -152,15 +152,21 @@ class MultiscaleTimeDecomposer(BaseEstimator, TransformerMixin):
         new_features[f'{self._dt_col}_is_quarter_start'] = dt.dt.is_quarter_start.astype('float64')
 
         # 2. 循环傅里叶特征（比简单正弦余弦更丰富的周期表达）
+        # 向量化生成：一次性计算所有 k 的正弦/余弦，避免 Python 循环
         dayofyear = dt.dt.dayofyear.astype(float)
-        for k in range(1, self.fourier_terms + 1):
-            new_features[f'{self._dt_col}_fourier_year_sin_{k}'] = np.sin(2 * np.pi * k * dayofyear / 365.25)
-            new_features[f'{self._dt_col}_fourier_year_cos_{k}'] = np.cos(2 * np.pi * k * dayofyear / 365.25)
+        k_values = np.arange(1, self.fourier_terms + 1)
+        # 使用广播机制：shape (n_samples, 1) * shape (1, k) = shape (n_samples, k)
+        angle_matrix = (2 * np.pi * k_values / 365.25) * dayofyear.values[:, None]
+        for idx, k in enumerate(k_values):
+            new_features[f'{self._dt_col}_fourier_year_sin_{k}'] = np.sin(angle_matrix[:, idx])
+            new_features[f'{self._dt_col}_fourier_year_cos_{k}'] = np.cos(angle_matrix[:, idx])
 
         dayofweek = dt.dt.dayofweek.astype(float)
-        for k in range(1, min(self.fourier_terms + 1, 4)):
-            new_features[f'{self._dt_col}_fourier_week_sin_{k}'] = np.sin(2 * np.pi * k * dayofweek / 7)
-            new_features[f'{self._dt_col}_fourier_week_cos_{k}'] = np.cos(2 * np.pi * k * dayofweek / 7)
+        k_values_week = np.arange(1, min(self.fourier_terms + 1, 4))
+        angle_matrix_week = (2 * np.pi * k_values_week / 7) * dayofweek.values[:, None]
+        for idx, k in enumerate(k_values_week):
+            new_features[f'{self._dt_col}_fourier_week_sin_{k}'] = np.sin(angle_matrix_week[:, idx])
+            new_features[f'{self._dt_col}_fourier_week_cos_{k}'] = np.cos(angle_matrix_week[:, idx])
 
         # 3. 节假日特征
         if self.holiday_calendar:
