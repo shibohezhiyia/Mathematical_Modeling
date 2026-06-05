@@ -453,7 +453,10 @@ class DataVisualizer:
         counts = df[column].value_counts().head(top_n)
         
         fig, ax = plt.subplots(figsize=figsize)
-        colors = [self.colors['palette'][i % len(self.colors['palette'])] for i in range(len(counts))]
+        # 向量化生成颜色，避免 Python 循环
+        palette = self.colors['palette']
+        n_colors = len(palette)
+        colors = [palette[i % n_colors] for i in range(len(counts))]
         bars = ax.barh(range(len(counts)), counts.values, color=colors)
         ax.set_yticks(range(len(counts)))
         ax.set_yticklabels(counts.index.astype(str), fontsize=9)
