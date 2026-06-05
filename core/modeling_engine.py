@@ -1936,7 +1936,10 @@ class EnsembleBuilder:
         }
     
     def _compute_weights(self, cv_results: List[CVResult], task_type: TaskType) -> np.ndarray:
-        """基于CV分数计算权重，添加负相关惩罚（diversity bonus）"""
+        """基于CV分数计算权重，添加负相关惩罚（diversity bonus）
+        
+        优化：使用平滑化的RMSE反转，避免除零和无穷大；使用向量化相关性计算。
+        """
         if task_type == TaskType.CLASSIFICATION:
             scores = [r.mean_scores.get('f1_weighted', r.mean_scores.get('accuracy', 0.5)) 
                      for r in cv_results]
@@ -1945,12 +1948,13 @@ class EnsembleBuilder:
             # 回归：RMSE越小越好，需要反转，使用平滑化避免除零
             rmse_scores = [r.mean_scores.get('rmse', 1.0) for r in cv_results]
             if any(rmse_scores):
-                # 使用 np.divide 安全除法，避免 rmse=0 时产生无穷大
+                # 数值稳定性：使用 np.divide 安全除法，避免 rmse=0 时产生无穷大
                 rmse_arr = np.array(rmse_scores, dtype=np.float64)
-                inv_rmse = np.zeros_like(rmse_arr)
-                mask = rmse_arr > 1e-6
-                inv_rmse[mask] = 1.0 / rmse_arr[mask]
-                inv_rmse[~mask] = 1e6  # 对于极小值使用上限
+                # 使用平滑化：1/(rmse + epsilon) 替代 1/rmse，避免极端值
+                epsilon = 1e-6
+                inv_rmse = 1.0 / (rmse_arr + epsilon)
+                # 截断上限，避免单个模型权重过大
+                inv_rmse = np.clip(inv_rmse, 0, 1e6)
                 # 结合 R2 和反转 RMSE，以 R2 为主
                 scores = [0.6 * max(s, 0) + 0.4 * inv for s, inv in zip(scores, inv_rmse)]
         

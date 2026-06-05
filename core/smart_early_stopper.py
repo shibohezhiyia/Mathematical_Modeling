@@ -204,6 +204,8 @@ class FoldEarlyStopper:
         """
         检查当前 fold 是否应该早停
         
+        优化：使用向量化计算下降检测，避免 Python 级循环。
+        
         Args:
             current_score: 当前验证分数（如每轮迭代后的验证分数）
             
@@ -224,16 +226,14 @@ class FoldEarlyStopper:
         if current_score is not None:
             self._fold_scores.append(float(current_score))
             if len(self._fold_scores) >= self.config.degrade_patience + 1:
-                recent = self._fold_scores[-(self.config.degrade_patience + 1):]
-                # 检测连续下降 — 使用 zip 配对避免索引访问
-                degrades = 0
-                for prev, curr in zip(recent, recent[1:]):
-                    if self.direction == 'maximize':
-                        drop = (prev - curr) / (abs(prev) + 1e-10)
-                    else:
-                        drop = (curr - prev) / (abs(prev) + 1e-10)
-                    if drop > self.config.degrade_threshold:
-                        degrades += 1
+                recent = np.array(self._fold_scores[-(self.config.degrade_patience + 1):])
+                # 向量化计算下降比例
+                if self.direction == 'maximize':
+                    drops = (recent[:-1] - recent[1:]) / (np.abs(recent[:-1]) + 1e-10)
+                else:
+                    drops = (recent[1:] - recent[:-1]) / (np.abs(recent[:-1]) + 1e-10)
+                # 向量化统计下降次数
+                degrades = int(np.sum(drops > self.config.degrade_threshold))
                 if degrades >= self.config.degrade_patience:
                     self._stopped_folds += 1
                     return True, StopReason.FOLD_DEGRADE

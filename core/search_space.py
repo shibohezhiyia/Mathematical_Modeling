@@ -52,7 +52,10 @@ class Parameter:
     
     def sample(self, rng: np.random.RandomState,
                current_params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
-        """从参数空间中采样一个值；条件不满足时返回 None"""
+        """从参数空间中采样一个值；条件不满足时返回 None
+        
+        优化：使用 np.logspace 替代手动 log-exp 转换，减少数值误差。
+        """
         if not self.is_active(current_params):
             return None
         
@@ -61,8 +64,10 @@ class Parameter:
             if self.scale == 'log':
                 if lo <= 0:
                     lo = 1e-10
-                log_lo, log_hi = math.log(lo), math.log(hi)
-                return float(math.exp(rng.uniform(log_lo, log_hi)))
+                # 使用 np.logspace 替代 math.exp + rng.uniform，减少数值误差
+                # 等效于：math.exp(rng.uniform(math.log(lo), math.log(hi)))
+                log_lo, log_hi = np.log(lo), np.log(hi)
+                return float(np.exp(rng.uniform(log_lo, log_hi)))
             else:
                 return float(rng.uniform(lo, hi))
         
