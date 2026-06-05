@@ -185,7 +185,8 @@ class HyperbandOptimizer(BaseOptimizer):
                 scores = []
                 for params in candidates[:n_i]:
                     try:
-                        full_params = copy.deepcopy(spec.default_params)
+                        # 优化：使用 dict.copy() 替代 deepcopy，因为 default_params 只包含简单类型
+                        full_params = spec.default_params.copy()
                         full_params.update(params)
                         # 通过资源维度控制保真度
                         full_params = self._apply_resource(full_params, r_i, model_key)
@@ -203,7 +204,8 @@ class HyperbandOptimizer(BaseOptimizer):
                     best_score = scores[0][0]
                     best_params = copy.deepcopy(scores[0][1])
         
-        final_params = copy.deepcopy(spec.default_params)
+        # 优化：使用 dict.copy() 替代 deepcopy
+        final_params = spec.default_params.copy()
         final_params.update(best_params)
         
         return OptimizationResult(
@@ -217,21 +219,23 @@ class HyperbandOptimizer(BaseOptimizer):
         )
     
     def _apply_resource(self, params: Dict[str, Any], resource: int, model_key: str) -> Dict[str, Any]:
-        """将资源维度应用到参数中"""
-        p = copy.deepcopy(params)
+        """将资源维度应用到参数中
+        
+        优化：直接修改输入字典，避免 deepcopy，调用方应使用 dict.copy() 传递副本。
+        """
         # 树模型：减少迭代次数
-        if 'n_estimators' in p:
-            p['n_estimators'] = max(10, min(resource * 10, p['n_estimators']))
-        if 'max_iter' in p:
-            p['max_iter'] = max(10, min(resource * 10, p['max_iter']))
-        if 'iterations' in p:
-            p['iterations'] = max(10, min(resource * 10, p['iterations']))
+        if 'n_estimators' in params:
+            params['n_estimators'] = max(10, min(resource * 10, params['n_estimators']))
+        if 'max_iter' in params:
+            params['max_iter'] = max(10, min(resource * 10, params['max_iter']))
+        if 'iterations' in params:
+            params['iterations'] = max(10, min(resource * 10, params['iterations']))
         # 神经网络：减少 epochs
-        if 'epochs' in p:
-            p['epochs'] = max(5, min(resource, p['epochs']))
-        if 'max_epochs' in p:
-            p['max_epochs'] = max(5, min(resource, p['max_epochs']))
-        return p
+        if 'epochs' in params:
+            params['epochs'] = max(5, min(resource, params['epochs']))
+        if 'max_epochs' in params:
+            params['max_epochs'] = max(5, min(resource, params['max_epochs']))
+        return params
 
 
 # =============================================================================
@@ -304,7 +308,8 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
             for chrom in population:
                 params = self._chromosome_to_params(chrom, search_space)
                 try:
-                    full_params = copy.deepcopy(spec.default_params)
+                    # 优化：使用 dict.copy() 替代 deepcopy，因为 default_params 只包含简单类型
+                    full_params = spec.default_params.copy()
                     full_params.update(params)
                     model = ModelLibrary.create_model(model_key, task_type, **full_params)
                     score = self._evaluate_model(model, X, y, task_type, metric)
@@ -328,7 +333,8 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
                 if self.rng.random() < self.crossover_rate:
                     child1, child2 = self._crossover(parent1, parent2)
                 else:
-                    child1, child2 = copy.deepcopy(parent1), copy.deepcopy(parent2)
+                    # 优化：使用 list.copy() 替代 deepcopy，染色体是简单值列表
+                    child1, child2 = parent1.copy(), parent2.copy()
                 
                 child1 = self._mutate(child1, search_space)
                 child2 = self._mutate(child2, search_space)
@@ -337,7 +343,8 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
             
             population = new_population[:self.population_size]
         
-        final_params = copy.deepcopy(spec.default_params)
+        # 优化：使用 dict.copy() 替代 deepcopy
+        final_params = spec.default_params.copy()
         final_params.update(best_params)
         
         return OptimizationResult(
