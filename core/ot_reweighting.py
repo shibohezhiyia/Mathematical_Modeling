@@ -149,7 +149,7 @@ class OTReweighter(BaseEstimator):
         C = self._pairwise_distances(X_source, X_target)
         C = C / C.max()  # 归一化
 
-        # Sinkhorn 迭代
+        # Sinkhorn 迭代（添加收敛检测，避免固定100次浪费计算）
         a = np.ones(n_source) / n_source
         b = np.ones(n_target) / n_target
         K = np.exp(-C / self.reg)
@@ -157,9 +157,15 @@ class OTReweighter(BaseEstimator):
         u = np.ones(n_source)
         v = np.ones(n_target)
 
-        for _ in range(100):
+        max_iter = 100
+        tol = 1e-6
+        for _ in range(max_iter):
+            u_prev = u.copy()
             u = a / (K @ v)
             v = b / (K.T @ u)
+            # 收敛检测：u 的变化小于阈值
+            if np.max(np.abs(u - u_prev)) < tol:
+                break
 
         # 传输计划
         P = np.diag(u) @ K @ np.diag(v)
