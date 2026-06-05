@@ -162,15 +162,8 @@ class PiecewiseEstimator(BaseEstimator, RegressorMixin):
             # 按分位数切分
             quantiles = np.linspace(0, 1, self.n_partitions + 1)
             self.partition_boundaries_ = [np.quantile(values, q) for q in quantiles]
-            labels = np.zeros(len(values), dtype=int)
-            for i in range(self.n_partitions):
-                lower = self.partition_boundaries_[i]
-                upper = self.partition_boundaries_[i + 1]
-                if i == self.n_partitions - 1:
-                    mask = (values >= lower) & (values <= upper)
-                else:
-                    mask = (values >= lower) & (values < upper)
-                labels[mask] = i
+            # 优化：使用 np.searchsorted 替代逐循环赋值，O(n log n) vs O(n*k)
+            labels = np.searchsorted(self.partition_boundaries_[1:], values, side='right').clip(0, self.n_partitions - 1)
             return labels
 
         elif self.partition_method == 'kmeans':
