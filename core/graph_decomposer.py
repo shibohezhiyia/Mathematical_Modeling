@@ -76,6 +76,12 @@ class KNNGraphBuilder:
 
         # 构建邻接矩阵
         adjacency = np.zeros((n_samples, n_samples))
+        
+        # 预计算 gamma（避免在循环内重复计算中位数）
+        if self.kernel == 'rbf':
+            gamma = 1.0 / (X.shape[1] * np.median(distances[distances > 0]) ** 2 + 1e-6)
+        else:
+            gamma = 0.0
 
         # 向量化构建邻接矩阵
         for i in range(n_samples):
@@ -83,8 +89,7 @@ class KNNGraphBuilder:
             dists = distances[i][1:]
 
             if self.kernel == 'rbf':
-                # 向量化：避免循环内的中位数计算，改用全局中位数
-                gamma = 1.0 / (X.shape[1] * np.median(distances[distances > 0]) ** 2 + 1e-6)
+                # 使用预计算的 gamma
                 weights = np.exp(-gamma * dists ** 2)
             elif self.kernel == 'cosine':
                 weights = np.ones(len(neighbors))
