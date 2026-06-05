@@ -131,20 +131,28 @@ def _correlation_report(df: pd.DataFrame, target_col: Optional[str] = None) -> D
 
 
 def _constant_columns_report(df: pd.DataFrame) -> Dict[str, Any]:
-    constants = []
-    for col in df.columns:
-        if df[col].nunique(dropna=False) <= 1:
-            constants.append({'column': col, 'value': str(df[col].iloc[0]) if len(df[col]) > 0 else 'N/A'})
-    return {'count': len(constants), 'columns': constants}
+    # 向量化：使用 nunique() 一次性计算所有列的唯一值数
+    nunique = df.nunique(dropna=False)
+    constants = nunique[nunique <= 1]
+    result = []
+    for col in constants.index:
+        val = str(df[col].iloc[0]) if len(df[col]) > 0 else 'N/A'
+        result.append({'column': col, 'value': val})
+    return {'count': len(result), 'columns': result}
 
 
 def _high_cardinality_report(df: pd.DataFrame, threshold: float = 0.9) -> Dict[str, Any]:
-    details = []
-    for col in df.select_dtypes(include=['object', 'category']).columns:
-        n_unique = df[col].nunique()
-        ratio = n_unique / len(df) if len(df) > 0 else 0
-        if ratio >= threshold:
-            details.append({'column': col, 'unique_count': int(n_unique), 'unique_ratio': round(ratio, 4)})
+    # 向量化：使用 nunique() 一次性计算所有列的唯一值数
+    obj_cols = df.select_dtypes(include=['object', 'category']).columns
+    if len(obj_cols) == 0:
+        return {'count': 0, 'columns': []}
+    n_unique = df[obj_cols].nunique()
+    ratios = n_unique / len(df) if len(df) > 0 else 0
+    high_card = ratios[ratios >= threshold]
+    details = [
+        {'column': col, 'unique_count': int(n_unique[col]), 'unique_ratio': round(ratio, 4)}
+        for col, ratio in high_card.items()
+    ]
     return {'count': len(details), 'columns': details}
 
 
@@ -153,14 +161,18 @@ def _target_leakage_report(df: pd.DataFrame, target_col: Optional[str] = None) -
         return {'count': 0, 'columns': []}
     y = df[target_col]
     leaks = []
+    # 向量化：一次性计算所有数值列与目标的相关系数
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.difference([target_col])
+    if len(numeric_cols) > 0:
+        corrs = df[numeric_cols].corrwith(y).abs()
+        perfect_corr = corrs[corrs > 0.999]
+        for col in perfect_corr.index:
+            leaks.append({'column': col, 'reason': 'perfect correlation'})
+    # 检查非数值列的一对一映射
     for col in df.columns:
-        if col == target_col:
+        if col == target_col or col in numeric_cols:
             continue
-        # Check perfect correlation or identical values
-        if df[col].dtype.kind in 'iufc':
-            if abs(df[col].corr(y)) > 0.999:
-                leaks.append({'column': col, 'reason': 'perfect correlation'})
-        elif df[col].nunique() == y.nunique() and (df.groupby(col)[target_col].nunique() == 1).all():
+        if df[col].nunique() == y.nunique() and (df.groupby(col)[target_col].nunique() == 1).all():
             leaks.append({'column': col, 'reason': 'one-to-one mapping with target'})
     return {'count': len(leaks), 'columns': leaks}
 
