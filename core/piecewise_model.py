@@ -295,11 +295,13 @@ class MixtureOfExperts(BaseEstimator, RegressorMixin):
             raise ValueError("请先调用 fit()")
 
         gate_proba = self.gate_.predict_proba(X)
-        predictions = np.zeros(len(X))
-
-        for k in range(self.n_experts):
-            expert_pred = self.experts_[k].predict(X)
-            predictions += gate_proba[:, k] * expert_pred
+        
+        # 优化：收集所有专家预测到矩阵，然后向量化加权求和
+        # 避免 Python 级循环，利用 numpy 广播机制
+        expert_preds = np.column_stack([
+            self.experts_[k].predict(X) for k in range(self.n_experts)
+        ])
+        predictions = (gate_proba * expert_preds).sum(axis=1)
 
         return predictions
 
@@ -309,19 +311,15 @@ class MixtureOfExperts(BaseEstimator, RegressorMixin):
         return self.gate_.predict_proba(X)
 
     def _create_pseudo_labels(self, y: np.ndarray, X: pd.DataFrame) -> np.ndarray:
-        """生成专家伪标签"""
+        """生成专家伪标签
+        
+        优化：使用 np.searchsorted 替代逐循环赋值，O(n log n) vs O(n*k)。
+        """
         if self.partition_method == 'quantile':
             quantiles = np.linspace(0, 1, self.n_experts + 1)
             boundaries = [np.quantile(y, q) for q in quantiles]
-            labels = np.zeros(len(y), dtype=int)
-            for i in range(self.n_experts):
-                lower = boundaries[i]
-                upper = boundaries[i + 1]
-                if i == self.n_experts - 1:
-                    mask = (y >= lower) & (y <= upper)
-                else:
-                    mask = (y >= lower) & (y < upper)
-                labels[mask] = i
+            # 使用 searchsorted 替代逐循环赋值
+            labels = np.searchsorted(boundaries[1:], y, side='right').clip(0, self.n_experts - 1)
             return labels
         else:
             from sklearn.cluster import KMeans
