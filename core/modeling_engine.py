@@ -331,11 +331,17 @@ class AutoEncoder:
         return self
     
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """执行编码"""
+        """执行编码
+        
+        优化：批量收集所有需要 drop 和 concat 的列，一次性合并，避免多次 pd.concat 内存开销。
+        """
         if not self._fitted:
             raise ValueError("请先调用 fit()")
         
         X_out = X.copy()
+        # 批量收集需要删除和新增的数据
+        cols_to_drop = []
+        dfs_to_concat = []
         
         for col, strategy in self._encoding_map.items():
             if col not in X_out.columns:
@@ -346,7 +352,8 @@ class AutoEncoder:
                 encoded = enc.transform(X_out[[col]].astype(str))
                 names = [f"{col}_{cat}" for cat in enc.categories_[0]]
                 df_enc = pd.DataFrame(encoded, columns=names, index=X_out.index)
-                X_out = pd.concat([X_out.drop(columns=[col]), df_enc], axis=1)
+                cols_to_drop.append(col)
+                dfs_to_concat.append(df_enc)
                 
             elif strategy == EncodingType.LABEL:
                 enc = self._encoders[col]
@@ -371,6 +378,13 @@ class AutoEncoder:
                 mapping = self._target_mean.get(col, {})
                 global_mean = np.mean(list(mapping.values())) if mapping else 0
                 X_out[col] = X_out[col].astype(str).map(mapping).fillna(global_mean)
+        
+        # 一次性合并所有 one-hot 编码结果（避免多次 pd.concat 的内存碎片）
+        if cols_to_drop:
+            X_out = X_out.drop(columns=cols_to_drop)
+        if dfs_to_concat:
+            # 使用 copy=False 减少内存拷贝
+            X_out = pd.concat([X_out] + dfs_to_concat, axis=1, copy=False)
         
         return X_out
     
