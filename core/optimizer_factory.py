@@ -411,8 +411,11 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
         return p1[:point] + p2[point:], p2[:point] + p1[point:]
     
     def _mutate(self, chrom: List[float], search_space: SearchSpace) -> List[float]:
-        """变异：随机替换某个基因"""
-        chrom = copy.deepcopy(chrom)
+        """变异：随机替换某个基因
+        
+        优化：使用 list.copy() 替代 deepcopy，染色体是简单值列表。
+        """
+        chrom = chrom.copy()
         if hasattr(search_space, 'build_candidates'):
             cand = search_space.build_candidates(n=16)
             gene_keys = list(search_space.keys())
