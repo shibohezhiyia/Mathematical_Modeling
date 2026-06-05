@@ -20,7 +20,6 @@ import importlib
 from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 from dataclasses import dataclass, field
 from collections import defaultdict
-from copy import deepcopy
 
 import numpy as np
 import pandas as pd
@@ -293,7 +292,8 @@ class ModelRegistry:
         if isinstance(model_cls, dict):
             model_cls = model_cls.get(task_type)
         
-        params = deepcopy(config.default_params)
+        # 优化：使用 dict.copy() 替代 deepcopy，因为 default_params 只包含简单类型
+        params = config.default_params.copy()
         params.update(override_params)
         
         if use_gpu and config.supports_gpu:
