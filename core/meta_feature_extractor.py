@@ -83,20 +83,22 @@ class MetaFeatureExtractor:
         
         # 基本规模
         meta.n_samples, meta.n_features = X.shape
-        meta.n_numeric = sum(pd.api.types.is_numeric_dtype(X[col]) for col in X.columns)
+        # 向量化：使用 select_dtypes 替代逐列 dtype 检查
+        meta.n_numeric = len(X.select_dtypes(include=[np.number]).columns)
         meta.n_categorical = meta.n_features - meta.n_numeric
         
         meta.sample_feature_ratio = meta.n_samples / max(meta.n_features, 1)
         meta.numeric_ratio = meta.n_numeric / max(meta.n_features, 1)
         meta.categorical_ratio = meta.n_categorical / max(meta.n_features, 1)
         
-        # 缺失值
-        meta.missing_ratio = X.isnull().sum().sum() / max(X.size, 1)
+        # 缺失值：使用 numpy 一次性计算，避免 sum().sum() 双重遍历
+        meta.missing_ratio = np.isnan(X.values).sum() / max(X.size, 1) if X.size > 0 else 0.0
         
         # 稀疏度（数值列零值比例）
-        numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
-        if numeric_cols:
-            meta.sparsity = (X[numeric_cols] == 0).sum().sum() / max(X[numeric_cols].size, 1)
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            numeric_values = X[numeric_cols].values
+            meta.sparsity = (numeric_values == 0).sum() / max(numeric_values.size, 1)
         
         # 特征相关性
         if len(numeric_cols) >= 2:
