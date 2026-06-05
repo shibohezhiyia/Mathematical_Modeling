@@ -623,10 +623,14 @@ class AutoFeatureSelector:
         return self.fit(X, y, task_type).transform(X)
     
     def _correlation_filter(self, X: pd.DataFrame) -> List[str]:
-        """相关性过滤：删除高共线性特征"""
+        """相关性过滤：删除高共线性特征
+        
+        优化：使用向量化 max 替代 any() 的 Python 循环。
+        """
         corr_matrix = X.corr().abs()
         upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-        to_drop = [column for column in upper.columns if any(upper[column] > self.correlation_threshold)]
+        # 向量化：使用 max(axis=0) 替代 any() 的 Python 循环
+        to_drop = upper.columns[upper.max(axis=0) > self.correlation_threshold].tolist()
         return [c for c in X.columns if c not in to_drop]
     
     def get_selected_features(self) -> List[str]:
