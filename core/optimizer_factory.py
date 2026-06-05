@@ -70,7 +70,8 @@ class RandomSearchOptimizer(BaseOptimizer):
             params = search_space.sample(rng=self.rng)
             
             try:
-                full_params = copy.deepcopy(spec.default_params)
+                # 优化：使用 dict.copy() 替代 deepcopy，因为 default_params 只包含简单类型
+                full_params = spec.default_params.copy()
                 full_params.update(params)
                 model = ModelLibrary.create_model(model_key, task_type, **full_params)
                 score = self._evaluate_model(model, X, y, task_type, metric)
