@@ -49,9 +49,13 @@ except ImportError:
 # =============================================================================
 
 def extract_meta_features(X: pd.DataFrame, y: Optional[pd.Series], task_type: TaskType) -> np.ndarray:
-    """提取数据集元特征向量 (8维)"""
+    """提取数据集元特征向量 (8维)
+    
+    优化：使用向量化操作替代 Python 循环，减少 dtype 检查开销。
+    """
     n_samples, n_features = X.shape
-    n_numeric = sum(pd.api.types.is_numeric_dtype(X[col]) for col in X.columns)
+    # 向量化：使用 select_dtypes 替代逐列 dtype 检查
+    n_numeric = len(X.select_dtypes(include=[np.number]).columns)
     n_categorical = n_features - n_numeric
     
     features = [
@@ -61,13 +65,16 @@ def extract_meta_features(X: pd.DataFrame, y: Optional[pd.Series], task_type: Ta
         n_categorical / max(n_features, 1),
     ]
     
-    missing_ratio = X.isnull().sum().sum() / max(X.size, 1)
+    # 向量化：使用 values 一次性计算缺失率，避免 sum().sum() 双重遍历
+    missing_ratio = np.isnan(X.values).sum() / max(X.size, 1) if X.size > 0 else 0.0
     features.append(missing_ratio)
     
+    # 向量化：使用 select_dtypes 筛选数值列，一次性计算零值比例
     sparsity = 0.0
-    numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
-    if numeric_cols:
-        sparsity = (X[numeric_cols] == 0).sum().sum() / max(X[numeric_cols].size, 1)
+    numeric_cols = X.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) > 0:
+        numeric_values = X[numeric_cols].values
+        sparsity = (numeric_values == 0).sum() / max(numeric_values.size, 1)
     features.append(sparsity)
     
     if y is not None and task_type == TaskType.CLASSIFICATION:
