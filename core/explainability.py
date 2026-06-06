@@ -11,9 +11,8 @@
 无 SHAP/LIME 时优雅降级，使用模型内置重要性。
 """
 
-import os
 import json
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from collections import defaultdict
 
@@ -22,7 +21,7 @@ import pandas as pd
 
 from core.workspace_manager import get_workspace_manager
 from core.modeling_engine import TaskType, ModelLibrary
-from utils.helpers import log_info, log_warning, log_error
+from utils.helpers import log_info, log_warning
 
 # 尝试导入 SHAP
 try:

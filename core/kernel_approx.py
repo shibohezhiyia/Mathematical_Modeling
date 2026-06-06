@@ -15,14 +15,14 @@
 """
 
 import warnings
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, RegressorMixin, clone
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.kernel_approximation import Nystroem, RBFSampler
 
-from utils.helpers import log_info, log_warning
+from utils.helpers import log_info
 
 warnings.filterwarnings('ignore')
 
