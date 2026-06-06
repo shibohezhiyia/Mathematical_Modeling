@@ -11,6 +11,14 @@ from core.meta_feature_extractor import MetaFeatures
 from core.modeling_engine import TaskType
 from utils.helpers import log_info
 
+# 阈值常量：将散落在各 _recommend_* 方法中的"小/中/大数据"判断统一管理
+# 这些数字在 5 个方法中被引用 10+ 次，原写为裸数字不利于调整。
+_BIG_DATA_SAMPLES = 100_000       # 大数据阈值
+_MEDIUM_DATA_SAMPLES = 10_000     # 中等数据阈值
+_SMALL_DATA_SAMPLES = 1_000       # 小数据阈值
+_HIGH_COMPLEXITY = 70             # 高复杂度阈值（满分 100）
+_MEDIUM_COMPLEXITY = 60           # 中等复杂度阈值
+
 
 @dataclass
 class StrategyRecommendation:
@@ -100,28 +108,28 @@ class AutoMLStrategy:
         """推荐优化器策略"""
         # 速度优先
         if preference == 'speed_first':
-            if meta.n_samples > 50000:
+            if meta.n_samples > _BIG_DATA_SAMPLES // 2:
                 return 'hyperband'
             return 'random'
-        
+
         # 精度优先
         if preference == 'accuracy_first':
-            if meta.complexity_score > 60:
+            if meta.complexity_score > _MEDIUM_COMPLEXITY:
                 return 'genetic'
             return 'bayesian'
-        
+
         # 探索模式（愿意尝试新方法）
         if preference == 'exploration':
-            if meta.n_samples > 10000 and meta.n_features > 50:
+            if meta.n_samples > _MEDIUM_DATA_SAMPLES and meta.n_features > 50:
                 return 'rl'
             return 'genetic'
-        
+
         # 平衡模式（默认）
-        if meta.n_samples > 100000:
+        if meta.n_samples > _BIG_DATA_SAMPLES:
             return 'hyperband'  # 大数据用多保真度
-        elif meta.n_samples < 1000:
+        elif meta.n_samples < _SMALL_DATA_SAMPLES:
             return 'bayesian'   # 小数据用贝叶斯
-        elif meta.complexity_score > 70:
+        elif meta.complexity_score > _HIGH_COMPLEXITY:
             return 'genetic'    # 高复杂度用遗传算法
         else:
             return 'bayesian'
@@ -129,48 +137,48 @@ class AutoMLStrategy:
     @staticmethod
     def _recommend_models(meta: MetaFeatures, task_type: TaskType, preference: str) -> List[str]:
         """推荐模型列表"""
-        # 分类任务
+        # 类别任务
         if task_type == TaskType.CLASSIFICATION:
             base_models = ['lr', 'xgb', 'lgb', 'rf']
-            
+
             if preference == 'speed_first':
                 return ['lr', 'dt', 'lgb']
-            
+
             if preference == 'accuracy_first':
                 base_models.extend(['et', 'gbdt', 'svm'])
-            
+
             # 大数据：去掉慢模型
-            if meta.n_samples > 100000:
+            if meta.n_samples > _BIG_DATA_SAMPLES:
                 base_models = [m for m in base_models if m not in ['svm', 'knn']]
-            
+
             # 高维：增加线性模型
             if meta.n_features > 100:
                 if 'lr' not in base_models:
                     base_models.insert(0, 'lr')
-            
+
             # 类别不平衡：增加对不平衡鲁棒的模型
             if meta.class_imbalance_ratio > 5:
                 if 'xgb' not in base_models:
                     base_models.append('xgb')
-            
+
             return base_models[:5]  # 最多5个
-        
+
         # 回归任务
         else:
             base_models = ['ridge', 'xgb', 'lgb', 'rf']
-            
+
             if preference == 'speed_first':
                 return ['ridge', 'linear', 'lgb']
-            
+
             if preference == 'accuracy_first':
                 base_models.extend(['et', 'gbdt', 'svr'])
-            
+
             # 大数据：用 LinearSVR 替代 SVR，保留更多模型
-            if meta.n_samples > 100000:
+            if meta.n_samples > _BIG_DATA_SAMPLES:
                 base_models = [m for m in base_models if m not in ['svr', 'knn']]
                 if 'linear_svr' not in base_models:
                     base_models.append('linear_svr')
-            
+
             return base_models[:5]
     
     @staticmethod
@@ -178,9 +186,9 @@ class AutoMLStrategy:
         """推荐集成策略"""
         if preference == 'speed_first':
             return 'best_single'
-        if meta.n_samples < 500:
+        if meta.n_samples < _SMALL_DATA_SAMPLES // 2:
             return 'best_single'  # 小数据集成容易过拟合
-        if meta.complexity_score > 70:
+        if meta.complexity_score > _HIGH_COMPLEXITY:
             return 'stacking'
         return 'weighted'
     
@@ -194,7 +202,7 @@ class AutoMLStrategy:
             return dl_config
         
         # 大数据 + 高维才启用
-        if meta.n_samples < 1000 or meta.n_features < 10:
+        if meta.n_samples < _SMALL_DATA_SAMPLES or meta.n_features < 10:
             return dl_config
         
         dl_config['enabled'] = True
@@ -223,9 +231,9 @@ class AutoMLStrategy:
         }.get(optimizer, 1.5)
         
         # 数据规模倍增
-        if meta.n_samples > 100000:
+        if meta.n_samples > _BIG_DATA_SAMPLES:
             multiplier *= 2.0
-        elif meta.n_samples > 10000:
+        elif meta.n_samples > _MEDIUM_DATA_SAMPLES:
             multiplier *= 1.5
         
         total_minutes = base_time * multiplier
