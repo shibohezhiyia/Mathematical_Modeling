@@ -15,12 +15,13 @@ import os
 import time
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field, asdict
-from copy import deepcopy
 
 import numpy as np
 import pandas as pd
 
 from core.modeling_engine import TaskType
+from core.meta_feature_extractor import MetaFeatureExtractor, MetaFeatures
+from core.automl_strategy import AutoMLStrategy
 from utils.helpers import log_info, log_warning
 
 
@@ -69,7 +70,6 @@ class DatasetFingerprint:
     def from_meta_features(cls, meta: 'MetaFeatures', X: pd.DataFrame,
                            task_type: TaskType) -> 'DatasetFingerprint':
         """从 MetaFeatures 和原始数据构建完整指纹"""
-        from core.meta_feature_extractor import MetaFeatures
         fp = cls(
             n_samples=meta.n_samples,
             n_features=meta.n_features,
@@ -386,7 +386,6 @@ class MetaLearningModelRecommender:
         self.kb = knowledge_base or MetaKnowledgeBase()
         self.min_similarity = min_similarity
         self.fallback_to_rules = fallback_to_rules
-        from core.meta_feature_extractor import MetaFeatureExtractor
         self._extractor = MetaFeatureExtractor()
     
     def recommend(self, X: pd.DataFrame, y: Optional[pd.Series],
@@ -497,9 +496,6 @@ class MetaLearningModelRecommender:
                              task_type: TaskType,
                              preference: str) -> Dict[str, Any]:
         """启发式兜底推荐"""
-        from core.automl_strategy import AutoMLStrategy
-        from core.meta_feature_extractor import MetaFeatures
-        
         # 构造 MetaFeatures
         meta = MetaFeatures(
             n_samples=fingerprint.n_samples,
