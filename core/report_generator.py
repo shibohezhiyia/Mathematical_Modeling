@@ -120,7 +120,6 @@ def generate_word_report(
     """Generate a Word report. Falls back to HTML if python-docx not installed."""
     try:
         from docx import Document
-        from docx.shared import Inches
         doc = Document()
         doc.add_heading('Modeling Report', 0)
         doc.add_paragraph(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
