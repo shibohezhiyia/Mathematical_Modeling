@@ -25,9 +25,7 @@ Mathematical Modeling - 可视化模块
 """
 
 import os
-import warnings
 from typing import Dict, List, Optional, Tuple, Any, Union
-from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -133,7 +131,8 @@ def _close_fig(fig: Any) -> None:
     try:
         import matplotlib.pyplot as plt
         plt.close(fig)
-    except:
+    except Exception:
+        # 关闭图表是 best-effort 操作；matplotlib 未安装或图已被关闭时静默跳过
         pass
 
 
