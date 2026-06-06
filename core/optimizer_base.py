@@ -7,14 +7,13 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
-from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
 
-from core.modeling_engine import ModelLibrary, TaskType, TaskTypeDetector
+from core.modeling_engine import ModelLibrary, TaskType
 from core.search_space import SearchSpace
 from core.smart_early_stopper import SmartEarlyStopper, SmartEarlyStopConfig
 from core.adaptive_search_space import AdaptiveSearchSpace, AdaptationConfig

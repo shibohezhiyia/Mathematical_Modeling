@@ -7,7 +7,7 @@
 
 import math
 from typing import Dict, Optional, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd

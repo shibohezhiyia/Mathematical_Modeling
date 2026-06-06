@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 from core.meta_feature_extractor import MetaFeatures
 from core.modeling_engine import TaskType
-from utils.helpers import log_info
 
 # 阈值常量：将散落在各 _recommend_* 方法中的"小/中/大数据"判断统一管理
 # 这些数字在 5 个方法中被引用 10+ 次，原写为裸数字不利于调整。

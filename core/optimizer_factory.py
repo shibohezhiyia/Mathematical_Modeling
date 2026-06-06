@@ -14,9 +14,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from core.modeling_engine import ModelLibrary, TaskType, TaskTypeDetector
+from core.modeling_engine import ModelLibrary, TaskType
 from core.optimizer_base import BaseOptimizer, OptimizationResult
-from utils.helpers import log_info, log_warning
+from utils.helpers import log_info
 from core.search_space import SearchSpace
 from core.adaptive_search_space import AdaptiveSearchSpace
 from core.progress_bar import progress_range

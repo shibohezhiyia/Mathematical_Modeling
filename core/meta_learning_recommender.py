@@ -22,7 +22,7 @@ import pandas as pd
 from core.modeling_engine import TaskType
 from core.meta_feature_extractor import MetaFeatureExtractor, MetaFeatures
 from core.automl_strategy import AutoMLStrategy
-from utils.helpers import log_info, log_warning
+from utils.helpers import log_warning
 
 
 @dataclass
