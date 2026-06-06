@@ -5,7 +5,6 @@ Generates Word/HTML reports from modeling results.
 """
 import base64
 import io
-import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 

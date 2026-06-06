@@ -12,8 +12,7 @@
 """
 
 import os
-from typing import Optional, List, Tuple, Dict, Any, Callable, Union
-from pathlib import Path
+from typing import Optional, List, Tuple, Dict, Any, Union
 
 import numpy as np
 import pandas as pd
@@ -23,8 +22,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-
-from utils.helpers import log_info, log_warning
 
 TORCHVISION_AVAILABLE = False
 try:

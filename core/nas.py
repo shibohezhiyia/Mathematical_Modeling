@@ -13,7 +13,7 @@ NAS:
 
 import random
 import time
-from typing import Dict, List, Optional, Tuple, Any, Union, Callable
+from typing import Dict, List, Optional, Any, Union
 from copy import deepcopy
 
 import numpy as np
