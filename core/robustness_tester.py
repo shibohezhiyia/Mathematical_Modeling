@@ -5,7 +5,7 @@ Tests model resilience against noise, missing values, distribution shift, etc.
 """
 import numpy as np
 import pandas as pd
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 from sklearn.metrics import accuracy_score, mean_squared_error
 

@@ -3,7 +3,7 @@ SHAP Explainability Engine
 
 Generates SHAP-based model explanations for better interpretability.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd

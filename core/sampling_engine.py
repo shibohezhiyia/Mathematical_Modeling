@@ -16,8 +16,7 @@
         print(report)  # 原始100万 → 采样5万，类别比例保持99.2%
 """
 
-import warnings
-from typing import Optional, Tuple, Dict, Any, Union, List
+from typing import Optional, Tuple, Dict, Any, Union
 from dataclasses import dataclass, field
 from enum import Enum
 

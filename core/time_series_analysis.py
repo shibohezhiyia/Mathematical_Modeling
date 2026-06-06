@@ -4,9 +4,8 @@ Time Series Analysis Module
 ACF/PACF, decomposition, stationarity tests, Prophet integration.
 """
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import numpy as np
 import pandas as pd
 
 
