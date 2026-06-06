@@ -5,9 +5,8 @@
 用于数据集解读、训练结果分析、错误日志诊断。
 """
 
-import json
 import textwrap
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from dataclasses import dataclass
 
 import requests
