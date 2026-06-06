@@ -5,6 +5,8 @@ Analyzes any text-based modeling problem and recommends
 a general modeling framework, not domain-specific templates.
 """
 import re
+from typing import Any, Dict, List
+
 # 预编译正则表达式，避免每次调用时重新编译
 _PROBLEM_TYPE_PATTERNS = {
     'optimization': re.compile(r'最大|最小|最优|优化|分配|调度|规划|配置|路径|成本|利润|效费|节约|资源|约束|方案|策略|尽可能|尽量|投放点|起爆点|航向|飞行方向|速度'),
@@ -30,7 +32,389 @@ _MIN_PATTERN = re.compile(r'(?:至少|最少|不低于|不小于|≥|>=)\s*(\d+)
 _INTERVAL_PATTERN = re.compile(r'间隔\s*(\d+(?:\.\d+)?)\s*s?')
 _MAXIMIZE_PATTERN = re.compile(r'(?:使|让|求|要)(.*?)(?:尽可能大|最大|最长|最高|最优|最好)')
 _MINIMIZE_PATTERN = re.compile(r'(?:使|让|求|要)(.*?)(?:尽可能小|最小|最短|最低|最少)')
-from typing import Any, Dict, List
+
+# === 模块级常量：原本散落在各函数体中的大型字典 ===
+# 提升到模块顶部后只在 import 时构建一次，避免每次 analyze_problem 调用重建。
+# （虽然数据量不大，但是 9 个 task_type × 数百行字符串模板会重复构建数百次）
+
+# 各任务类型对应的推荐模型类别（name/description/confidence）
+_MODEL_CLASSES: Dict[str, Dict[str, Any]] = {
+    'optimization': {
+        'name': '数学优化模型',
+        'description': '线性/非线性规划、整数规划、动态规划、启发式算法',
+        'confidence': 90,
+    },
+    'differential_equations': {
+        'name': '微分方程与动力学模型',
+        'description': 'ODE/PDE、 compartment模型、传播动力学、运动学方程',
+        'confidence': 85,
+    },
+    'prediction_forecast': {
+        'name': '预测与预报模型',
+        'description': '时间序列(ARIMA/Prophet)、回归、机器学习、深度学习',
+        'confidence': 85,
+    },
+    'classification': {
+        'name': '分类与识别模型',
+        'description': '逻辑回归、决策树、SVM、集成学习、神经网络',
+        'confidence': 80,
+    },
+    'clustering': {
+        'name': '聚类分析模型',
+        'description': 'K-Means、层次聚类、DBSCAN、谱聚类',
+        'confidence': 80,
+    },
+    'simulation': {
+        'name': '仿真与模拟模型',
+        'description': '蒙特卡洛模拟、Agent-based、离散事件仿真',
+        'confidence': 80,
+    },
+    'graph_network': {
+        'name': '图论与网络模型',
+        'description': '最短路径、最大流、最小生成树、网络优化、PageRank',
+        'confidence': 85,
+    },
+    'statistical_inference': {
+        'name': '统计推断模型',
+        'description': '假设检验、回归分析、方差分析、贝叶斯推断',
+        'confidence': 80,
+    },
+    'evaluation_ranking': {
+        'name': '评价与排名模型',
+        'description': '层次分析法(AHP)、TOPSIS、熵权法、模糊综合评价',
+        'confidence': 75,
+    },
+}
+# 兜底引用：未匹配到 task_type 时使用 evaluation_ranking 对应的配置
+_DEFAULT_MODEL_CLASS: Dict[str, Any] = _MODEL_CLASSES['evaluation_ranking']
+
+# 通用建模步骤（1-4 步），与具体任务类型无关
+_COMMON_STEPS: List[str] = [
+    '1. 问题理解：明确已知条件、决策变量、约束条件和目标函数',
+    '2. 符号定义：为所有变量、参数、集合建立规范的数学符号',
+    '3. 基本假设：列出简化假设（如忽略次要因素、理想化条件）',
+    '4. 数据整理：提取题目中所有数值参数，建立参数表',
+]
+
+# 各任务类型专属步骤（5-10 步）
+_TYPE_STEPS: Dict[str, List[str]] = {
+    'optimization': [
+        '5. 建立优化模型：定义决策变量 x、目标函数 f(x)、约束条件 g(x)≤0, h(x)=0',
+        '6. 判断问题规模：小规模用精确算法（单纯形、内点法），大规模用启发式（遗传算法、模拟退火）',
+        '7. 选择求解工具：scipy.optimize（连续）、PuLP/CVXPY（线性）、DEAP/自编码GA（离散）',
+        '8. 求解并验证：检查解的可行性，分析约束松紧度',
+        '9. 敏感性分析：参数扰动对最优解的影响',
+        '10. 输出结果表格：按题目要求整理为 Excel/CSV',
+    ],
+    'differential_equations': [
+        '5. 建立动力学方程：根据物理/生物/化学规律列写微分方程',
+        '6. 确定初边值条件：初始状态、边界约束',
+        '7. 解析求解（若可能）：分离变量、特征线法、格林函数',
+        '8. 数值求解：scipy.integrate.odeint/solve_ivp（ODE）、有限差分/有限元（PDE）',
+        '9. 数值实验：参数扫描、相图分析、稳定性分析',
+        '10. 结果可视化：轨迹图、相平面图、时空演化图',
+    ],
+    'prediction_forecast': [
+        '5. 数据探索：趋势、季节、周期、异常值检测',
+        '6. 特征工程：滞后特征、滑动窗口、差分、对数变换',
+        '7. 基线模型：移动平均、指数平滑、线性趋势',
+        '8. 进阶模型：ARIMA/SARIMA、Prophet、LSTM/Transformer',
+        '9. 模型评估：训练集/验证集划分，交叉验证，指标（RMSE/MAPE/R²）',
+        '10. 预测与置信区间：点预测 + 区间估计',
+    ],
+    'classification': [
+        '5. 数据预处理：缺失值处理、编码、标准化、特征选择',
+        '6. 基线模型：Logistic Regression、KNN、决策树',
+        '7. 集成模型：Random Forest、XGBoost、LightGBM',
+        '8. 深度学习：MLP、CNN（图像）、BERT（文本）',
+        '9. 评估：Accuracy、Precision、Recall、F1、AUC-ROC、混淆矩阵',
+        '10. 可解释性：特征重要性、SHAP、LIME',
+    ],
+    'clustering': [
+        '5. 特征标准化：消除量纲影响',
+        '6. 降维可视化：PCA、t-SNE、UMAP',
+        '7. 确定簇数：肘部法则、轮廓系数、Gap Statistic',
+        '8. 聚类算法：K-Means（球形）、DBSCAN（任意形状）、层次聚类（树状图）',
+        '9. 结果评估：轮廓系数、Davies-Bouldin指数、可视化检验',
+        '10. 簇特征分析：每个簇的中心、范围、主导特征',
+    ],
+    'simulation': [
+        '5. 建立仿真模型：定义实体、状态、事件、转移规则',
+        '6. 确定随机分布：根据数据或假设选择分布（正态、指数、泊松等）',
+        '7. 蒙特卡洛模拟：大量重复实验，统计输出分布',
+        '8. Agent-based：定义智能体行为规则和交互规则',
+        '9. 结果分析：均值、方差、置信区间、极端情景',
+        '10. 参数敏感性：哪些参数对结果影响最大',
+    ],
+    'graph_network': [
+        '5. 建立图模型：节点集合 V、边集合 E、权重 w(e)',
+        '6. 图属性分析：度分布、连通性、聚类系数',
+        '7. 选择算法：最短路径(Dijkstra/Floyd)、最大流(Edmonds-Karp)、最小生成树(Kruskal/Prim)',
+        '8. 网络优化：线性规划建模、整数规划建模',
+        '9. 复杂网络分析：中心性、社区发现、鲁棒性',
+        '10. 可视化：networkx + matplotlib/pyvis',
+    ],
+    'statistical_inference': [
+        '5. 描述统计：均值、方差、分位数、分布形态',
+        '6. 假设检验：t检验、卡方检验、方差分析(ANOVA)、KS检验',
+        '7. 回归分析：线性/多项式/非线性回归、正则化',
+        '8. 置信区间与显著性：p值、置信水平、效应量',
+        '9. 模型诊断：残差分析、QQ图、异方差检验',
+        '10. 结论表述：统计显著性与实际意义',
+    ],
+    'evaluation_ranking': [
+        '5. 建立指标体系：目标层、准则层、指标层',
+        '6. 数据标准化：正向化、归一化、Z-score',
+        '7. 确定权重：AHP成对比较、熵权法（客观）、组合赋权',
+        '8. 综合评价：TOPSIS（距理想解距离）、灰色关联、模糊综合',
+        '9. 敏感性分析：权重变化对排名的影响',
+        '10. 结果输出：排名表、雷达图、权重分布图',
+    ],
+}
+# 兜底引用：未匹配到 task_type 时使用 evaluation_ranking 对应的步骤
+_DEFAULT_TYPE_STEPS: List[str] = _TYPE_STEPS['evaluation_ranking']
+
+# 各任务类型对应的 Python 代码框架模板（~250 行）
+_CODE_FRAMEWORKS: Dict[str, str] = {
+    'optimization': '''
+import numpy as np
+from scipy.optimize import minimize, differential_evolution, linprog
+
+# ===== 参数定义 =====
+# 从题目中提取所有数值参数
+params = {...}
+
+# ===== 决策变量 =====
+# x = [x1, x2, ...]
+
+# ===== 目标函数 =====
+def objective(x):
+    return ...  # 根据题目建立
+
+# ===== 约束条件 =====
+constraints = [
+    {'type': 'ineq', 'fun': lambda x: ...},  # g(x) >= 0
+    {'type': 'eq',   'fun': lambda x: ...},  # h(x) = 0
+]
+bounds = [(lb, ub), ...]  # 变量上下界
+
+# ===== 求解 =====
+# 小规模连续: SLSQP
+result = minimize(objective, x0=np.zeros(n), method='SLSQP', bounds=bounds, constraints=constraints)
+
+# 大规模/非凸: 遗传算法
+# result = differential_evolution(objective, bounds, maxiter=200, seed=42, workers=-1)
+
+print("最优解:", result.x)
+print("最优值:", result.fun)
+
+# ===== 输出到Excel =====
+import pandas as pd
+pd.DataFrame({...}).to_excel('result.xlsx', index=False)
+''',
+    'differential_equations': '''
+import numpy as np
+from scipy.integrate import solve_ivp, odeint
+import matplotlib.pyplot as plt
+
+# ===== 参数 =====
+params = {...}
+
+# ===== ODE定义 =====
+def dy_dt(t, y):
+    # y = [y1, y2, ...]
+    dydt = [...]
+    return dydt
+
+# ===== 初值条件 =====
+y0 = [...]
+t_span = (0, t_max)
+t_eval = np.linspace(0, t_max, 1000)
+
+# ===== 求解 =====
+sol = solve_ivp(dy_dt, t_span, y0, t_eval=t_eval, method='RK45')
+
+# ===== 结果分析 =====
+plt.plot(sol.t, sol.y[0])
+plt.xlabel('t'); plt.ylabel('y')
+plt.show()
+''',
+    'prediction_forecast': '''
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error
+
+# ===== 数据准备 =====
+# df = pd.read_csv('data.csv')
+# X, y = df[features], df[target]
+
+# ===== 基线: ARIMA =====
+from statsmodels.tsa.arima.model import ARIMA
+model = ARIMA(train, order=(2,1,2))
+model_fit = model.fit()
+forecast = model_fit.forecast(steps=10)
+
+# ===== 进阶: XGBoost / LightGBM =====
+# from xgboost import XGBRegressor
+# model = XGBRegressor(n_estimators=200, max_depth=6)
+# model.fit(X_train, y_train)
+# y_pred = model.predict(X_test)
+
+# ===== 评估 =====
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+mape = mean_absolute_percentage_error(y_test, y_pred)
+print(f"RMSE={rmse:.4f}, MAPE={mape:.4f}")
+''',
+    'classification': '''
+import pandas as pd
+from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+
+# ===== 数据准备 =====
+# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+# ===== 模型训练 =====
+model = RandomForestClassifier(n_estimators=200, random_state=42)
+model.fit(X_train, y_train)
+
+# ===== 预测与评估 =====
+y_pred = model.predict(X_test)
+print(classification_report(y_test, y_pred))
+print(confusion_matrix(y_test, y_pred))
+
+# ===== 特征重要性 =====
+importances = pd.Series(model.feature_importances_, index=feature_names).sort_values(ascending=False)
+''',
+    'clustering': '''
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics import silhouette_score
+
+# ===== 数据标准化 =====
+X_scaled = StandardScaler().fit_transform(X)
+
+# ===== 确定K值 =====
+scores = []
+for k in range(2, 11):
+    labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X_scaled)
+    scores.append(silhouette_score(X_scaled, labels))
+best_k = np.argmax(scores) + 2
+
+# ===== 聚类 =====
+kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+labels = kmeans.fit_predict(X_scaled)
+
+# ===== 结果分析 =====
+df['cluster'] = labels
+print(df.groupby('cluster').mean())
+''',
+    'simulation': '''
+import numpy as np
+import pandas as pd
+
+# ===== 参数 =====
+n_simulations = 10000
+
+# ===== 蒙特卡洛模拟 =====
+results = []
+for i in range(n_simulations):
+    # 随机抽样
+    sample = np.random.normal(mu, sigma)
+    # 模拟逻辑
+    outcome = simulate_one(sample)
+    results.append(outcome)
+
+# ===== 结果统计 =====
+results = np.array(results)
+print(f"Mean={results.mean():.4f}, Std={results.std():.4f}")
+print(f"95% CI: [{np.percentile(results,2.5):.4f}, {np.percentile(results,97.5):.4f}]")
+
+# ===== 可视化 =====
+import matplotlib.pyplot as plt
+plt.hist(results, bins=50, edgecolor='black')
+plt.show()
+''',
+    'graph_network': '''
+import networkx as nx
+import pandas as pd
+
+# ===== 建图 =====
+G = nx.DiGraph()  # or nx.Graph()
+G.add_nodes_from([...])
+G.add_weighted_edges_from([(u, v, w), ...])
+
+# ===== 最短路径 =====
+path = nx.shortest_path(G, source='A', target='B', weight='weight')
+length = nx.shortest_path_length(G, source='A', target='B', weight='weight')
+
+# ===== 最大流 =====
+flow_value, flow_dict = nx.maximum_flow(G, 'source', 'sink')
+
+# ===== 中心性分析 =====
+betweenness = nx.betweenness_centrality(G)
+pagerank = nx.pagerank(G)
+
+# ===== 可视化 =====
+nx.draw(G, with_labels=True, node_color='lightblue')
+''',
+    'statistical_inference': '''
+import numpy as np
+import pandas as pd
+from scipy import stats
+import statsmodels.api as sm
+
+# ===== 描述统计 =====
+print(df.describe())
+
+# ===== 假设检验 =====
+# t检验
+stat, pvalue = stats.ttest_ind(group_a, group_b)
+print(f"t={stat:.4f}, p={pvalue:.4f}")
+
+# ===== 回归分析 =====
+X = sm.add_constant(df[['x1', 'x2']])
+model = sm.OLS(df['y'], X).fit()
+print(model.summary())
+
+# ===== 置信区间 =====
+conf = model.conf_int(alpha=0.05)
+''',
+    'evaluation_ranking': '''
+import numpy as np
+import pandas as pd
+
+# ===== 数据标准化 =====
+def normalize(df):
+    return (df - df.min()) / (df.max() - df.min())
+
+# ===== 熵权法求权重 =====
+def entropy_weight(df):
+    p = df / df.sum()
+    e = -np.nansum(p * np.log(p)) / np.log(len(df))
+    w = (1 - e) / (1 - e).sum()
+    return w
+
+# ===== TOPSIS =====
+def topsis(df, weights):
+    norm = df / np.sqrt((df**2).sum())
+    weighted = norm * weights
+    ideal_best = weighted.max()
+    ideal_worst = weighted.min()
+    d_best = np.sqrt(((weighted - ideal_best)**2).sum(axis=1))
+    d_worst = np.sqrt(((weighted - ideal_worst)**2).sum(axis=1))
+    score = d_worst / (d_best + d_worst)
+    return score
+
+# ===== 计算并排名 =====
+weights = entropy_weight(df)
+scores = topsis(df, weights)
+rank = scores.rank(ascending=False)
+''',
+}
 
 
 def analyze_problem(description: str) -> Dict[str, Any]:
@@ -68,46 +452,13 @@ def analyze_problem(description: str) -> Dict[str, Any]:
 
 
 def _identify_task_type(desc: str) -> str:
-    """Identify the core mathematical task."""
-    scores = {
-        'optimization': 0,
-        'differential_equations': 0,
-        'prediction_forecast': 0,
-        'classification': 0,
-        'clustering': 0,
-        'simulation': 0,
-        'graph_network': 0,
-        'statistical_inference': 0,
-        'evaluation_ranking': 0,
-    }
-    
-    # Optimization
-    scores['optimization'] += len(_PROBLEM_TYPE_PATTERNS['optimization'].findall(desc))
-    
-    # Differential equations / dynamics
-    scores['differential_equations'] += len(_PROBLEM_TYPE_PATTERNS['differential_equations'].findall(desc))
-    
-    # Prediction / forecasting
-    scores['prediction_forecast'] += len(_PROBLEM_TYPE_PATTERNS['prediction_forecast'].findall(desc))
-    
-    # Classification / recognition
-    scores['classification'] += len(_PROBLEM_TYPE_PATTERNS['classification'].findall(desc))
-    
-    # Clustering / grouping
-    scores['clustering'] += len(_PROBLEM_TYPE_PATTERNS['clustering'].findall(desc))
-    
-    # Simulation
-    scores['simulation'] += len(_PROBLEM_TYPE_PATTERNS['simulation'].findall(desc))
-    
-    # Graph / network
-    scores['graph_network'] += len(_PROBLEM_TYPE_PATTERNS['graph_network'].findall(desc))
-    
-    # Statistical inference
-    scores['statistical_inference'] += len(_PROBLEM_TYPE_PATTERNS['statistical_inference'].findall(desc))
-    
-    # Evaluation / ranking
-    scores['evaluation_ranking'] += len(_PROBLEM_TYPE_PATTERNS['evaluation_ranking'].findall(desc))
-    
+    """Identify the core mathematical task.
+
+    优化：将 9 个独立 findall+len 调用压缩为单个 dict 推导，
+    减少样板代码并利用预编译的 _PROBLEM_TYPE_PATTERNS。
+    """
+    scores = {key: len(p.findall(desc)) for key, p in _PROBLEM_TYPE_PATTERNS.items()}
+
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else 'evaluation_ranking'
 
@@ -116,13 +467,6 @@ def _extract_variables(desc: str) -> List[str]:
     """Extract potential variables from the description."""
     # Look for patterns like "x m/s", "y kg", numbers with units, or named parameters
     variables = []
-    
-    # Number + unit patterns
-    patterns = [
-        r'(\d+(?:\.\d+)?)\s*(m/s|km/h|kg|t|s|min|h|m|km|℃|°|度|个|架|枚)',
-        r'([\u4e00-\u9fa5]+?)(?:分别为|为|是|等于|约|大概)\s*(\d+(?:\.\d+)?)',
-        r'坐标[为是]\s*\(?\s*([\d\-,\.\s]+)\s*\)?',
-    ]
     
     for pat in _VAR_PATTERNS:
         for m in pat.finditer(desc):
@@ -185,388 +529,30 @@ def _extract_objectives(desc: str) -> List[str]:
 
 
 def _recommend_model_class(task_type: str, desc: str) -> Dict[str, Any]:
-    """Recommend appropriate mathematical model class."""
-    classes = {
-        'optimization': {
-            'name': '数学优化模型',
-            'description': '线性/非线性规划、整数规划、动态规划、启发式算法',
-            'confidence': 90,
-        },
-        'differential_equations': {
-            'name': '微分方程与动力学模型',
-            'description': 'ODE/PDE、 compartment模型、传播动力学、运动学方程',
-            'confidence': 85,
-        },
-        'prediction_forecast': {
-            'name': '预测与预报模型',
-            'description': '时间序列(ARIMA/Prophet)、回归、机器学习、深度学习',
-            'confidence': 85,
-        },
-        'classification': {
-            'name': '分类与识别模型',
-            'description': '逻辑回归、决策树、SVM、集成学习、神经网络',
-            'confidence': 80,
-        },
-        'clustering': {
-            'name': '聚类分析模型',
-            'description': 'K-Means、层次聚类、DBSCAN、谱聚类',
-            'confidence': 80,
-        },
-        'simulation': {
-            'name': '仿真与模拟模型',
-            'description': '蒙特卡洛模拟、Agent-based、离散事件仿真',
-            'confidence': 80,
-        },
-        'graph_network': {
-            'name': '图论与网络模型',
-            'description': '最短路径、最大流、最小生成树、网络优化、PageRank',
-            'confidence': 85,
-        },
-        'statistical_inference': {
-            'name': '统计推断模型',
-            'description': '假设检验、回归分析、方差分析、贝叶斯推断',
-            'confidence': 80,
-        },
-        'evaluation_ranking': {
-            'name': '评价与排名模型',
-            'description': '层次分析法(AHP)、TOPSIS、熵权法、模糊综合评价',
-            'confidence': 75,
-        },
-    }
-    return classes.get(task_type, classes['evaluation_ranking'])
+    """Recommend appropriate mathematical model class.
+
+    模型类别字典已提升为模块级常量 _MODEL_CLASSES。
+    未匹配到 task_type 时回退到 _DEFAULT_MODEL_CLASS。
+    """
+    return _MODEL_CLASSES.get(task_type, _DEFAULT_MODEL_CLASS)
 
 
 def _generate_steps(task_type: str, model_class: Dict) -> List[str]:
-    """Generate general modeling steps."""
-    common_steps = [
-        '1. 问题理解：明确已知条件、决策变量、约束条件和目标函数',
-        '2. 符号定义：为所有变量、参数、集合建立规范的数学符号',
-        '3. 基本假设：列出简化假设（如忽略次要因素、理想化条件）',
-        '4. 数据整理：提取题目中所有数值参数，建立参数表',
-    ]
-    
-    type_steps = {
-        'optimization': [
-            '5. 建立优化模型：定义决策变量 x、目标函数 f(x)、约束条件 g(x)≤0, h(x)=0',
-            '6. 判断问题规模：小规模用精确算法（单纯形、内点法），大规模用启发式（遗传算法、模拟退火）',
-            '7. 选择求解工具：scipy.optimize（连续）、PuLP/CVXPY（线性）、DEAP/自编码GA（离散）',
-            '8. 求解并验证：检查解的可行性，分析约束松紧度',
-            '9. 敏感性分析：参数扰动对最优解的影响',
-            '10. 输出结果表格：按题目要求整理为 Excel/CSV',
-        ],
-        'differential_equations': [
-            '5. 建立动力学方程：根据物理/生物/化学规律列写微分方程',
-            '6. 确定初边值条件：初始状态、边界约束',
-            '7. 解析求解（若可能）：分离变量、特征线法、格林函数',
-            '8. 数值求解：scipy.integrate.odeint/solve_ivp（ODE）、有限差分/有限元（PDE）',
-            '9. 数值实验：参数扫描、相图分析、稳定性分析',
-            '10. 结果可视化：轨迹图、相平面图、时空演化图',
-        ],
-        'prediction_forecast': [
-            '5. 数据探索：趋势、季节、周期、异常值检测',
-            '6. 特征工程：滞后特征、滑动窗口、差分、对数变换',
-            '7. 基线模型：移动平均、指数平滑、线性趋势',
-            '8. 进阶模型：ARIMA/SARIMA、Prophet、LSTM/Transformer',
-            '9. 模型评估：训练集/验证集划分，交叉验证，指标（RMSE/MAPE/R²）',
-            '10. 预测与置信区间：点预测 + 区间估计',
-        ],
-        'classification': [
-            '5. 数据预处理：缺失值处理、编码、标准化、特征选择',
-            '6. 基线模型：Logistic Regression、KNN、决策树',
-            '7. 集成模型：Random Forest、XGBoost、LightGBM',
-            '8. 深度学习：MLP、CNN（图像）、BERT（文本）',
-            '9. 评估：Accuracy、Precision、Recall、F1、AUC-ROC、混淆矩阵',
-            '10. 可解释性：特征重要性、SHAP、LIME',
-        ],
-        'clustering': [
-            '5. 特征标准化：消除量纲影响',
-            '6. 降维可视化：PCA、t-SNE、UMAP',
-            '7. 确定簇数：肘部法则、轮廓系数、Gap Statistic',
-            '8. 聚类算法：K-Means（球形）、DBSCAN（任意形状）、层次聚类（树状图）',
-            '9. 结果评估：轮廓系数、Davies-Bouldin指数、可视化检验',
-            '10. 簇特征分析：每个簇的中心、范围、主导特征',
-        ],
-        'simulation': [
-            '5. 建立仿真模型：定义实体、状态、事件、转移规则',
-            '6. 确定随机分布：根据数据或假设选择分布（正态、指数、泊松等）',
-            '7. 蒙特卡洛模拟：大量重复实验，统计输出分布',
-            '8. Agent-based：定义智能体行为规则和交互规则',
-            '9. 结果分析：均值、方差、置信区间、极端情景',
-            '10. 参数敏感性：哪些参数对结果影响最大',
-        ],
-        'graph_network': [
-            '5. 建立图模型：节点集合 V、边集合 E、权重 w(e)',
-            '6. 图属性分析：度分布、连通性、聚类系数',
-            '7. 选择算法：最短路径(Dijkstra/Floyd)、最大流(Edmonds-Karp)、最小生成树(Kruskal/Prim)',
-            '8. 网络优化：线性规划建模、整数规划建模',
-            '9. 复杂网络分析：中心性、社区发现、鲁棒性',
-            '10. 可视化：networkx + matplotlib/pyvis',
-        ],
-        'statistical_inference': [
-            '5. 描述统计：均值、方差、分位数、分布形态',
-            '6. 假设检验：t检验、卡方检验、方差分析(ANOVA)、KS检验',
-            '7. 回归分析：线性/多项式/非线性回归、正则化',
-            '8. 置信区间与显著性：p值、置信水平、效应量',
-            '9. 模型诊断：残差分析、QQ图、异方差检验',
-            '10. 结论表述：统计显著性与实际意义',
-        ],
-        'evaluation_ranking': [
-            '5. 建立指标体系：目标层、准则层、指标层',
-            '6. 数据标准化：正向化、归一化、Z-score',
-            '7. 确定权重：AHP成对比较、熵权法（客观）、组合赋权',
-            '8. 综合评价：TOPSIS（距理想解距离）、灰色关联、模糊综合',
-            '9. 敏感性分析：权重变化对排名的影响',
-            '10. 结果输出：排名表、雷达图、权重分布图',
-        ],
-    }
-    
-    return common_steps + type_steps.get(task_type, type_steps['evaluation_ranking'])
+    """Generate general modeling steps.
+
+    通用步骤 _COMMON_STEPS 与各类型专属步骤 _TYPE_STEPS 均为模块级常量。
+    未匹配到 task_type 时回退到 _DEFAULT_TYPE_STEPS。
+    """
+    return _COMMON_STEPS + _TYPE_STEPS.get(task_type, _DEFAULT_TYPE_STEPS)
 
 
 def _generate_code_framework(task_type: str, model_class: Dict) -> str:
-    """Generate a general Python code framework."""
-    frameworks = {
-        'optimization': '''
-import numpy as np
-from scipy.optimize import minimize, differential_evolution, linprog
+    """Generate a general Python code framework.
 
-# ===== 参数定义 =====
-# 从题目中提取所有数值参数
-params = {...}
-
-# ===== 决策变量 =====
-# x = [x1, x2, ...]
-
-# ===== 目标函数 =====
-def objective(x):
-    return ...  # 根据题目建立
-
-# ===== 约束条件 =====
-constraints = [
-    {'type': 'ineq', 'fun': lambda x: ...},  # g(x) >= 0
-    {'type': 'eq',   'fun': lambda x: ...},  # h(x) = 0
-]
-bounds = [(lb, ub), ...]  # 变量上下界
-
-# ===== 求解 =====
-# 小规模连续: SLSQP
-result = minimize(objective, x0=np.zeros(n), method='SLSQP', bounds=bounds, constraints=constraints)
-
-# 大规模/非凸: 遗传算法
-# result = differential_evolution(objective, bounds, maxiter=200, seed=42, workers=-1)
-
-print("最优解:", result.x)
-print("最优值:", result.fun)
-
-# ===== 输出到Excel =====
-import pandas as pd
-pd.DataFrame({...}).to_excel('result.xlsx', index=False)
-''',
-        'differential_equations': '''
-import numpy as np
-from scipy.integrate import solve_ivp, odeint
-import matplotlib.pyplot as plt
-
-# ===== 参数 =====
-params = {...}
-
-# ===== ODE定义 =====
-def dy_dt(t, y):
-    # y = [y1, y2, ...]
-    dydt = [...]
-    return dydt
-
-# ===== 初值条件 =====
-y0 = [...]
-t_span = (0, t_max)
-t_eval = np.linspace(0, t_max, 1000)
-
-# ===== 求解 =====
-sol = solve_ivp(dy_dt, t_span, y0, t_eval=t_eval, method='RK45')
-
-# ===== 结果分析 =====
-plt.plot(sol.t, sol.y[0])
-plt.xlabel('t'); plt.ylabel('y')
-plt.show()
-''',
-        'prediction_forecast': '''
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error
-
-# ===== 数据准备 =====
-# df = pd.read_csv('data.csv')
-# X, y = df[features], df[target]
-
-# ===== 基线: ARIMA =====
-from statsmodels.tsa.arima.model import ARIMA
-model = ARIMA(train, order=(2,1,2))
-model_fit = model.fit()
-forecast = model_fit.forecast(steps=10)
-
-# ===== 进阶: XGBoost / LightGBM =====
-# from xgboost import XGBRegressor
-# model = XGBRegressor(n_estimators=200, max_depth=6)
-# model.fit(X_train, y_train)
-# y_pred = model.predict(X_test)
-
-# ===== 评估 =====
-rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-mape = mean_absolute_percentage_error(y_test, y_pred)
-print(f"RMSE={rmse:.4f}, MAPE={mape:.4f}")
-''',
-        'classification': '''
-import pandas as pd
-from sklearn.model_selection import cross_val_score, train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix
-
-# ===== 数据准备 =====
-# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-
-# ===== 模型训练 =====
-model = RandomForestClassifier(n_estimators=200, random_state=42)
-model.fit(X_train, y_train)
-
-# ===== 预测与评估 =====
-y_pred = model.predict(X_test)
-print(classification_report(y_test, y_pred))
-print(confusion_matrix(y_test, y_pred))
-
-# ===== 特征重要性 =====
-importances = pd.Series(model.feature_importances_, index=feature_names).sort_values(ascending=False)
-''',
-        'clustering': '''
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.metrics import silhouette_score
-
-# ===== 数据标准化 =====
-X_scaled = StandardScaler().fit_transform(X)
-
-# ===== 确定K值 =====
-scores = []
-for k in range(2, 11):
-    labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X_scaled)
-    scores.append(silhouette_score(X_scaled, labels))
-best_k = np.argmax(scores) + 2
-
-# ===== 聚类 =====
-kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-labels = kmeans.fit_predict(X_scaled)
-
-# ===== 结果分析 =====
-df['cluster'] = labels
-print(df.groupby('cluster').mean())
-''',
-        'simulation': '''
-import numpy as np
-import pandas as pd
-
-# ===== 参数 =====
-n_simulations = 10000
-
-# ===== 蒙特卡洛模拟 =====
-results = []
-for i in range(n_simulations):
-    # 随机抽样
-    sample = np.random.normal(mu, sigma)
-    # 模拟逻辑
-    outcome = simulate_one(sample)
-    results.append(outcome)
-
-# ===== 结果统计 =====
-results = np.array(results)
-print(f"Mean={results.mean():.4f}, Std={results.std():.4f}")
-print(f"95% CI: [{np.percentile(results,2.5):.4f}, {np.percentile(results,97.5):.4f}]")
-
-# ===== 可视化 =====
-import matplotlib.pyplot as plt
-plt.hist(results, bins=50, edgecolor='black')
-plt.show()
-''',
-        'graph_network': '''
-import networkx as nx
-import pandas as pd
-
-# ===== 建图 =====
-G = nx.DiGraph()  # or nx.Graph()
-G.add_nodes_from([...])
-G.add_weighted_edges_from([(u, v, w), ...])
-
-# ===== 最短路径 =====
-path = nx.shortest_path(G, source='A', target='B', weight='weight')
-length = nx.shortest_path_length(G, source='A', target='B', weight='weight')
-
-# ===== 最大流 =====
-flow_value, flow_dict = nx.maximum_flow(G, 'source', 'sink')
-
-# ===== 中心性分析 =====
-betweenness = nx.betweenness_centrality(G)
-pagerank = nx.pagerank(G)
-
-# ===== 可视化 =====
-nx.draw(G, with_labels=True, node_color='lightblue')
-''',
-        'statistical_inference': '''
-import numpy as np
-import pandas as pd
-from scipy import stats
-import statsmodels.api as sm
-
-# ===== 描述统计 =====
-print(df.describe())
-
-# ===== 假设检验 =====
-# t检验
-stat, pvalue = stats.ttest_ind(group_a, group_b)
-print(f"t={stat:.4f}, p={pvalue:.4f}")
-
-# ===== 回归分析 =====
-X = sm.add_constant(df[['x1', 'x2']])
-model = sm.OLS(df['y'], X).fit()
-print(model.summary())
-
-# ===== 置信区间 =====
-conf = model.conf_int(alpha=0.05)
-''',
-        'evaluation_ranking': '''
-import numpy as np
-import pandas as pd
-
-# ===== 数据标准化 =====
-def normalize(df):
-    return (df - df.min()) / (df.max() - df.min())
-
-# ===== 熵权法求权重 =====
-def entropy_weight(df):
-    p = df / df.sum()
-    e = -np.nansum(p * np.log(p)) / np.log(len(df))
-    w = (1 - e) / (1 - e).sum()
-    return w
-
-# ===== TOPSIS =====
-def topsis(df, weights):
-    norm = df / np.sqrt((df**2).sum())
-    weighted = norm * weights
-    ideal_best = weighted.max()
-    ideal_worst = weighted.min()
-    d_best = np.sqrt(((weighted - ideal_best)**2).sum(axis=1))
-    d_worst = np.sqrt(((weighted - ideal_worst)**2).sum(axis=1))
-    score = d_worst / (d_best + d_worst)
-    return score
-
-# ===== 计算并排名 =====
-weights = entropy_weight(df)
-scores = topsis(df, weights)
-rank = scores.rank(ascending=False)
-''',
-    }
-    
-    return frameworks.get(task_type, frameworks['evaluation_ranking']).strip()
+    框架模板已提升为模块级常量 _CODE_FRAMEWORKS。
+    未匹配到 task_type 时回退到 evaluation_ranking 模板。
+    """
+    return _CODE_FRAMEWORKS.get(task_type, _CODE_FRAMEWORKS['evaluation_ranking']).strip()
 
 
 def generate_modeling_report(description: str) -> str:
