@@ -8,13 +8,19 @@
 
 所有策略可独立配置和组合使用。
 """
-import math
 import time
 from typing import Dict, List, Optional, Any, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
 
 import numpy as np
+from scipy import stats
+
+# ModelEarlyStopper.get_params 支持的模型 key 集合
+# 3 个 GBDT 系列（xgb/lgb/cat）共享 early_stopping_rounds；
+# 5 个 PyTorch 系列（mlp/cnn/lstm/gru/torch）共享 patience/min_delta/restore_best
+_GBDT_KEYS = frozenset(('xgb', 'xgboost', 'lgb', 'lightgbm', 'cat', 'catboost'))
+_TORCH_KEYS = frozenset(('mlp', 'cnn', 'lstm', 'gru', 'torch'))
 
 
 class StopReason(Enum):
@@ -94,68 +100,64 @@ class TrialEarlyStopper:
         # 新增：概率性早停的历史记录
         self._prob_history: List[float] = []
     
+    def _is_better(self, current: float, threshold: float) -> bool:
+        """根据 direction 判断 current 是否优于 threshold。
+
+        maximize: current >= threshold 视为优
+        minimize: current <= threshold 视为优
+
+        TrialEarlyStopper.should_stop 3 个 strategy 分支都使用相同的
+        maximize/minimize 比较模式，提取为辅助方法。
+        """
+        return (current >= threshold) if self.direction == 'maximize' else (current <= threshold)
+
     def should_stop(self, current_score: float) -> tuple:
         """
         判断当前 trial 是否应该早停
-        
+
         Returns:
             (should_stop: bool, reason: StopReason)
         """
         if not self.config.enabled:
             return False, StopReason.NONE
-        
+
         if len(self.scores) < self.config.warmup_trials:
             return False, StopReason.NONE
-        
+
         scores = np.array(self.scores)
-        
+
         if self.config.strategy == 'median':
-            median = np.median(scores)
-            std = np.std(scores)
-            threshold = median - self.config.min_std_factor * std
-            is_better = (current_score >= threshold) if self.direction == 'maximize' else (current_score <= threshold)
-            if not is_better:
+            threshold = np.median(scores) - self.config.min_std_factor * np.std(scores)
+            if not self._is_better(current_score, threshold):
                 self._stopped_trials += 1
                 return True, StopReason.TRIAL_MEDIAN
-        
+
         elif self.config.strategy == 'percentile':
-            p = np.percentile(scores, self.config.percentile * 100)
-            is_better = (current_score >= p) if self.direction == 'maximize' else (current_score <= p)
-            if not is_better:
+            threshold = np.percentile(scores, self.config.percentile * 100)
+            if not self._is_better(current_score, threshold):
                 self._stopped_trials += 1
                 return True, StopReason.TRIAL_PERCENTILE
-        
+
         elif self.config.strategy == 'absolute':
             threshold = self.config.absolute_threshold
-            if threshold is not None:
-                is_better = (current_score >= threshold) if self.direction == 'maximize' else (current_score <= threshold)
-                if not is_better:
-                    self._stopped_trials += 1
-                    return True, StopReason.ABSOLUTE_THRESHOLD
-        
+            if threshold is not None and not self._is_better(current_score, threshold):
+                self._stopped_trials += 1
+                return True, StopReason.ABSOLUTE_THRESHOLD
+
         # 概率性早停：基于历史分布计算当前 trial 的 p-value
         # 如果当前分数显著差（p < 0.1），以概率方式早停，避免过度保守
         if len(scores) >= 10:
-            from scipy import stats
             if self.direction == 'maximize':
-                # 计算当前分数在历史分布中的百分位
                 percentile = stats.percentileofscore(scores, current_score, kind='rank')
-                # 如果低于 10% 分位，以 50% 概率早停
-                if percentile < 10:
-                    prob = 0.5 + (10 - percentile) / 20  # 10% -> 0.5, 0% -> 1.0
-                    self._prob_history.append(prob)
-                    if len(self._prob_history) > 1 and np.random.random() < prob:
-                        self._stopped_trials += 1
-                        return True, StopReason.TRIAL_PERCENTILE
             else:
                 percentile = 100 - stats.percentileofscore(scores, current_score, kind='rank')
-                if percentile < 10:
-                    prob = 0.5 + (10 - percentile) / 20
-                    self._prob_history.append(prob)
-                    if len(self._prob_history) > 1 and np.random.random() < prob:
-                        self._stopped_trials += 1
-                        return True, StopReason.TRIAL_PERCENTILE
-        
+            if percentile < 10:
+                prob = 0.5 + (10 - percentile) / 20  # 10% -> 0.5, 0% -> 1.0
+                self._prob_history.append(prob)
+                if len(self._prob_history) > 1 and np.random.random() < prob:
+                    self._stopped_trials += 1
+                    return True, StopReason.TRIAL_PERCENTILE
+
         return False, StopReason.NONE
     
     def report(self, score: float) -> None:
@@ -272,33 +274,26 @@ class ModelEarlyStopper:
     def get_params(self, model_key: str) -> Dict[str, Any]:
         """
         获取模型特定的早停参数
-        
+
         Args:
             model_key: 模型标识（如 'xgb', 'lgb', 'catboost'）
-            
+
         Returns:
             可传入模型构造函数的早停参数字典
         """
         if not self.config.enabled:
             return {}
-        
-        params = {}
-        
-        if model_key in ('xgb', 'xgboost'):
-            params['early_stopping_rounds'] = self.config.early_stopping_rounds
-        
-        elif model_key in ('lgb', 'lightgbm'):
-            params['early_stopping_rounds'] = self.config.early_stopping_rounds
-        
-        elif model_key in ('cat', 'catboost'):
-            params['early_stopping_rounds'] = self.config.early_stopping_rounds
-        
-        elif model_key in ('mlp', 'cnn', 'lstm', 'gru', 'torch'):
-            params['early_stopping_patience'] = self.config.patience
-            params['early_stopping_min_delta'] = self.config.min_delta
-            params['early_stopping_restore_best'] = self.config.restore_best
-        
-        return params
+
+        # 支持 sklearn / XGBoost / LightGBM / CatBoost / PyTorch 五种
+        if model_key in _GBDT_KEYS:
+            return {'early_stopping_rounds': self.config.early_stopping_rounds}
+        if model_key in _TORCH_KEYS:
+            return {
+                'early_stopping_patience': self.config.patience,
+                'early_stopping_min_delta': self.config.min_delta,
+                'early_stopping_restore_best': self.config.restore_best,
+            }
+        return {}
     
     def check_convergence(self, val_score: float) -> tuple:
         """
