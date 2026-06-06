@@ -31,6 +31,14 @@ from core.accelerators import optimize_memory
 from core.workspace_manager import get_workspace_manager, set_workspace_config
 from utils.helpers import log_info, log_warning, log_error, timer
 
+# 可选特性模块的懒加载助手：3 个 try/except 块用到的内部函数
+# 都从这几个模块导入，没有循环依赖问题。提升到模块级后，4 个函数内
+# import 全部消除。
+from core.drift_detection import detect_drift
+from core.meta_feature_extractor import MetaFeatureExtractor
+from core.automl_strategy import AutoMLStrategy
+from core.visualization import plot_modeling_summary, plot_data_profile
+
 
 @dataclass
 class PipelineResult:
@@ -281,7 +289,6 @@ class IntegratedPipeline:
         # ============================================================
         if X_test is not None and len(X_test) > 0:
             try:
-                from core.drift_detection import detect_drift
                 drift_report = detect_drift(X_train, X_test, method='auto', threshold=0.05)
                 self.result.drift_report = drift_report.to_dict()
                 log_info(f"[DriftDetection] {drift_report}")
@@ -303,10 +310,7 @@ class IntegratedPipeline:
         auto_recommendation = None
         if self.optimizer == 'auto' or (self.deep_learning and self.deep_learning.get('enabled') == 'auto'):
             try:
-                from core.meta_feature_extractor import MetaFeatureExtractor
-                from core.automl_strategy import AutoMLStrategy
-                
-                meta = MetaFeatureExtractor().extract(X_train, y_train, 
+                meta = MetaFeatureExtractor().extract(X_train, y_train,
                     TaskTypeDetector.detect(y_train, X_train, self.user_task_type))
                 log_info(f"[AutoML] 元特征: n={meta.n_samples}, features={meta.n_features}, complexity={meta.complexity_score:.0f}")
                 
@@ -436,8 +440,6 @@ class IntegratedPipeline:
         if self.visualization and modeling_result:
             log_info("\n[Phase 6/7] 生成可视化图表...")
             try:
-                from core.visualization import plot_modeling_summary, plot_data_profile
-                
                 # 数据探索图
                 viz_paths = plot_data_profile(
                     df, target=self.target_col, task_type=self.user_task_type,
