@@ -9,7 +9,7 @@
 
 import numpy as np
 import pandas as pd
-from typing import List, Callable, Any, Dict, Optional
+from typing import List, Callable, Any, Dict
 
 
 # ===================== 分类投票向量化 =====================

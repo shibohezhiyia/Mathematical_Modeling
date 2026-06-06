@@ -8,9 +8,8 @@
 4. 数值稳定性改进（处理边界值）
 """
 
-import math
 import numpy as np
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Any, Tuple
 
 
 def sobol_sample_float(low: float, high: float, n: int, 
