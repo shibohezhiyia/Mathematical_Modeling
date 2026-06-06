@@ -25,7 +25,6 @@ from torch.utils.data import Dataset, DataLoader
 
 TORCHVISION_AVAILABLE = False
 try:
-    import torchvision
     from torchvision import transforms, models
     TORCHVISION_AVAILABLE = True
 except ImportError:
@@ -33,7 +32,6 @@ except ImportError:
 
 TRANSFORMERS_AVAILABLE = False
 try:
-    import transformers
     from transformers import DistilBertTokenizer, DistilBertModel
     TRANSFORMERS_AVAILABLE = True
 except ImportError:

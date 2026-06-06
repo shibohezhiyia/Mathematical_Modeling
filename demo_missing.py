@@ -4,7 +4,6 @@
 运行方式: python demo_missing.py
 """
 import os
-import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.absolute()
@@ -17,7 +16,7 @@ import pandas as pd
 import numpy as np
 
 from core.auto_pipeline import AutoMissingPipeline, PipelineConfig
-from core.missing_engine import MissingPattern, MissingStrategy, export_missing_report
+from core.missing_engine import MissingPattern, export_missing_report
 
 
 def create_demo_data():
