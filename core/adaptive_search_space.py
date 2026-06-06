@@ -10,7 +10,7 @@
 """
 import math
 from typing import Dict, List, Optional, Any, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from copy import deepcopy
 
 import numpy as np

@@ -19,7 +19,6 @@ from enum import Enum
 from functools import lru_cache
 
 import pandas as pd
-import numpy as np
 
 from utils.helpers import log_info, log_warning, timer
 

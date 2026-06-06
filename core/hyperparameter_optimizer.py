@@ -22,7 +22,7 @@ from core.modeling_engine import ModelLibrary, TaskType
 from core.optimizer_base import BaseOptimizer, OptimizationResult
 from core.workspace_manager import get_workspace_manager
 from core.progress_bar import progress_range
-from utils.helpers import log_info, log_warning, log_error
+from utils.helpers import log_info, log_warning
 
 # 尝试导入 Optuna
 try:
