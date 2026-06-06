@@ -4,11 +4,28 @@ Synthetic Data Generator
 Generates realistic datasets from problem descriptions for
 modeling competitions without provided data.
 """
+import re
 import numpy as np
 import pandas as pd
 from typing import Any, Dict, List, Optional
 
 from sklearn.datasets import make_classification, make_regression, make_blobs
+
+# 从自然语言描述中提取数字的预编译正则
+_NUMBER_RE = re.compile(r'(\d+)')
+
+# 各 task_type 对应的关键字参数白名单（generate_synthetic_data 会自动拒绝其他 kwargs）
+_SKLEARN_KWARGS_ALLOWLIST = {
+    'classification': ('n_samples', 'n_features', 'n_informative', 'n_classes', 'noise', 'random_state'),
+    'regression':     ('n_samples', 'n_features', 'n_informative', 'noise', 'random_state'),
+    'clustering':     ('n_samples', 'n_features', 'n_classes', 'noise', 'random_state'),
+}
+
+
+def _filter_kwargs(kwargs: Dict[str, Any], task_type: str) -> Dict[str, Any]:
+    """只透传白名单内的 kwargs，避免 sklearn make_* 报 unexpected keyword。"""
+    allow = _SKLEARN_KWARGS_ALLOWLIST.get(task_type, ())
+    return {k: v for k, v in kwargs.items() if k not in allow}
 
 
 def generate_synthetic_data(
@@ -22,6 +39,7 @@ def generate_synthetic_data(
     **kwargs
 ) -> pd.DataFrame:
     """Generate a synthetic dataset based on task type."""
+    extra = _filter_kwargs(kwargs, task_type)
     if task_type == 'classification':
         n_classes = n_classes or 2
         n_informative = n_informative or max(2, n_features // 2)
@@ -33,7 +51,7 @@ def generate_synthetic_data(
             n_classes=n_classes,
             flip_y=noise,
             random_state=random_state,
-            **{k: v for k, v in kwargs.items() if k not in ('n_samples', 'n_features', 'n_informative', 'n_classes', 'noise', 'random_state')}
+            **extra,
         )
         target_name = 'target'
     elif task_type == 'regression':
@@ -44,7 +62,7 @@ def generate_synthetic_data(
             n_informative=n_informative,
             noise=noise * 100,
             random_state=random_state,
-            **{k: v for k, v in kwargs.items() if k not in ('n_samples', 'n_features', 'n_informative', 'noise', 'random_state')}
+            **extra,
         )
         target_name = 'target'
     elif task_type == 'clustering':
@@ -55,7 +73,7 @@ def generate_synthetic_data(
             centers=n_classes,
             cluster_std=noise + 0.5,
             random_state=random_state,
-            **{k: v for k, v in kwargs.items() if k not in ('n_samples', 'n_features', 'n_classes', 'noise', 'random_state')}
+            **extra,
         )
         target_name = 'cluster'
     elif task_type == 'time_series':
@@ -111,8 +129,7 @@ def generate_from_description(description: str, **overrides) -> pd.DataFrame:
     elif 'time' in desc or 'series' in desc or 'forecast' in desc:
         params['task_type'] = 'time_series'
     
-    # Extract numbers
-    _NUMBER_RE = re.compile(r'(\d+)')
+    # Extract numbers (using module-level precompiled _NUMBER_RE)
     numbers = _NUMBER_RE.findall(desc)
     if len(numbers) >= 1:
         params['n_samples'] = int(numbers[0])
