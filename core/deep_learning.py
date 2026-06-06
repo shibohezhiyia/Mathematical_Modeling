@@ -12,18 +12,15 @@
 """
 
 import os
-import time
-import warnings
-from typing import Dict, List, Optional, Tuple, Any, Union, Callable
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.base import BaseEstimator
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 
-from utils.helpers import log_info, log_warning, log_error
+from utils.helpers import log_info, log_warning
 
 # 尝试导入 PyTorch
 TORCH_AVAILABLE = False
@@ -185,10 +182,10 @@ if TORCH_AVAILABLE:
                 y: Union[pd.Series, np.ndarray]) -> 'TorchMLP':
             torch.manual_seed(self.random_state)
             np.random.seed(self.random_state)
-            
-            # Resolve device string to torch.device (for sklearn clone compatibility)
-            _device = torch.device(self.device) if self.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            
+
+            # 缓存设备解析：避免 fit/predict/_evaluate 每次重复 torch.device(...)
+            _device = self._resolve_device()
+
             X_np = self.scaler_.fit_transform(X) if hasattr(X, 'values') else self.scaler_.fit_transform(np.array(X))
             
             if self.task_type == 'classification':
@@ -310,8 +307,8 @@ if TORCH_AVAILABLE:
         def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.model_ is None:
                 raise ValueError("模型未训练")
-            
-            _device = torch.device(self.device) if self.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            _device = self._resolve_device()
             X_np = self.scaler_.transform(X) if hasattr(X, 'values') else self.scaler_.transform(np.array(X))
             X_tensor = torch.FloatTensor(X_np).to(_device)
             
@@ -331,8 +328,8 @@ if TORCH_AVAILABLE:
         def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.task_type != 'classification':
                 raise ValueError("只有分类任务支持 predict_proba")
-            
-            _device = torch.device(self.device) if self.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            _device = self._resolve_device()
             X_np = self.scaler_.transform(X) if hasattr(X, 'values') else self.scaler_.transform(np.array(X))
             X_tensor = torch.FloatTensor(X_np).to(_device)
             
@@ -342,6 +339,25 @@ if TORCH_AVAILABLE:
             
             return torch.softmax(outputs, dim=1).cpu().numpy()
         
+        def _resolve_device(self) -> torch.device:
+            """解析并缓存 torch.device 对象。
+
+            self.device 既可能是 None、字符串（如 'cuda:0' / 'cpu'），
+            也可能是已经解析过的 torch.device 实例。每次 fit/predict/_evaluate
+            重复解析会浪费数十微秒；缓存到 self._device_ 后只在首次调用时解析。
+            """
+            cached = getattr(self, '_device_', None)
+            if cached is not None:
+                return cached
+            if self.device is None:
+                resolved = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            elif isinstance(self.device, torch.device):
+                resolved = self.device
+            else:
+                resolved = torch.device(self.device)
+            self._device_ = resolved
+            return resolved
+
         def _create_dataloader(self, X: np.ndarray, y: np.ndarray,
                                shuffle: bool = True,
                                device: Optional[torch.device] = None) -> DataLoader:
@@ -367,7 +383,7 @@ if TORCH_AVAILABLE:
                       device: Optional[torch.device] = None) -> float:
             self.model_.eval()
             if device is None:
-                device = torch.device(self.device) if self.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                device = self._resolve_device()
             losses: List[float] = []
             amp_active = bool(self.use_amp and device.type == 'cuda')
             with torch.no_grad():
@@ -1381,7 +1397,7 @@ def register_deep_learning_models() -> None:
     
     在 modeling_engine.py 的 ModelLibrary 初始化后调用
     """
-    from core.modeling_engine import ModelLibrary, ModelSpec, TaskType
+    from core.modeling_engine import ModelLibrary
     
     if TORCH_AVAILABLE:
         ModelLibrary._register(
