@@ -22,8 +22,8 @@
     # params => {'lr': 0.0032}
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Union, Callable
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Any
 import math
 import numpy as np
 
