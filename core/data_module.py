@@ -3,9 +3,6 @@
 """
 import os
 import re
-
-# Pre-compile commonly used regex to avoid recompilation per column
-_RE_ID_LIKE = re.compile(r"\bid\b|_id$|id_$")
 import json
 from typing import Dict, List, Union, Optional, Tuple, Any
 from dataclasses import dataclass, field
@@ -19,6 +16,23 @@ from sklearn.impute import IterativeImputer, SimpleImputer
 
 from utils.helpers import log_info, log_warning, log_error, timer
 from core.progress_bar import progress_iter
+from core.accelerators import optimize_memory
+
+# 预编译常用正则，避免每列重新编译
+_RE_ID_LIKE = re.compile(r"\bid\b|_id$|id_$")
+
+# 整数 downcast 候选表：(dtype, min, max)
+# 在 _optimize_types 中按顺序检查，找到第一个能容纳列值域的最小 dtype
+_UNSIGNED_INT_DTYPES: Tuple[Tuple[Any, int, int], ...] = (
+    (np.uint8,        0,           255),
+    (np.uint16,       0,           65535),
+    (np.uint32,       0,           4294967295),
+)
+_SIGNED_INT_DTYPES: Tuple[Tuple[Any, int, int], ...] = (
+    (np.int8,         -128,        127),
+    (np.int16,        -32768,      32767),
+    (np.int32,        -2147483648, 2147483647),
+)
 
 
 class DataType(Enum):
@@ -195,7 +209,6 @@ class DataLoader:
             df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
             
             # 内存优化
-            from core.accelerators import optimize_memory
             df = optimize_memory(df, verbose=verbose)
             
             log_info(f"[DataLoader] 分块读取完成: {file_path}, 总行数: {len(df)}, 列数: {len(df.columns)}")
@@ -208,7 +221,6 @@ class DataLoader:
             for chunk in progress_iter(reader(file_path, **default_kwargs), desc="读取", disable=not verbose):
                 chunks.append(chunk)
             df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
-            from core.accelerators import optimize_memory
             df = optimize_memory(df, verbose=verbose)
             return df
         except Exception as e:
@@ -578,34 +590,25 @@ class DataCleaner:
         for col in df.columns:
             if col not in profiles:
                 continue
-            
+
             dtype = profiles[col].inferred_type
-            
+
             if dtype == DataType.NUMERIC:
-                # 尝试降精度
+                # 尝试降精度：按值域选择最小能容纳的整数 dtype
                 col_min, col_max = df[col].min(), df[col].max()
                 if pd.notna(col_min) and pd.notna(col_max):
-                    if col_min >= 0:
-                        if col_max < 255:
-                            df[col] = df[col].astype(np.uint8)
-                        elif col_max < 65535:
-                            df[col] = df[col].astype(np.uint16)
-                        elif col_max < 4294967295:
-                            df[col] = df[col].astype(np.uint32)
-                    else:
-                        if col_min > -128 and col_max < 127:
-                            df[col] = df[col].astype(np.int8)
-                        elif col_min > -32768 and col_max < 32767:
-                            df[col] = df[col].astype(np.int16)
-                        elif col_min > -2147483648 and col_max < 2147483647:
-                            df[col] = df[col].astype(np.int32)
-            
+                    candidates = _UNSIGNED_INT_DTYPES if col_min >= 0 else _SIGNED_INT_DTYPES
+                    for target_dtype, lo, hi in candidates:
+                        if col_min >= lo and col_max <= hi:
+                            df[col] = df[col].astype(target_dtype)
+                            break
+
             elif dtype == DataType.CATEGORY:
                 n_unique = df[col].nunique()
                 n_total = len(df)
                 if n_unique / n_total < 0.5:  # 类别数占比小于50%时使用category类型
                     df[col] = df[col].astype('category')
-        
+
         return df
 
 
