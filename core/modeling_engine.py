@@ -15,7 +15,6 @@
 import os
 import time
 import warnings
-import importlib
 from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -28,10 +27,10 @@ from sklearn.kernel_approximation import Nystroem, RBFSampler
 from core.kernel_cache import KernelCache
 import pandas as pd
 from sklearn.model_selection import (
-    StratifiedKFold, KFold, train_test_split, cross_val_score
+    StratifiedKFold, KFold
 )
 from sklearn.preprocessing import (
-    StandardScaler, MinMaxScaler, RobustScaler,
+    StandardScaler,
     OneHotEncoder, LabelEncoder, OrdinalEncoder
 )
 from sklearn.feature_selection import (
@@ -41,17 +40,15 @@ from sklearn.feature_selection import (
 from sklearn.decomposition import PCA
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, log_loss, confusion_matrix, classification_report,
+    log_loss,
     mean_squared_error, mean_absolute_error, r2_score,
-    explained_variance_score, median_absolute_error,
     silhouette_score, calinski_harabasz_score, davies_bouldin_score
 )
 from sklearn.base import BaseEstimator, clone
 
-from core.workspace_manager import get_workspace_manager
-from core.progress_bar import progress_range, progress_iter
+from core.progress_bar import progress_iter
 from core.smart_early_stopper import FoldEarlyStopper, FoldEarlyStopConfig
-from utils.helpers import log_info, log_warning, log_error, timer
+from utils.helpers import log_info, log_warning
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 

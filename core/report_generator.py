@@ -3,8 +3,6 @@ Automated Report Generator
 
 Generates Word/HTML reports from modeling results.
 """
-import base64
-import io
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
