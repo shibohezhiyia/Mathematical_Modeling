@@ -34,7 +34,7 @@ except ImportError:
 TRANSFORMERS_AVAILABLE = False
 try:
     import transformers
-    from transformers import DistilBertTokenizer, DistilBertModel, AutoTokenizer, AutoModel
+    from transformers import DistilBertTokenizer, DistilBertModel
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     pass

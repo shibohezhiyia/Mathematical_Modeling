@@ -5,7 +5,6 @@
 支持通过 verbose=False 禁用。
 """
 import os
-from typing import Optional, Iterable
 
 # 尝试导入 tqdm
 try:

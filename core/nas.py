@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
 import torch
 import torch.nn as nn
 import torch.optim as optim

@@ -19,7 +19,7 @@ import pandas as pd
 from core.data_module import TypeDetector, ColumnProfile
 from core.missing_engine import (
     MissingPatternClassifier, MissingValueHandler,
-    MissingPattern, MissingStrategy, StructuralRule,
+    MissingPattern, MissingStrategy,
     ColumnMissingProfile, MissingReport, FastMissingClassifier,
 )
 from core.progress_bar import progress_iter
