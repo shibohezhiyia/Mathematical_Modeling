@@ -10,7 +10,6 @@ import os
 import sys
 import argparse
 import statistics
-import numpy as np
 
 # Ensure project root is on sys.path so `core` can be imported when running this script directly
 HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))

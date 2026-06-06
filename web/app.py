@@ -23,7 +23,7 @@ import traceback
 import time
 import re
 from functools import wraps
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from dataclasses import asdict
 from pathlib import Path
 
@@ -36,16 +36,13 @@ from werkzeug.exceptions import HTTPException
 import pandas as pd
 import numpy as np
 
-from core.data_module import DataModule
-from core.modeling_engine import ModelingEngine, TaskType, TaskTypeDetector, CrossValidator
+from core.data_module import TypeDetector, DataCleaner
+from core.modeling_engine import TaskType, TaskTypeDetector, CrossValidator
 from core.integrated_pipeline import IntegratedPipeline
-from core.evaluation_engine import print_decision_report, DecisionMode
 from core.visualization import (
     DataVisualizer, ModelVisualizer, EvaluationVisualizer,
-    plot_data_profile, plot_modeling_summary
 )
-from core.performance_scheduler import PerformanceScheduler
-from core.workspace_manager import get_workspace_manager, set_workspace_config
+from core.workspace_manager import set_workspace_config
 
 # 确保工作空间根目录始终指向项目根目录（避免 IDE/脚本启动时 cwd 不一致导致临时文件写到C盘）
 set_workspace_config(root_dir=str(PROJECT_ROOT))
@@ -53,7 +50,6 @@ set_workspace_config(root_dir=str(PROJECT_ROOT))
 from extensions.llm_analyzer import LLMAnalyzer, LLMConfig, get_default_configs
 from extensions.report_engine import (
     ReportEngine, ReportConfig, PivotConfig, CellConfig,
-    AGG_FUNCTIONS, AGG_NAMES,
 )
 from extensions.advanced_analytics import AdvancedAnalytics
 from utils.helpers import log_info, log_warning, log_error, get_log_store
@@ -62,7 +58,6 @@ from core.dependency_manager import (
     install_dependency,
     install_all_missing,
     OPTIONAL_DEPENDENCIES,
-    check_package,
     DEFAULT_THIRD_PARTY_DIR,
 )
 from core.modeling_engine import ModelLibrary
