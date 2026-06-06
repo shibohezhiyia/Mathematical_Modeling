@@ -4,6 +4,7 @@
 支持比赛级特征构造：数值交叉、多项式、目标编码、统计聚合、时间特征等。
 """
 
+import hashlib
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,6 +14,11 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import KFold, StratifiedKFold
 
 warnings.filterwarnings('ignore')
+
+# 预计算 sin/cos 周期编码的角频率常数（2π/N），避免在每个 transform 重复计算
+# 12 = 月份数，7 = 星期数
+_OMEGA_MONTH = 2.0 * np.pi / 12.0
+_OMEGA_DOW = 2.0 * np.pi / 7.0
 
 
 class AutoFeatureEngineer(BaseEstimator, TransformerMixin):
@@ -71,7 +77,6 @@ class AutoFeatureEngineer(BaseEstimator, TransformerMixin):
     @staticmethod
     def _make_cache_key(X: pd.DataFrame) -> str:
         """基于列名、形状和数据指纹生成缓存键"""
-        import hashlib
         cols = tuple(X.columns)
         shape = X.shape
         sample = pd.concat([X.head(3), X.tail(3)])
@@ -224,10 +229,10 @@ class AutoFeatureEngineer(BaseEstimator, TransformerMixin):
             X_out[f"{col}_day"] = s.dt.day.astype('float64')
             X_out[f"{col}_dow"] = s.dt.dayofweek.astype('float64')
             X_out[f"{col}_quarter"] = s.dt.quarter.astype('float64')
-            X_out[f"{col}_month_sin"] = np.sin(2 * np.pi * s.dt.month / 12)
-            X_out[f"{col}_month_cos"] = np.cos(2 * np.pi * s.dt.month / 12)
-            X_out[f"{col}_dow_sin"] = np.sin(2 * np.pi * s.dt.dayofweek / 7)
-            X_out[f"{col}_dow_cos"] = np.cos(2 * np.pi * s.dt.dayofweek / 7)
+            X_out[f"{col}_month_sin"] = np.sin(s.dt.month * _OMEGA_MONTH)
+            X_out[f"{col}_month_cos"] = np.cos(s.dt.month * _OMEGA_MONTH)
+            X_out[f"{col}_dow_sin"] = np.sin(s.dt.dayofweek * _OMEGA_DOW)
+            X_out[f"{col}_dow_cos"] = np.cos(s.dt.dayofweek * _OMEGA_DOW)
             drop_cols.append(col)
         if drop_cols:
             X_out = X_out.drop(columns=drop_cols)
