@@ -11,21 +11,20 @@
 7. 执行填充
 """
 
-from typing import Dict, List, Union, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 
 import pandas as pd
 import numpy as np
 
-from core.data_module import TypeDetector, DataType, ColumnProfile
+from core.data_module import TypeDetector, ColumnProfile
 from core.missing_engine import (
     MissingPatternClassifier, MissingValueHandler,
     MissingPattern, MissingStrategy, StructuralRule,
     ColumnMissingProfile, MissingReport, FastMissingClassifier,
-    export_missing_report
 )
 from core.progress_bar import progress_iter
-from utils.helpers import log_info, log_warning, log_error, timer
+from utils.helpers import log_info, log_warning, timer
 
 
 @dataclass
