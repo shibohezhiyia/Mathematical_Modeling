@@ -9,7 +9,7 @@
 所有策略可独立配置和组合使用。
 """
 import time
-from typing import Dict, List, Optional, Any, Callable, Union
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 

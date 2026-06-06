@@ -15,7 +15,6 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 import pandas as pd
-import numpy as np
 
 from core.data_module import TypeDetector, ColumnProfile
 from core.missing_engine import (

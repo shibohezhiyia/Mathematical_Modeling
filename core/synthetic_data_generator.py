@@ -7,7 +7,7 @@ modeling competitions without provided data.
 import re
 import numpy as np
 import pandas as pd
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from sklearn.datasets import make_classification, make_regression, make_blobs
 

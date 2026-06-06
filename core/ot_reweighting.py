@@ -22,7 +22,7 @@
 """
 
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -30,7 +30,7 @@ from sklearn.base import BaseEstimator
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
-from utils.helpers import log_info, log_warning
+from utils.helpers import log_info
 
 warnings.filterwarnings('ignore')
 

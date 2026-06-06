@@ -14,7 +14,7 @@
 """
 
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -24,7 +24,7 @@ from sklearn.feature_selection import SelectKBest, mutual_info_regression, mutua
 from sklearn.linear_model import Lasso, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-from utils.helpers import log_info, log_warning
+from utils.helpers import log_info
 
 warnings.filterwarnings('ignore')
 

@@ -17,14 +17,13 @@
 """
 
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
-from scipy import signal
 
-from utils.helpers import log_info, log_warning
+from utils.helpers import log_warning
 
 warnings.filterwarnings('ignore')
 
