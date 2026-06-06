@@ -11,8 +11,6 @@ import warnings
 
 import pandas as pd
 import numpy as np
-from sklearn.experimental import enable_iterative_imputer  # noqa
-from sklearn.impute import IterativeImputer, SimpleImputer
 
 from utils.helpers import log_info, log_warning, log_error, timer
 from core.progress_bar import progress_iter
