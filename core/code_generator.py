@@ -4,11 +4,19 @@
 根据训练结果生成可复用的 Python 脚本和 Markdown 摘要。
 """
 
-import inspect
 import textwrap
 from typing import Any, Dict, List, Optional
 
-from core.modeling_engine import ModelLibrary, TaskType, CVResult
+from core.modeling_engine import TaskType, CVResult
+
+# TaskType → (主指标, sklearn scoring) 映射
+# 同时用于 _get_primary_metric 和 _get_scoring，避免两处重复 if/elif 分支
+_TASK_METRICS = {
+    TaskType.CLASSIFICATION: ('accuracy', 'accuracy'),
+    TaskType.REGRESSION:     ('r2', 'r2'),
+    TaskType.CLUSTERING:     ('silhouette', 'silhouette'),
+}
+_DEFAULT_METRICS = ('accuracy', 'accuracy')
 
 
 def generate_model_export(
@@ -484,19 +492,9 @@ def _format_params(params: Dict[str, Any]) -> List[str]:
 
 def _get_primary_metric(task_type: TaskType) -> str:
     """获取主指标名称。"""
-    if task_type.value == 'classification':
-        return 'accuracy'
-    elif task_type.value == 'regression':
-        return 'r2'
-    else:
-        return 'silhouette'
+    return _TASK_METRICS.get(task_type, _DEFAULT_METRICS)[0]
 
 
 def _get_scoring(task_type: TaskType) -> str:
     """获取 sklearn scoring 名称。"""
-    if task_type.value == 'classification':
-        return 'accuracy'
-    elif task_type.value == 'regression':
-        return 'r2'
-    else:
-        return 'silhouette'
+    return _TASK_METRICS.get(task_type, _DEFAULT_METRICS)[1]
