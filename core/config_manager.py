@@ -218,12 +218,7 @@ class ConfigManager:
     @classmethod
     def from_pipeline(cls, pipeline: Any) -> "ConfigManager":
         """从现有 IntegratedPipeline 导出配置。"""
-        # 本地导入避免循环依赖
-        try:
-            from core.integrated_pipeline import IntegratedPipeline  # noqa: F401
-        except Exception:
-            pass
-
+        # 本地导入避免循环依赖（原 IntegratedPipeline import 是 no-op 副作用，round 69 清理）
         def _dl_cfg():
             dl = getattr(pipeline, "deep_learning", None)
             if isinstance(dl, dict):
