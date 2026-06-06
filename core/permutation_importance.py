@@ -6,9 +6,8 @@ Permutation Importance 计算引擎
 """
 
 import warnings
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
-import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 

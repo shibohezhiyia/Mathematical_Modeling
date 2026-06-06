@@ -29,10 +29,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin, clone
-from sklearn.linear_model import Ridge, LinearRegression
+from sklearn.linear_model import Ridge
 from scipy.optimize import nnls
 
-from utils.helpers import log_info, log_warning
+from utils.helpers import log_info
 
 warnings.filterwarnings('ignore')
 

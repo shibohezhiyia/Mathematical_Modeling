@@ -24,12 +24,12 @@ from sklearn.metrics import accuracy_score, roc_auc_score, f1_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 from core.accelerators import (
-    ParallelEngine, GPUManager, get_gpu_manager,
-    auto_gpu_model, optimize_memory
+    ParallelEngine, get_gpu_manager,
+    auto_gpu_model
 )
 from core.performance_scheduler import ExecutionPlan, StrategyLevel
 from core.progress_bar import progress_range, progress_iter
-from utils.helpers import log_info, log_warning, log_error, timer
+from utils.helpers import log_info, log_error
 
 
 # =============================================================================
