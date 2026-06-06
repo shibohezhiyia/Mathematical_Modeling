@@ -9,14 +9,11 @@
 5. 性能优化：分层采样 + 惰性执行 + 缓存
 """
 
-import os
 import json
 import hashlib
-import pickle
-import warnings
 from typing import Dict, List, Union, Optional, Tuple, Any, Callable
-from dataclasses import dataclass, field, asdict
-from enum import Enum, auto
+from dataclasses import dataclass, field
+from enum import Enum
 from functools import wraps
 import time
 
