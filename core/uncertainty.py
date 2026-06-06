@@ -206,6 +206,19 @@ class ConformalPredictor:
         self.task_type_: Optional[str] = None
         self.scores_: Optional[np.ndarray] = None
 
+    def _compute_q_hat(self, scores: np.ndarray) -> float:
+        """根据非一致性分数计算共形分位数 q_hat。
+
+        公式：q_level = ceil((n+1)*(1-alpha)) / n
+        修正：分位数水平 cap 在 [0, 1]，避免 np.quantile 在水平 > 1 时抛 Warning。
+
+        提取为辅助方法：fit() 在回归/分类两个分支都需要此计算，
+        之前是两段几乎相同的代码。
+        """
+        n = len(scores)
+        q_level = np.ceil((n + 1) * (1 - self.alpha)) / n
+        return float(np.quantile(scores, min(q_level, 1.0)))
+
     def fit(self, model: Any,
             X: Union[pd.DataFrame, np.ndarray],
             y: Union[pd.Series, np.ndarray],
@@ -220,11 +233,8 @@ class ConformalPredictor:
             pred = model.predict(X)
             # 非一致性分数：|y - ŷ|
             self.scores_ = np.abs(y - pred)
-            # 分位数：ceil((n+1)*(1-alpha))/n
-            n = len(self.scores_)
-            q_level = np.ceil((n + 1) * (1 - self.alpha)) / n
-            self.q_hat_ = np.quantile(self.scores_, min(q_level, 1.0))
-            log_info(f"[ConformalPredictor] 回归校准完成: q_hat={self.q_hat_:.4f}, alpha={self.alpha}, n_calib={n}")
+            self.q_hat_ = self._compute_q_hat(self.scores_)
+            log_info(f"[ConformalPredictor] 回归校准完成: q_hat={self.q_hat_:.4f}, alpha={self.alpha}, n_calib={len(self.scores_)}")
         else:
             # 分类：使用 softmax 分数的非一致性度量
             if not hasattr(model, 'predict_proba'):
@@ -233,10 +243,8 @@ class ConformalPredictor:
             # 非一致性分数：1 - ŷ_y（真实标签的概率）
             y_idx = np.searchsorted(model.classes_, y)
             self.scores_ = 1 - proba[np.arange(len(y)), y_idx]
-            n = len(self.scores_)
-            q_level = np.ceil((n + 1) * (1 - self.alpha)) / n
-            self.q_hat_ = np.quantile(self.scores_, min(q_level, 1.0))
-            log_info(f"[ConformalPredictor] 分类校准完成: q_hat={self.q_hat_:.4f}, alpha={self.alpha}, n_calib={n}")
+            self.q_hat_ = self._compute_q_hat(self.scores_)
+            log_info(f"[ConformalPredictor] 分类校准完成: q_hat={self.q_hat_:.4f}, alpha={self.alpha}, n_calib={len(self.scores_)}")
 
         return self
 
@@ -362,7 +370,8 @@ def calibrate_and_conformal(model: Any,
                             X_test: Union[pd.DataFrame, np.ndarray],
                             task_type: str = 'regression',
                             alpha: float = 0.1,
-                            calib_size: float = 0.2) -> Dict[str, Any]:
+                            calib_size: float = 0.2,
+                            random_state: int = 42) -> Dict[str, Any]:
     """
     一键完成：校准 + 共形预测
 
@@ -378,7 +387,7 @@ def calibrate_and_conformal(model: Any,
     # 划分训练/校准集
     if calib_size > 0:
         X_tr, X_calib, y_tr, y_calib = train_test_split(
-            X_train, y_train, test_size=calib_size, random_state=42
+            X_train, y_train, test_size=calib_size, random_state=random_state,
         )
         model = clone(model)
         model.fit(X_tr, y_tr)
@@ -386,7 +395,7 @@ def calibrate_and_conformal(model: Any,
         X_calib = X_train
         y_calib = y_train
 
-    cp = ConformalPredictor(alpha=alpha)
+    cp = ConformalPredictor(alpha=alpha, random_state=random_state)
     cp.fit(model, X_calib, y_calib, task_type=task_type)
 
     if task_type == 'regression':
