@@ -15,6 +15,30 @@ from scipy.stats import entropy
 
 from core.modeling_engine import TaskType
 
+# _compute_complexity 用到的"规模桶"阈值
+# 5 个样本桶和 4 个特征桶，从 5 个硬编码的 if/elif 块提取。
+# 抽到模块常量便于调整且让复杂度的 100 分制评分分布可读。
+_SAMPLE_BUCKETS = (
+    (1_000,    5),    # < 1k 样本 → 5 分
+    (10_000,  15),    # < 10k 样本 → 15 分
+    (100_000, 20),    # < 100k 样本 → 20 分
+    # >= 100k 样本 → 25 分
+)
+_FEATURE_BUCKETS = (
+    (10,     5),      # < 10 特征 → 5 分
+    (50,    10),      # < 50 特征 → 10 分
+    (200,   15),      # < 200 特征 → 15 分
+    # >= 200 特征 → 20 分
+)
+# 各项指标最大分值（cap 用）
+_MAX_SAMPLE_SCORE = 25
+_MAX_FEATURE_SCORE = 20
+_MAX_MISSING_SCORE = 15
+_MAX_IMBALANCE_SCORE = 15
+_MAX_CORRELATION_SCORE = 15
+_MAX_SPARSITY_SCORE = 10
+_TOTAL_COMPLEXITY_CAP = 100
+
 
 @dataclass
 class MetaFeatures:
@@ -133,7 +157,7 @@ class MetaFeatureExtractor:
     def _compute_complexity(self, meta: MetaFeatures) -> float:
         """
         计算数据集综合复杂度评分（0-100）
-        
+
         考虑因素：
         - 样本数（大数据更复杂）
         - 特征数（高维更复杂）
@@ -142,39 +166,35 @@ class MetaFeatureExtractor:
         - 特征相关性
         """
         score = 0.0
-        
-        # 样本规模 (0-25)
-        if meta.n_samples < 1000:
-            score += 5
-        elif meta.n_samples < 10000:
-            score += 15
-        elif meta.n_samples < 100000:
-            score += 20
-        else:
-            score += 25
-        
-        # 特征维度 (0-20)
-        if meta.n_features < 10:
-            score += 5
-        elif meta.n_features < 50:
-            score += 10
-        elif meta.n_features < 200:
-            score += 15
-        else:
-            score += 20
-        
+
+        # 样本规模：按桶查表 + 兜底（>= 最大桶 → 最大分）
+        sample_score = _MAX_SAMPLE_SCORE  # 兜底最大分
+        for threshold, value in _SAMPLE_BUCKETS:
+            if meta.n_samples < threshold:
+                sample_score = value
+                break
+        score += sample_score
+
+        # 特征维度：同样按桶查表
+        feature_score = _MAX_FEATURE_SCORE
+        for threshold, value in _FEATURE_BUCKETS:
+            if meta.n_features < threshold:
+                feature_score = value
+                break
+        score += feature_score
+
         # 缺失率 (0-15)
-        score += min(meta.missing_ratio * 100, 15)
-        
+        score += min(meta.missing_ratio * 100, _MAX_MISSING_SCORE)
+
         # 类别不平衡 (0-15, 仅分类)
         if meta.n_classes > 0:
-            imbalance_score = min(math.log2(meta.class_imbalance_ratio) * 3, 15)
+            imbalance_score = min(math.log2(meta.class_imbalance_ratio) * 3, _MAX_IMBALANCE_SCORE)
             score += imbalance_score
-        
+
         # 特征相关性 (0-15)
-        score += min(meta.feature_correlation_max * 15, 15)
-        
+        score += min(meta.feature_correlation_max * 15, _MAX_CORRELATION_SCORE)
+
         # 稀疏度 (0-10)
-        score += min(meta.sparsity * 50, 10)
-        
-        return min(score, 100)
+        score += min(meta.sparsity * 50, _MAX_SPARSITY_SCORE)
+
+        return min(score, _TOTAL_COMPLEXITY_CAP)
