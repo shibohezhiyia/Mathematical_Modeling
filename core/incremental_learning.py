@@ -3,7 +3,7 @@ Incremental Learning (lightweight)
 
 Wraps sklearn models with partial_fit for online updates.
 """
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import pandas as pd
 

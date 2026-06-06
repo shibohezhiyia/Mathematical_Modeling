@@ -8,7 +8,7 @@ import sys
 import subprocess
 import importlib
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 from utils.helpers import log_info, log_warning, log_error
 

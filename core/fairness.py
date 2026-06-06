@@ -13,7 +13,7 @@
 """
 
 import time
-from typing import Dict, List, Optional, Any, Union, Tuple
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 
 import numpy as np

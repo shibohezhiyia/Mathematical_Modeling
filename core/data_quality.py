@@ -4,8 +4,7 @@ Data Quality Report Engine
 Generates a diagnostic report before training to help users
 identify and fix data issues early.
 """
-import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd

@@ -9,7 +9,7 @@
 与 SearchSpace 兼容，可无缝替换使用。
 """
 import math
-from typing import Dict, List, Optional, Any, Tuple, Union
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from copy import deepcopy
 
