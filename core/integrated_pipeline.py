@@ -12,24 +12,22 @@
     result.report       # 完整报告
 """
 
-from typing import Dict, List, Optional, Tuple, Any, Callable
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
 import time
 
 import pandas as pd
 import numpy as np
 
-from core.performance_scheduler import PerformanceScheduler, ExecutionPlan, StrategyLevel, auto_schedule
-from core.data_module import DataModule, TypeDetector, DataCleaner
+from core.performance_scheduler import PerformanceScheduler, ExecutionPlan, StrategyLevel
 from core.auto_pipeline import AutoMissingPipeline, PipelineConfig
 from core.modeling_engine import (
     ModelingEngine, ModelingResult,
     TaskType, TaskTypeDetector,
     EncodingType, FeatureSelectionStrategy, EnsembleMethod
 )
-from core.accelerators import optimize_memory
 from core.workspace_manager import get_workspace_manager, set_workspace_config
-from utils.helpers import log_info, log_warning, log_error, timer
+from utils.helpers import log_info, log_warning, timer
 
 # 可选特性模块的懒加载助手：3 个 try/except 块用到的内部函数
 # 都从这几个模块导入，没有循环依赖问题。提升到模块级后，4 个函数内
