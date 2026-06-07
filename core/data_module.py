@@ -14,6 +14,7 @@ import numpy as np
 from utils.helpers import log_info, log_warning, log_error, timer
 from core.progress_bar import progress_iter
 from core.accelerators import optimize_memory
+from core.workspace_manager import get_workspace_manager
 
 # 预编译常用正则，避免每列重新编译
 _RE_ID_LIKE = re.compile(r"\bid\b|_id$|id_$")
@@ -767,7 +768,6 @@ class DataModule:
     
     def save_report(self, path: str) -> Optional[str]:
         """保存分析报告为JSON"""
-        from core.workspace_manager import get_workspace_manager
         wm = get_workspace_manager()
         if not wm.allow_disk_write:
             log_warning("磁盘写入已禁用，跳过保存报告")
