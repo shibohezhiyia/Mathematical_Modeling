@@ -98,25 +98,34 @@ class DatasetFingerprint:
         """计算扩展特征"""
         if X.empty:
             return
-        
+
+        # 一次遍历收集每列的 dtype 和 nunique
+        # 原代码 N 列 × 4-5 次 dtype/nunique 查询 = O(4-5N) 重复工作
+        # 修复后：单次 O(N) 收集，后续 O(1) 查表
+        col_dtype = {}
+        col_nunique = {}
+        for c in X.columns:
+            col_dtype[c] = X[c].dtype
+            col_nunique[c] = X[c].nunique(dropna=True)
+
         # 文本特征
-        text_cols = [c for c in X.columns if X[c].dtype == object and X[c].nunique() > 10]
+        text_cols = [c for c in X.columns if col_dtype[c] == object and col_nunique[c] > 10]
         self.n_text_features = len(text_cols)
         self.text_ratio = self.n_text_features / max(len(X.columns), 1)
-        
+
         # 时间特征
-        datetime_cols = [c for c in X.columns if 'datetime' in str(X[c].dtype)]
+        datetime_cols = [c for c in X.columns if 'datetime' in str(col_dtype[c])]
         self.n_datetime_features = len(datetime_cols)
         self.datetime_ratio = self.n_datetime_features / max(len(X.columns), 1)
-        
+
         # 高基数特征
-        cat_cols = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
-        high_card = [c for c in cat_cols if X[c].nunique(dropna=True) > 50]
+        cat_cols = [c for c in X.columns if not pd.api.types.is_numeric_dtype(col_dtype[c])]
+        high_card = [c for c in cat_cols if col_nunique[c] > 50]
         self.n_high_cardinality = len(high_card)
         self.high_cardinality_ratio = self.n_high_cardinality / max(len(cat_cols), 1)
-        
+
         # 偏度和峰度
-        numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
+        numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(col_dtype[c])]
         if numeric_cols:
             skew_vals = []
             kurt_vals = []
