@@ -123,11 +123,12 @@ class ConstrainedEstimator(BaseEstimator, RegressorMixin):
 
         feature_names = list(X.columns)
         constraints = ['0'] * len(feature_names)
+        # 建 dict 一次 O(n)，后续 O(1)：替代 feature_names.index(feat) O(n) 每次
+        feat_to_idx = {name: i for i, name in enumerate(feature_names)}
 
         for feat, direction in monotone_dict.items():
-            if feat in feature_names:
-                idx = feature_names.index(feat)
-                constraints[idx] = str(int(direction))
+            if feat in feat_to_idx:
+                constraints[feat_to_idx[feat]] = str(int(direction))
             elif feat.isdigit() and int(feat) < len(feature_names):
                 constraints[int(feat)] = str(int(direction))
 
