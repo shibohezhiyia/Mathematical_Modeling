@@ -576,9 +576,9 @@ class ParallelModelingEngine:
     
     def _fit_parallel(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], X_test: Optional[Union[pd.DataFrame, np.ndarray]], available_models: Dict[str, ModelConfig], feature_names: Optional[List[str]]) -> None:
         """并行训练"""
-        engine = ParallelEngine(n_jobs=min(self.plan.n_jobs, len(available_models)), 
-                                backend='thread')
-        
+        # 注：早期代码曾用 ParallelEngine 但后来改用手动 threading.Thread（避免
+        # sklearn 模型对象序列化到子进程的开销）。删除未使用的 ParallelEngine 构造。
+
         tasks = []
         for model_key, config in available_models.items():
             tasks.append((model_key, config, X, y, X_test, feature_names))
