@@ -520,7 +520,26 @@ class MissingPatternClassifier:
 
 class MissingValueHandler:
     """缺失值处理器：执行具体的填充策略"""
-    
+
+    # 类级常量：handler_map 提到此处，避免每次 handle 调用重建 13 项 dict
+    _HANDLER_MAP = {
+        MissingStrategy.MEAN: '_fill_mean',
+        MissingStrategy.MEDIAN: '_fill_median',
+        MissingStrategy.MODE: '_fill_mode',
+        MissingStrategy.CONSTANT: '_fill_constant',
+        MissingStrategy.NEW_CATEGORY: '_fill_new_category',
+        MissingStrategy.FLAG_MEDIAN: '_fill_flag_median',
+        MissingStrategy.FFILL: '_fill_ffill',
+        MissingStrategy.BFILL: '_fill_bfill',
+        MissingStrategy.INTERPOLATE: '_fill_interpolate',
+        MissingStrategy.CONDITIONAL_MEDIAN: '_fill_conditional_median',
+        MissingStrategy.CONDITIONAL_MODE: '_fill_conditional_mode',
+        MissingStrategy.GROUP_IMPUTE: '_fill_group_impute',
+        MissingStrategy.DERIVED_FEATURE: '_fill_derived',
+        MissingStrategy.DROP_ROW: '_drop_rows',
+        MissingStrategy.DROP_COL: '_drop_col',
+    }
+
     def __init__(self, cache: Optional[CacheManager] = None) -> None:
         self.cache = cache or CacheManager()
         self._imputer_cache: Dict[str, Any] = {}
@@ -552,21 +571,7 @@ class MissingValueHandler:
             return df
         
         handler_map = {
-            MissingStrategy.MEAN: self._fill_mean,
-            MissingStrategy.MEDIAN: self._fill_median,
-            MissingStrategy.MODE: self._fill_mode,
-            MissingStrategy.CONSTANT: self._fill_constant,
-            MissingStrategy.NEW_CATEGORY: self._fill_new_category,
-            MissingStrategy.FLAG_MEDIAN: self._fill_flag_median,
-            MissingStrategy.FFILL: self._fill_ffill,
-            MissingStrategy.BFILL: self._fill_bfill,
-            MissingStrategy.INTERPOLATE: self._fill_interpolate,
-            MissingStrategy.CONDITIONAL_MEDIAN: self._fill_conditional_median,
-            MissingStrategy.CONDITIONAL_MODE: self._fill_conditional_mode,
-            MissingStrategy.GROUP_IMPUTE: self._fill_group_impute,
-            MissingStrategy.DERIVED_FEATURE: self._fill_derived,
-            MissingStrategy.DROP_ROW: self._drop_rows,
-            MissingStrategy.DROP_COL: self._drop_col,
+            k: getattr(self, v) for k, v in self._HANDLER_MAP.items()
         }
         
         handler = handler_map.get(strategy)
