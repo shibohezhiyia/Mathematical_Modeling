@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
 from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics.pairwise import rbf_kernel
 from sklearn.preprocessing import StandardScaler
 
 from utils.helpers import log_info
@@ -199,8 +200,6 @@ class OTReweighter(BaseEstimator):
         Kernel Mean Matching (KMM)
         最小化：||E_source[w·φ(x)] - E_target[φ(x)]||
         """
-        from sklearn.metrics.pairwise import rbf_kernel
-
         n_source = len(X_source)
         # 合并数据
         X_all = np.vstack([X_source, X_target])
