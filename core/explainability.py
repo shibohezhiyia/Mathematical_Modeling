@@ -21,6 +21,7 @@ import pandas as pd
 from core.workspace_manager import get_workspace_manager
 from core.modeling_engine import TaskType
 from utils.helpers import log_info, log_warning
+from sklearn.inspection import permutation_importance
 
 # 尝试导入 SHAP
 try:
@@ -447,8 +448,6 @@ class ExplainabilityEngine:
     def _permutation_importance(self, model: Any, X: pd.DataFrame, y: Union[pd.Series, np.ndarray],
                                  task_type: TaskType, feature_names: List[str]) -> pd.DataFrame:
         """排列重要性（作为SHAP的补充/回退）"""
-        from sklearn.inspection import permutation_importance
-        
         if task_type == TaskType.CLASSIFICATION:
             scoring = 'roc_auc_ovr_weighted' if len(np.unique(y)) > 2 else 'roc_auc'
         else:
