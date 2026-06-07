@@ -307,12 +307,14 @@ class TypeDetector:
             
             # 数值型进一步判断
             stats = series.describe()
+            # describe() 已包含 mean/std/min/max + 25%/50%/75% 分位
+            # 复用 50% 作为 median（省一次 O(n) 扫描）
             profile.stats = {
                 'mean': stats.get('mean'),
                 'std': stats.get('std'),
                 'min': stats.get('min'),
                 'max': stats.get('max'),
-                'median': series.median(),
+                'median': stats.get('50%'),
                 'skewness': series.skew(),
                 'kurtosis': series.kurtosis()
             }
