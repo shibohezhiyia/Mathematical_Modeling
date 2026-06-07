@@ -1673,18 +1673,6 @@ class CrossValidator:
                     kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
             else:
                 kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
-        elif self.fold_type == 'repeated':
-            # 重复交叉验证：多次KFold取平均，降低方差
-            from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
-            if task_type == TaskType.CLASSIFICATION:
-                y_series = pd.Series(y).reset_index(drop=True)
-                min_class_count = y_series.value_counts().min() if len(y_series) > 0 else 0
-                if min_class_count >= 2:
-                    kfold = RepeatedStratifiedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
-                else:
-                    kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
-            else:
-                kfold = RepeatedKFold(n_splits=self.n_splits, n_repeats=3, random_state=self.random_state)
         elif self.fold_type == 'stratified':
             # 显式分层KFold（类别不平衡数据优化）
             y_series = pd.Series(y).reset_index(drop=True)
