@@ -314,7 +314,8 @@ class WorkspaceManager:
         if os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir, ignore_errors=True)
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
     
     # ------------------------------------------------------------------
@@ -354,7 +355,8 @@ class WorkspaceManager:
                 fp = os.path.join(dirpath, f)
                 try:
                     total += os.path.getsize(fp)
-                except:
+                except Exception:
+                    # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                     pass
         return total
     

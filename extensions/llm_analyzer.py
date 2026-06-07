@@ -106,7 +106,8 @@ class LLMClient:
                 detail = ""
                 try:
                     detail = e2.response.json().get("error", "")
-                except:
+                except Exception:
+                    # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                     pass
                 if "not found" in str(detail).lower() or status == 404:
                     raise ValueError(

@@ -206,7 +206,8 @@ class FairnessEngine:
                     try:
                         metrics['precision'] = float(precision_score(group_y_true, group_y_pred, average='binary', zero_division=0))
                         metrics['recall'] = float(recall_score(group_y_true, group_y_pred, average='binary', zero_division=0))
-                    except:
+                    except Exception:
+                        # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                         pass
                 else:
                     from sklearn.metrics import mean_squared_error

@@ -383,7 +383,8 @@ class TypeDetector:
                 converted = pd.to_numeric(test, errors='coerce')
                 if converted.notna().sum() / len(test) > 0.8:
                     return pd.to_numeric(series.astype(str).str.replace(',', '', regex=False), errors='coerce')
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
         return None
     
@@ -408,7 +409,8 @@ class TypeDetector:
             threshold = 0.5 if is_date_like else 0.8
             if success_rate >= threshold:
                 return pd.to_datetime(series, errors='coerce')
-        except:
+        except Exception:
+            # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass
         return None
     

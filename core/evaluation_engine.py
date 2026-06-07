@@ -288,7 +288,8 @@ class ModelEvaluator:
                 if 'n_estimators' in params:
                     return params.get('n_estimators', 1) * 100
                 return len(params)
-        except:
+        except Exception:
+            # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass
         
         # 根据模型类型启发式估计

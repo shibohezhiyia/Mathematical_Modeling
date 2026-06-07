@@ -743,7 +743,8 @@ class ParallelModelingEngine:
             }).sort_values('importance', ascending=False)
             
             return df
-        except:
+        except Exception:
+            # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             return None
     
     def _build_leaderboard(self) -> None:

@@ -355,7 +355,8 @@ class FreeReportBuilder:
                         value = "N/A"
                     else:
                         value = FreeReportBuilder._format_value(value, cell.format)
-                except:
+                except Exception:
+                    # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                     value = "N/A"
                 grid[cell.row][cell.col] = str(value)
             elif cell.type == "title":

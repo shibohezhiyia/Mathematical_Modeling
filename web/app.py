@@ -179,7 +179,8 @@ def clear_session():
         if 'upload_path' in sdata:
             try:
                 os.remove(sdata['upload_path'])
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
         user_sessions[sid] = {}
         user_sessions[sid]['train_events'] = []
@@ -535,7 +536,8 @@ def api_delete_dataset(index):
     try:
         if os.path.exists(removed['path']):
             os.remove(removed['path'])
-    except:
+    except Exception:
+        # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
         pass
     
     # 如果删除的是当前活跃数据集，切换到第一个
@@ -867,7 +869,8 @@ def api_data_filter():
             try:
                 if is_num:
                     val = float(val)
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
             
             if op == 'eq':

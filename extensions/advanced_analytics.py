@@ -416,7 +416,8 @@ class AdvancedAnalytics:
                 weights = inv_corr @ loadings_rotated
                 factor_scores = X_scaled @ weights
                 scores = factor_scores[:50, :min(3, n_fact)].tolist()
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
 
         # 生成适用性判断文字
@@ -495,7 +496,8 @@ class AdvancedAnalytics:
                                 _, pval = stats.pearsonr(clean[col1], clean[col2])
                             else:
                                 pval = None
-                        except:
+                        except Exception:
+                            # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                             pval = None
                         # 显著性标记
                         sig = ""

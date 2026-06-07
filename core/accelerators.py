@@ -84,7 +84,8 @@ class GPUManager:
         try:
             import cuml
             return cuml.cuda.device_count()
-        except:
+        except Exception:
+            # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             return 1
     
     def get_memory_info(self, device_id: int = 0) -> Dict[str, Any]:
@@ -199,7 +200,8 @@ class GPUManager:
                 return data.to_pandas()
             if hasattr(data, 'get'):
                 return data.get()
-        except:
+        except Exception:
+            # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass
         
         return data

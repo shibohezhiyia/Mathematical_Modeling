@@ -180,7 +180,8 @@ class ExplainabilityEngine:
                 explanation['prediction'] = {
                     'value': float(model.predict(instance)[0])
                 }
-        except:
+        except Exception:
+            # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass
         
         # LIME 局部解释
@@ -225,7 +226,8 @@ class ExplainabilityEngine:
                         feature_contrib.sort(key=lambda x: abs(x[1]), reverse=True)
                         explanation['top_positive'] = [(f, v) for f, v in feature_contrib if v > 0][:5]
                         explanation['top_negative'] = [(f, v) for f, v in feature_contrib if v < 0][:5]
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
         
         # 特征值
@@ -351,7 +353,8 @@ class ExplainabilityEngine:
             try:
                 explainer = shap.TreeExplainer(model)
                 method = "tree_shap"
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
         
         # LinearSHAP
@@ -359,7 +362,8 @@ class ExplainabilityEngine:
             try:
                 explainer = shap.LinearExplainer(model, background)
                 method = "linear_shap"
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
         
         # KernelSHAP（通用，慢）
@@ -373,7 +377,8 @@ class ExplainabilityEngine:
                 
                 explainer = shap.KernelExplainer(f, background)
                 method = "kernel_shap"
-            except:
+            except Exception:
+                # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
         
         if explainer is None:
