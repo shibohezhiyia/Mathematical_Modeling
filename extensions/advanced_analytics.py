@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from scipy import stats
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA, FactorAnalysis
 
 from utils.helpers import log_info
 
@@ -191,8 +193,6 @@ class AdvancedAnalytics:
     # ------------------------------------------------------------------
     def pca_analysis(self, n_components: Optional[int] = None) -> PCAResult:
         """PCA 主成分分析"""
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.decomposition import PCA
 
         if len(self.numeric_cols) < 2:
             raise ValueError("PCA 需要至少 2 个数值列")
@@ -323,8 +323,7 @@ class AdvancedAnalytics:
             rotation: 旋转方法，支持 'varimax' 和 'none'
         """
         log_info(f"开始因子分析: n_factors={n_factors}, rotation={rotation}", category="AdvancedAnalytics")
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.decomposition import FactorAnalysis as SklearnFA
+        SklearnFA = FactorAnalysis
 
         if len(self.numeric_cols) < 3:
             raise ValueError("因子分析需要至少 3 个数值列")
@@ -348,7 +347,6 @@ class AdvancedAnalytics:
         bartlett_chi2, bartlett_p, bartlett_ok = self._bartlett_test(corr_matrix, n_samples)
 
         # 先用PCA估计因子数（特征值>1规则）
-        from sklearn.decomposition import PCA
         pca_temp = PCA(n_components=n_features)
         pca_temp.fit(X_scaled)
         eigenvalues = pca_temp.explained_variance_
