@@ -27,6 +27,9 @@ from typing import Dict, Any
 from dataclasses import asdict
 from pathlib import Path
 
+# 预编译正则（IP 地址匹配，每行日志都过这道）
+_IP_PREFIX_RE = re.compile(r'^\d+\.\d+\.\d+\.\d+')
+
 # 将项目根目录加入路径
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -89,7 +92,7 @@ class StreamInterceptor:
         if not line:
             return
         # 过滤 Werkzeug 访问日志，避免刷屏
-        if re.match(r'^\d+\.\d+\.\d+\.\d+', line):
+        if _IP_PREFIX_RE.match(line):
             return
         if ' - - [' in line and ('"GET ' in line or '"POST ' in line or '"PUT ' in line):
             return
