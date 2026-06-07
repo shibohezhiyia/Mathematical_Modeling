@@ -418,10 +418,12 @@ if TORCH_AVAILABLE:
     class _CNN1DNet(nn.Module):
         """1D CNN网络"""
         def __init__(self, input_dim: int, output_dim: int,
-                     hidden_channels: List[int] = [32, 64],
+                     hidden_channels: Optional[List[int]] = None,
                      kernel_size: int = 3,
                      dropout: float = 0.3,
                      task_type: str = 'classification') -> None:
+            if hidden_channels is None:
+                hidden_channels = [32, 64]
             super().__init__()
             self.task_type = task_type
             layers: List[nn.Module] = []
@@ -796,7 +798,9 @@ if TORCH_AVAILABLE:
 
     class _AutoEncoderNet(nn.Module):
         def __init__(self, input_dim: int, encoding_dim: int = 16,
-                     hidden_dims: List[int] = [64, 32]) -> None:
+                     hidden_dims: Optional[List[int]] = None) -> None:
+            if hidden_dims is None:
+                hidden_dims = [64, 32]
             super().__init__()
             enc_layers: List[nn.Module] = []
             prev = input_dim
@@ -1007,10 +1011,12 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
     class _CNN1DNet(nn.Module):
         """1D CNN网络"""
         def __init__(self, input_dim: int, output_dim: int,
-                     hidden_channels: List[int] = [32, 64],
+                     hidden_channels: Optional[List[int]] = None,
                      kernel_size: int = 3,
                      dropout: float = 0.3,
                      task_type: str = 'classification') -> None:
+            if hidden_channels is None:
+                hidden_channels = [32, 64]
             super().__init__()
             self.task_type = task_type
             layers: List[nn.Module] = []
@@ -1300,7 +1306,9 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
     # ===================================================================
     class _AutoEncoderNet(nn.Module):
         def __init__(self, input_dim: int, encoding_dim: int = 16,
-                     hidden_dims: List[int] = [64, 32]) -> None:
+                     hidden_dims: Optional[List[int]] = None) -> None:
+            if hidden_dims is None:
+                hidden_dims = [64, 32]
             super().__init__()
             # 编码器
             enc_layers: List[nn.Module] = []
