@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.kernel_approximation import Nystroem, RBFSampler
+from sklearn.svm import SVR, LinearSVR
 
 from utils.helpers import log_info
 
@@ -82,7 +83,6 @@ class ApproxSVR(BaseEstimator, RegressorMixin):
         # 线性核不需要近似
         if self.kernel == 'linear' or n_samples < self.THRESHOLD_NYSTROEM:
             self.approx_mode_ = 'exact'
-            from sklearn.svm import SVR
             self.model_ = SVR(
                 kernel=self.kernel, C=self.C, gamma=self.gamma,
                 degree=self.degree, coef0=self.coef0, epsilon=self.epsilon,
@@ -133,7 +133,6 @@ class ApproxSVR(BaseEstimator, RegressorMixin):
                 )
 
         X_transformed = self.transformer_.fit_transform(X_fit)
-        from sklearn.svm import LinearSVR
         self.model_ = LinearSVR(
             C=self.C, epsilon=self.epsilon,
             max_iter=5000, random_state=self.random_state
