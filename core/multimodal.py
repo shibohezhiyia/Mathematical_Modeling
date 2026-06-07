@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
 from sklearn.preprocessing import LabelEncoder
+from PIL import Image
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -61,7 +62,6 @@ class _ImageDataset(Dataset):
         return len(self.df)
     
     def __getitem__(self, idx: int) -> Union[torch.Tensor, Tuple[torch.Tensor, Any]]:
-        from PIL import Image
         path = self.df.loc[idx, self.image_col]
         if not os.path.exists(str(path)):
             # 如果路径不存在，返回零张量
