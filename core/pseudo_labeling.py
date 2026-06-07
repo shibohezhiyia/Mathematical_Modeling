@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from core.logging_utils import log_info, log_warning
+
 warnings.filterwarnings('ignore')
 
 
@@ -138,8 +140,6 @@ def apply_pseudo_labeling(
     Returns:
         (retrained_model, X_combined, y_combined, report)
     """
-    from core.logging_utils import log_info, log_warning
-
     pl = PseudoLabeler(**kwargs)
     X_pseudo, y_pseudo, confidences = pl.generate(model, X_test, task_type)
 
