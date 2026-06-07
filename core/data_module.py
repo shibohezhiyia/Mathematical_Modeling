@@ -326,9 +326,10 @@ class TypeDetector:
                 return DataType.BOOLEAN, profile
             
             profile.inferred_type = DataType.NUMERIC
-            
+
             # 异常值检测（IQR方法）
-            q1, q3 = series.quantile(0.25), series.quantile(0.75)
+            # 复用 describe() 的 25%/75% 分位，避免再调 series.quantile(0.25/0.75) 两次 O(n) 扫描
+            q1, q3 = stats.get('25%'), stats.get('75%')
             iqr = q3 - q1
             lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
             n_outliers = ((series < lower) | (series > upper)).sum()
