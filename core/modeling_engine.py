@@ -1460,8 +1460,10 @@ def _run_single_fold(fold_idx, train_idx, val_idx, X, y, model, task_type, metri
         y_tr_arr = np.array(y_tr)
         unique_labels = np.unique(y_tr_arr)
         if len(unique_labels) > 0 and not np.array_equal(unique_labels, np.arange(len(unique_labels))):
+            # 向量化重编码：np.searchsorted O(n log k) 替代 Python list comp O(n) 哈希查找
+            # unique_labels 已排序且唯一，索引位置就是新编码
             label_map = {old: new for new, old in enumerate(unique_labels)}
-            y_tr = pd.Series(np.array([label_map[v] for v in y_tr_arr]), index=y_tr.index)
+            y_tr = pd.Series(np.searchsorted(unique_labels, y_tr_arr), index=y_tr.index)
 
     model_fold = clone(model)
     approx_mode = False
@@ -1527,8 +1529,18 @@ def _run_single_fold(fold_idx, train_idx, val_idx, X, y, model, task_type, metri
         pred = model_fold.predict(X_val)
 
     if task_type == TaskType.CLASSIFICATION and label_map is not None:
-        inv_map = {v: k for k, v in label_map.items()}
-        pred = np.array([inv_map.get(int(p), int(p)) for p in pred])
+        # 向量化反编码：numpy 数组 O(1) 索引查找替代 Python list comp O(n) 哈希查找
+        # label_map keys 是原始标签，values 是 0..n-1
+        pred_int = pred.astype(np.int64)
+        max_new = max(label_map.values())
+        max_pred = int(pred_int.max()) if len(pred_int) > 0 else 0
+        # 扩展到能容纳 pred 最大值的 size；超出 label_map 范围的位置用 self-mapping
+        # （保持与 inv_map.get(p, p) 一致的 fallback 行为）
+        inv_size = max(max_new, max_pred) + 1
+        inv_arr = np.arange(inv_size, dtype=np.int64)  # 默认自映射
+        for old, new in label_map.items():
+            inv_arr[new] = old
+        pred = inv_arr[pred_int]
 
     proba = None
     proba_aligned = None
@@ -1775,9 +1787,10 @@ class CrossValidator:
                     y_tr_arr = np.array(y_tr)
                     unique_labels = np.unique(y_tr_arr)
                     if len(unique_labels) > 0 and not np.array_equal(unique_labels, np.arange(len(unique_labels))):
+                        # 向量化重编码：np.searchsorted O(n log k) 替代 Python list comp O(n) 哈希查找
                         label_map = {old: new for new, old in enumerate(unique_labels)}
                         y_tr = pd.Series(
-                            np.array([label_map[v] for v in y_tr_arr]),
+                            np.searchsorted(unique_labels, y_tr_arr),
                             index=y_tr.index
                         )
                 
