@@ -19,6 +19,7 @@ import time
 
 import pandas as pd
 from core.progress_bar import progress_iter
+from core.workspace_manager import get_workspace_manager
 from sklearn.feature_selection import mutual_info_classif
 
 from utils.helpers import log_info, log_warning, timer
@@ -757,7 +758,6 @@ class FastMissingClassifier:
 
 def export_missing_report(report: MissingReport, path: str) -> Optional[str]:
     """导出缺失分析报告为JSON"""
-    from core.workspace_manager import get_workspace_manager
     wm = get_workspace_manager()
     if not wm.allow_disk_write:
         log_warning("磁盘写入已禁用，跳过导出报告")
