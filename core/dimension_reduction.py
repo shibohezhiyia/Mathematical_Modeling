@@ -22,7 +22,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.decomposition import PCA, TruncatedSVD, IncrementalPCA, KernelPCA, NMF
 from sklearn.feature_selection import SelectKBest, mutual_info_regression, mutual_info_classif
 from sklearn.linear_model import Lasso, LogisticRegression
-from sklearn.preprocessing import StandardScaler
+from sklearn.utils.extmath import randomized_svd
 
 from utils.helpers import log_info
 
@@ -267,7 +267,6 @@ class LowRankApproximator(BaseEstimator, TransformerMixin):
         X_centered = X - self.mean_
 
         # 随机 SVD
-        from sklearn.utils.extmath import randomized_svd
         self.U_, self.S_, self.Vt_ = randomized_svd(
             X_centered, n_components=self.n_components,
             random_state=self.random_state
