@@ -30,6 +30,8 @@ from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.cluster import SpectralClustering, KMeans
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+from sklearn.linear_model import Ridge
 
 from utils.helpers import log_info, log_warning
 
@@ -181,7 +183,6 @@ class CommunityDetector:
         ])
         
         # 新增：计算社区质量指标（轮廓系数）
-        from sklearn.metrics import silhouette_score
         if len(np.unique(self.labels_)) > 1 and len(np.unique(self.labels_)) < n_samples:
             try:
                 self.silhouette_score_ = silhouette_score(X, self.labels_)
@@ -372,7 +373,6 @@ class GraphDecomposer(BaseEstimator, RegressorMixin):
             from lightgbm import LGBMRegressor
             return LGBMRegressor(n_estimators=100, random_state=self.random_state, verbose=-1)
         except Exception:
-            from sklearn.linear_model import Ridge
             return Ridge(alpha=1.0, random_state=self.random_state)
 
 
