@@ -317,12 +317,14 @@ class TransferFeatureExtractor(BaseEstimator):
     """
     
     def __init__(self, encoding_dim: int = 16,
-                 hidden_dims: List[int] = [128, 64],
+                 hidden_dims: Optional[List[int]] = None,
                  pretrained_path: Optional[str] = None,
                  epochs: int = 50,
                  random_state: int = 42) -> None:
         self.encoding_dim = encoding_dim
-        self.hidden_dims = hidden_dims
+        # 修复可变默认参数 bug：原 [128, 64] 在多个实例间共享，
+        # 任何 self.hidden_dims.append() 会污染所有未来实例。
+        self.hidden_dims = hidden_dims if hidden_dims is not None else [128, 64]
         self.pretrained_path = pretrained_path
         self.epochs = epochs
         self.random_state = random_state
