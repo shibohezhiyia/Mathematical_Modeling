@@ -23,6 +23,8 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+from core.deep_learning import _AutoEncoderNet
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
 
@@ -334,7 +336,6 @@ class TransferFeatureExtractor(BaseEstimator):
     
     def fit(self, X: Union[pd.DataFrame, np.ndarray],
             y: Optional[Union[pd.Series, np.ndarray]] = None) -> 'TransferFeatureExtractor':
-        from core.deep_learning import _AutoEncoderNet
         torch.manual_seed(self.random_state)
         
         X_np = self.scaler_.fit_transform(np.array(X)).astype(np.float32)
