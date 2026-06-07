@@ -25,6 +25,7 @@ Mathematical Modeling - 可视化模块
 """
 
 import os
+from math import pi
 from typing import Dict, List, Optional, Tuple, Any, Union
 
 import numpy as np
@@ -895,8 +896,7 @@ class EvaluationVisualizer:
             return None
         
         import matplotlib.pyplot as plt
-        from math import pi
-        
+
         scores = decision_report.scores
         if not scores:
             return None
