@@ -599,6 +599,11 @@ class DataCleaner:
                         if col_min >= lo and col_max <= hi:
                             df[col] = df[col].astype(target_dtype)
                             break
+                else:
+                    # 整列 NaN / 全空：列不会贡献有效信息，尝试降精度为 float32 省内存
+                    # 仅在原 dtype 是 float64 时降级，避免强制把整数转 float
+                    if df[col].dtype == np.float64:
+                        df[col] = df[col].astype(np.float32)
 
             elif dtype == DataType.CATEGORY:
                 n_unique = df[col].nunique()
