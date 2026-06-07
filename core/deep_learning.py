@@ -21,6 +21,7 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 
 from utils.helpers import log_info, log_warning
+from core.modeling_engine import ModelLibrary
 
 # 尝试导入 PyTorch
 TORCH_AVAILABLE = False
@@ -1397,8 +1398,6 @@ def register_deep_learning_models() -> None:
     
     在 modeling_engine.py 的 ModelLibrary 初始化后调用
     """
-    from core.modeling_engine import ModelLibrary
-    
     if TORCH_AVAILABLE:
         ModelLibrary._register(
             'classification', 'torch_mlp', 'PyTorch-MLP',
