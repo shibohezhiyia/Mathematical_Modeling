@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
+from sklearn.base import clone
+from sklearn.metrics import get_scorer
 
 from core.modeling_engine import ModelLibrary, TaskType
 from core.search_space import SearchSpace
@@ -217,9 +219,6 @@ class BaseOptimizer(ABC):
         
         对 LGB/XGB/CatBoost 启用 early stopping，大幅缩短超参搜索时间。
         """
-        from sklearn.base import clone
-        from sklearn.metrics import get_scorer
-        
         scorer = get_scorer(scoring)
         scores = []
         model_name = model.__class__.__name__
