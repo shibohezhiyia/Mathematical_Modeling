@@ -32,6 +32,7 @@ import pandas as pd
 
 from core.workspace_manager import get_workspace_manager
 from utils.helpers import log_info, log_warning
+from sklearn.metrics import confusion_matrix, r2_score, roc_curve, auc
 
 # =============================================================================
 # Matplotlib 初始化与中文支持
@@ -648,8 +649,6 @@ class ModelVisualizer:
         
         import matplotlib.pyplot as plt
         import seaborn as sns
-        from sklearn.metrics import confusion_matrix
-        
         cm = confusion_matrix(y_true, y_pred, labels=labels)
         
         if normalize:
@@ -735,7 +734,6 @@ class ModelVisualizer:
                color=self.colors['danger'], linestyle='--', linewidth=2, label='理想线 (y=x)')
         
         # R²
-        from sklearn.metrics import r2_score
         r2 = r2_score(y_true_arr, y_pred_arr)
         ax.text(0.05, 0.95, f'R² = {r2:.4f}', transform=ax.transAxes,
                fontsize=12, verticalalignment='top',
@@ -768,8 +766,6 @@ class ModelVisualizer:
             return None
         
         import matplotlib.pyplot as plt
-        from sklearn.metrics import roc_curve, auc
-        
         fig, ax = plt.subplots(figsize=figsize)
         
         plotted = False
