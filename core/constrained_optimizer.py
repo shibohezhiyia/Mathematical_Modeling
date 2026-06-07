@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.linear_model import Ridge
+from sklearn.isotonic import IsotonicRegression
 from scipy.optimize import nnls
 
 from utils.helpers import log_info
@@ -295,8 +296,6 @@ class MonotonicityEnforcer:
         self.iso_: Optional[Any] = None
 
     def fit(self, feature_values: np.ndarray, predictions: np.ndarray) -> 'MonotonicityEnforcer':
-        from sklearn.isotonic import IsotonicRegression
-
         x = np.array(feature_values).ravel()
         y = np.array(predictions).ravel()
 
