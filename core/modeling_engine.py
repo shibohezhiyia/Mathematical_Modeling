@@ -31,7 +31,7 @@ from sklearn.model_selection import (
 )
 from sklearn.preprocessing import (
     StandardScaler,
-    OneHotEncoder, LabelEncoder, OrdinalEncoder
+    OneHotEncoder, LabelEncoder, OrdinalEncoder, PolynomialFeatures
 )
 from sklearn.feature_selection import (
     SelectKBest, mutual_info_classif, mutual_info_regression,
@@ -2074,7 +2074,6 @@ class EnsembleBuilder:
         
         # 新增：添加多项式特征（捕捉模型间的非线性交互）
         if meta_features.shape[1] >= 2 and meta_features.shape[1] <= 20:
-            from sklearn.preprocessing import PolynomialFeatures
             self._poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
             meta_features_poly = self._poly.fit_transform(meta_features)
             # 限制特征数避免过拟合
@@ -2875,7 +2874,6 @@ class ModelingEngine:
             log_info(f"[ModelingEngine] 聚类编码: {len(cat_cols)}个分类变量 → {X_proc.shape[1]}列")
         
         # 标准化（KMeans/Spectral等对尺度敏感）
-        from sklearn.preprocessing import StandardScaler
         scaler = StandardScaler()
         X_scaled = pd.DataFrame(
             scaler.fit_transform(X_proc),
