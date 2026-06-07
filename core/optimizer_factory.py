@@ -51,7 +51,7 @@ class RandomSearchOptimizer(BaseOptimizer):
         if not search_space:
             return OptimizationResult(
                 model_key=model_key,
-                best_params=copy.deepcopy(spec.default_params),
+                best_params=spec.default_params.copy(),
                 best_score=0.0,
                 n_trials=0,
                 sampler_type='random'
@@ -81,7 +81,7 @@ class RandomSearchOptimizer(BaseOptimizer):
                 history.append({'trial': trial + 1, 'params': params, 'score': score})
                 if score > best_score:
                     best_score = score
-                    best_params = copy.deepcopy(params)
+                    best_params = params.copy()
                 
                 # 自适应搜索空间更新
                 if is_adaptive:
@@ -98,7 +98,7 @@ class RandomSearchOptimizer(BaseOptimizer):
             except Exception:
                 continue
         
-        final_params = copy.deepcopy(spec.default_params)
+        final_params = spec.default_params.copy()
         final_params.update(best_params)
         
         return OptimizationResult(
@@ -153,7 +153,7 @@ class HyperbandOptimizer(BaseOptimizer):
         if not search_space:
             return OptimizationResult(
                 model_key=model_key,
-                best_params=copy.deepcopy(spec.default_params),
+                best_params=spec.default_params.copy(),
                 best_score=0.0,
                 n_trials=0,
                 sampler_type='hyperband'
@@ -201,7 +201,7 @@ class HyperbandOptimizer(BaseOptimizer):
                 
                 if scores[0][0] > best_score:
                     best_score = scores[0][0]
-                    best_params = copy.deepcopy(scores[0][1])
+                    best_params = scores[0][1].copy()
         
         # 优化：使用 dict.copy() 替代 deepcopy
         final_params = spec.default_params.copy()
@@ -280,7 +280,7 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
         if not search_space:
             return OptimizationResult(
                 model_key=model_key,
-                best_params=copy.deepcopy(spec.default_params),
+                best_params=spec.default_params.copy(),
                 best_score=0.0,
                 n_trials=0,
                 sampler_type='genetic'
@@ -316,7 +316,7 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
                     history.append({'trial': len(history) + 1, 'params': params, 'score': score, 'generation': gen})
                     if score > best_score:
                         best_score = score
-                        best_params = copy.deepcopy(params)
+                        best_params = params.copy()
                 except Exception:
                     fitness.append(float('-inf'))
             

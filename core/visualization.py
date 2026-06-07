@@ -1036,14 +1036,16 @@ class EvaluationVisualizer:
         # 收集各模式下的排名
         model_keys = [s.model_key for s in scores]
         rankings = {key: [] for key in model_keys}
+        default_rank = len(model_keys)
         
         for mode in modes:
             engine = AutoDecisionEngine(mode=mode)
             report = engine.decide(scores)
-            # 构建排名映射
+            # 构建排名映射：O(n) 建 dict 替代 O(n²) 的 list.index() 查找
             ranked_keys = [s.model_key for s in report.scores]
+            rank_map = {key: i for i, key in enumerate(ranked_keys)}
             for key in model_keys:
-                rankings[key].append(ranked_keys.index(key) + 1 if key in ranked_keys else len(model_keys))
+                rankings[key].append(rank_map.get(key, default_rank) + 1)
         
         fig, ax = plt.subplots(figsize=figsize)
         
