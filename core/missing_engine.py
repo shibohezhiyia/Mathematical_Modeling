@@ -376,43 +376,49 @@ class MissingPatternClassifier:
                                     candidate_cols: List[str]) -> List[StructuralRule]:
         """
         检测结构性缺失规则
-        
+
         核心逻辑：对于候选列的每个取值，计算 P(目标列缺失 | 候选列=取值)
         如果某取值下条件概率 > threshold，则判定为结构性缺失规则
+
+        优化：原实现 O(V·n) 内循环（每个 val 做 3 次全列扫描），
+        现用单次 groupby + agg 一次性拿到所有 val 的 sum/count，O(n) 总开销。
         """
         rules = []
         missing_mask = df[target_col].isnull()
         n_missing = missing_mask.sum()
-        
+
         if n_missing < self.structural_min_support:
             return rules
-        
+
         for cond_col in candidate_cols:
             series = df[cond_col]
-            
+
             # 只考虑类别型（包括布尔型）
             if series.dtype.kind in 'fiucb' and series.nunique() > 10:
                 continue  # 数值型且唯一值多，跳过
-            
-            # 对每个取值计算条件概率
-            for val in series.dropna().unique():
-                condition_mask = (series == val)
-                n_condition = condition_mask.sum()
-                
-                if n_condition < self.structural_min_support:
-                    continue
-                
-                n_missing_given_condition = (missing_mask & condition_mask).sum()
-                prob = n_missing_given_condition / n_condition
-                
-                if prob >= self.structural_threshold:
-                    rules.append(StructuralRule(
-                        condition_col=cond_col,
-                        condition_value=val,
-                        confidence=prob,
-                        support=int(n_condition)
-                    ))
-        
+
+            # 单次 groupby：每 val 的非空样本数 + 缺失样本数
+            # 关键：先 dropna(cond_col) 排除条件列为空的情况，避免分母偏差
+            mask_combined = missing_mask & series.notna()
+            valid = pd.DataFrame({'miss': mask_combined})
+            # 保留原索引以便 groupby(series)
+            valid['cond'] = series.values
+            valid = valid[valid['cond'].notna()]
+            if valid.empty:
+                continue
+            grouped = valid.groupby('cond', sort=False)['miss'].agg(['sum', 'count'])
+            # 向量化筛选：min_support 与 threshold 一次过滤
+            pass_mask = grouped['count'] >= self.structural_min_support
+            prob_series = grouped['sum'] / grouped['count']
+            valid_rules_mask = pass_mask & (prob_series >= self.structural_threshold)
+            for val, row in grouped[valid_rules_mask].iterrows():
+                rules.append(StructuralRule(
+                    condition_col=cond_col,
+                    condition_value=val,
+                    confidence=row['sum'] / row['count'],
+                    support=int(row['count'])
+                ))
+
         # 按置信度和支持度排序
         rules.sort(key=lambda r: (r.confidence, r.support), reverse=True)
         return rules
