@@ -723,8 +723,10 @@ class RLOptimizer(BaseOptimizer):
             else:
                 try:
                     # numpy 字符串与 Python 字符串混合比较
+                    # 建 dict 一次 O(n)，后续查找 O(1)：替代原 next() O(n) 每次
                     str_val = str(val)
-                    idx = next((i for i, c in enumerate(cand_list) if str(c) == str_val), -1)
+                    str_to_idx = {str(c): i for i, c in enumerate(cand_list)}
+                    idx = str_to_idx.get(str_val, -1)
                     if idx >= 0:
                         norm = idx / max(len(cand_list) - 1, 1)
                     else:
