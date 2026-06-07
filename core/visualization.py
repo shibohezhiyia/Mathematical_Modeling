@@ -34,6 +34,7 @@ import pandas as pd
 from core.workspace_manager import get_workspace_manager
 from utils.helpers import log_info, log_warning
 from sklearn.metrics import confusion_matrix, r2_score, roc_curve, auc
+from core.evaluation_engine import ModelEvaluator, AutoDecisionEngine, DecisionMode
 
 # =============================================================================
 # Matplotlib 初始化与中文支持
@@ -1013,8 +1014,7 @@ class EvaluationVisualizer:
             return None
         
         import matplotlib.pyplot as plt
-        from core.evaluation_engine import ModelEvaluator, AutoDecisionEngine, DecisionMode
-        
+
         # 评估所有模型
         evaluator = ModelEvaluator()
         scores = evaluator.evaluate_all(cv_results, task_type)
