@@ -197,12 +197,7 @@ class Parameter:
         """为 Optuna trial 建议参数值"""
         if not self.is_active(current_params):
             return None
-        
-        try:
-            import optuna
-        except ImportError:
-            raise ImportError("Optuna 未安装")
-        
+
         if self.type == 'float':
             lo, hi = float(self.low), float(self.high)
             if self.scale == 'log':

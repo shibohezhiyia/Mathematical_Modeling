@@ -1264,7 +1264,7 @@ def plot_data_profile(df: pd.DataFrame,
             y = target
         
         if task_type is None:
-            from core.modeling_engine import TaskTypeDetector, TaskType
+            from core.modeling_engine import TaskTypeDetector
             detected = TaskTypeDetector.detect(y)
             task_type = detected.value
         
