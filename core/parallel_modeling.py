@@ -22,6 +22,9 @@ import pandas as pd
 from sklearn.model_selection import KFold, cross_val_score
 from sklearn.metrics import accuracy_score, roc_auc_score, f1_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
 
 from core.accelerators import (
     ParallelEngine, get_gpu_manager,
@@ -140,7 +143,6 @@ class ModelRegistry:
         
         # 4. Random Forest
         try:
-            from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
             cls._models['rf'] = ModelConfig(
                 name='RandomForest',
                 model_class={'classification': RandomForestClassifier, 'regression': RandomForestRegressor},
@@ -160,7 +162,6 @@ class ModelRegistry:
         
         # 5. Extra Trees
         try:
-            from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
             cls._models['et'] = ModelConfig(
                 name='ExtraTrees',
                 model_class={'classification': ExtraTreesClassifier, 'regression': ExtraTreesRegressor},
@@ -842,8 +843,6 @@ class ParallelModelingEngine:
     def _blend_stacking(self, models: List[ModelResult], X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """Stacking融合（用OOF预测训练元模型）"""
         # 使用最佳模型的OOF预测作为元特征训练一个简单的线性模型
-        from sklearn.linear_model import Ridge, LogisticRegression
-        
         # 构建元特征（OOF预测）
         meta_features = np.column_stack([r.oof_predictions for r in models])
         
