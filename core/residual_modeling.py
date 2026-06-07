@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin, clone
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, cross_val_score
+from sklearn.linear_model import Ridge, Lasso, ElasticNet, LinearRegression
 
 from utils.helpers import log_info, log_warning
 
@@ -126,7 +127,6 @@ class ResidualEstimator(BaseEstimator, RegressorMixin):
     def _get_base_estimator(self) -> Any:
         if self.base_estimator is not None:
             return clone(self.base_estimator)
-        from sklearn.linear_model import Ridge
         return Ridge(alpha=1.0, random_state=self.random_state)
 
     def _get_residual_estimator(self) -> Any:
@@ -231,7 +231,6 @@ class AutoResidualStacker:
 
     def _cv_score(self, estimator, X: pd.DataFrame, y: np.ndarray) -> float:
         """交叉验证评估（使用多进程加速）"""
-        from sklearn.model_selection import cross_val_score
         if self.metric == 'rmse':
             scores = cross_val_score(estimator, X, y, cv=self.cv,
                                      scoring='neg_root_mean_squared_error',
@@ -250,7 +249,6 @@ class AutoResidualStacker:
             raise ValueError(f"未知指标: {self.metric}")
 
     def _default_bases(self) -> Dict[str, Any]:
-        from sklearn.linear_model import Ridge, Lasso, ElasticNet, LinearRegression
         return {
             'ridge': Ridge(alpha=1.0, random_state=self.random_state),
             'lasso': Lasso(alpha=0.1, random_state=self.random_state, max_iter=2000),
