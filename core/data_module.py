@@ -546,11 +546,14 @@ class DataCleaner:
                 log_info(f"文本列 '{col}' 使用空字符串填充 {null_count} 个缺失值")
         
         # 删除仍含缺失值的行（主要针对目标变量）
-        if target_col and df[target_col].isnull().any():
-            n_drop = df[target_col].isnull().sum()
-            df = df.dropna(subset=[target_col])
-            log_info(f"删除 {n_drop} 行目标变量缺失的样本")
-        
+        if target_col:
+            # 单次 isnull().sum() 同时给 any 判定和 n_drop 计数
+            null_mask = df[target_col].isnull()
+            n_drop = int(null_mask.sum())
+            if n_drop > 0:
+                df = df[~null_mask]
+                log_info(f"删除 {n_drop} 行目标变量缺失的样本")
+
         return df
     
     def _handle_outliers(self, df: pd.DataFrame,
