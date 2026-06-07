@@ -288,10 +288,13 @@ class AutoEncoder:
         self._encoders = {}
         self._encoding_map = {}
         self._target_mean = {}
-        
+
         for col in X.columns:
-            if X[col].dtype == object or str(X[col].dtype) == 'category':
-                n_unique = X[col].nunique()
+            # 单次 X[col] 取出 + 缓存 dtype：原代码 X[col].dtype 两次访问
+            col_series = X[col]
+            col_dtype = col_series.dtype
+            if col_dtype == object or str(col_dtype) == 'category':
+                n_unique = col_series.nunique()
                 
                 # 判断编码策略
                 strategy = self._choose_strategy(col, n_unique, y is not None)
