@@ -177,7 +177,11 @@ class AutoMissingPipeline:
         # 简单启发：如果某列缺失率在30%-70%之间，且列名在末尾，可能是目标
         best_candidate = None
         best_score = -1
-        
+        # 建 dict 一次 O(n)，后续 O(1)：替代 list(df.columns).index(col) O(n) 每次
+        col_to_idx = {col: i for i, col in enumerate(df.columns)}
+        n_cols = len(df.columns)
+        tail_threshold = n_cols - 3
+
         for col in df.columns:
             # 排除ID列
             if any(hint in col for hint in self.config.id_pattern_hints):
@@ -195,9 +199,8 @@ class AutoMissingPipeline:
                     if n_unique <= 20:
                         score += 10
                 
-                # 列名在末尾加分
-                col_idx = list(df.columns).index(col)
-                if col_idx >= len(df.columns) - 3:
+                # 列名在末尾加分（O(1) 查表）
+                if col_to_idx[col] >= tail_threshold:
                     score += 5
                 
                 # 列名短加分（y, label等通常较短）
