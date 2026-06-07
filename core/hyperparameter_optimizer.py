@@ -18,6 +18,8 @@ from copy import deepcopy
 import numpy as np
 import pandas as pd
 
+from core.search_space import SearchSpace
+
 from core.modeling_engine import ModelLibrary, TaskType
 from core.optimizer_base import BaseOptimizer, OptimizationResult
 from core.workspace_manager import get_workspace_manager
@@ -148,8 +150,6 @@ class BayesianOptimizer(BaseOptimizer):
                          X: pd.DataFrame, y: pd.Series, task_type: TaskType,
                          metric: Optional[str]) -> OptimizationResult:
         """使用 Optuna 进行贝叶斯优化（支持 Pruner + 两阶段搜索）"""
-        from core.search_space import SearchSpace
-        
         if self.sampler_type == SamplerType.TPE:
             sampler = TPESampler(seed=self.random_state, multivariate=True)
         elif self.sampler_type == SamplerType.CMAES:
@@ -314,7 +314,6 @@ class BayesianOptimizer(BaseOptimizer):
                                  X: pd.DataFrame, y: pd.Series, task_type: TaskType,
                                  metric: Optional[str]) -> OptimizationResult:
         """随机搜索回退"""
-        from core.search_space import SearchSpace
         rng = np.random.RandomState(self.random_state)
         history = []
         best_score = float('-inf') if self.direction == 'maximize' else float('inf')
