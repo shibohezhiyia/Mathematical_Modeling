@@ -50,9 +50,6 @@ from core.workspace_manager import set_workspace_config
 set_workspace_config(root_dir=str(PROJECT_ROOT))
 
 from extensions.llm_analyzer import LLMAnalyzer, LLMConfig, get_default_configs
-from extensions.report_engine import (
-    ReportEngine, ReportConfig, PivotConfig, CellConfig,
-)
 from extensions.advanced_analytics import AdvancedAnalytics
 from utils.helpers import log_info, log_warning, log_error, get_log_store
 from core.dependency_manager import (
@@ -63,6 +60,14 @@ from core.dependency_manager import (
     DEFAULT_THIRD_PARTY_DIR,
 )
 from core.modeling_engine import ModelLibrary
+from core.experiment_tracker import (
+    list_experiments, get_experiment, compare_experiments,
+    delete_experiment, log_experiment
+)
+from extensions.report_engine import (
+    ReportEngine, ReportConfig, PivotConfig, CellConfig,
+    ChartConfig, ChartBuilder
+)
 from pathlib import Path
 
 # -----------------------------------------------------------------------------
@@ -1387,7 +1392,6 @@ def api_model_train():
             
             # 记录实验到追踪器
             try:
-                from core.experiment_tracker import log_experiment
                 dataset_name = sdata.get('filename', '')
                 duration = time.time() - train_start
                 model_result = sdata.get('model_result', {})
@@ -1820,7 +1824,6 @@ def api_model_export():
 @app.route('/api/experiments', methods=['GET'])
 def api_experiments():
     """获取实验历史"""
-    from core.experiment_tracker import list_experiments
     task_type = request.args.get('task_type')
     limit = int(request.args.get('limit', 50))
     rows = list_experiments(limit=limit, task_type=task_type)
@@ -1830,7 +1833,6 @@ def api_experiments():
 @app.route('/api/experiments/<int:exp_id>', methods=['GET'])
 def api_experiment_detail(exp_id):
     """获取单个实验详情"""
-    from core.experiment_tracker import get_experiment
     exp = get_experiment(exp_id)
     if exp is None:
         return jsonify({'success': False, 'error': '实验不存在'}), 404
@@ -1840,7 +1842,6 @@ def api_experiment_detail(exp_id):
 @app.route('/api/experiments/compare', methods=['POST'])
 def api_experiments_compare():
     """对比多个实验"""
-    from core.experiment_tracker import compare_experiments
     data = request.get_json() or {}
     ids = data.get('ids', [])
     if not ids:
@@ -1852,7 +1853,6 @@ def api_experiments_compare():
 @app.route('/api/experiments/<int:exp_id>', methods=['DELETE'])
 def api_experiment_delete(exp_id):
     """删除实验"""
-    from core.experiment_tracker import delete_experiment
     ok = delete_experiment(exp_id)
     if ok:
         return jsonify({'success': True})
@@ -2641,7 +2641,6 @@ def api_report_chart_preview():
     chart_dict = data.get('chart', {})
     
     try:
-        from extensions.report_engine import ChartConfig, ChartBuilder
         chart_cfg = ChartConfig(
             chart_type=chart_dict.get('chart_type', 'bar'),
             x_field=chart_dict.get('x_field', ''),
@@ -2672,8 +2671,6 @@ def api_report_save():
 
 def _parse_report_config(config_dict: Dict) -> ReportConfig:
     """从字典解析报表配置"""
-    from extensions.report_engine import ChartConfig
-    
     mode = config_dict.get('mode', 'pivot')
     title = config_dict.get('title', '报表')
     styles = config_dict.get('styles', {})
@@ -2850,8 +2847,6 @@ def api_decision_modes():
 @app.route('/api/model/options', methods=['GET'])
 def api_model_options():
     """获取可用模型列表（包含超参空间）"""
-    from core.modeling_engine import ModelLibrary
-    
     models = []
     for task in ['classification', 'regression', 'clustering']:
         task_models = ModelLibrary.get_models(task_type=TaskType(task))
@@ -3088,7 +3083,6 @@ def api_model_snapshot():
         return jsonify({'success': False, 'error': 'Model not found'}), 400
     try:
         from core.model_versioning import save_snapshot
-        from core.experiment_tracker import list_experiments
         exp_rows = list_experiments(limit=1)
         exp_id = exp_rows[0]['id'] if exp_rows else 0
         sid = save_snapshot(exp_id, model_key, target_cv.fitted_models[-1], metadata={'score': getattr(target_cv, 'cv_score', None)})
