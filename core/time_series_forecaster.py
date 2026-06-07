@@ -35,6 +35,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.model_selection import TimeSeriesSplit
 
 from core.modeling_engine import ModelingEngine, TaskType, FeatureSelectionStrategy
 from utils.helpers import log_info, log_warning
@@ -504,8 +505,6 @@ class TimeSeriesForecaster:
         
         对每个序列做滚动原点验证，返回各序列的CV评分。
         """
-        from sklearn.model_selection import TimeSeriesSplit
-        
         scores = {}
         keys = df[self.cfg.id_cols].drop_duplicates().values.tolist()
         
