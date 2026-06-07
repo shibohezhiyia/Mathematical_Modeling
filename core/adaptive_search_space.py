@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from copy import deepcopy
 
 import numpy as np
+from scipy.stats import spearmanr
 
 from core.search_space import SearchSpace, Parameter
 
@@ -140,7 +141,6 @@ class AdaptiveSearchSpace(SearchSpace):
                 param_values[name].append(numeric_val)
         
         # 计算 Spearman 相关系数
-        from scipy.stats import spearmanr
         
         for name, values in param_values.items():
             if len(values) < 3 or len(set(values)) < 2:
