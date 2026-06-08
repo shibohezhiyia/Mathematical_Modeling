@@ -108,21 +108,31 @@ class DatasetFingerprint:
             col_dtype[c] = X[c].dtype
             col_nunique[c] = X[c].nunique(dropna=True)
 
-        # 文本特征
-        text_cols = [c for c in X.columns if col_dtype[c] == object and col_nunique[c] > 10]
-        self.n_text_features = len(text_cols)
-        self.text_ratio = self.n_text_features / max(len(X.columns), 1)
-
-        # 时间特征
-        datetime_cols = [c for c in X.columns if 'datetime' in str(col_dtype[c])]
-        self.n_datetime_features = len(datetime_cols)
-        self.datetime_ratio = self.n_datetime_features / max(len(X.columns), 1)
-
-        # 高基数特征
-        cat_cols = [c for c in X.columns if not pd.api.types.is_numeric_dtype(col_dtype[c])]
-        high_card = [c for c in cat_cols if col_nunique[c] > 50]
-        self.n_high_cardinality = len(high_card)
-        self.high_cardinality_ratio = self.n_high_cardinality / max(len(cat_cols), 1)
+        # 一次遍历同时按类型分桶：避免 4 次 for c in X.columns 重复扫描
+        # 注释字段（>10 unique + object）、时间字段、类别字段、高基数字段
+        n_text = n_datetime = n_high = n_cat = 0
+        for c in X.columns:
+            dt = col_dtype[c]
+            nu = col_nunique[c]
+            # 时间特征
+            if 'datetime' in str(dt):
+                n_datetime += 1
+            # 文本特征：object 且 nunique > 10
+            if dt == object and nu > 10:
+                n_text += 1
+            # 类别特征：非数值
+            if not pd.api.types.is_numeric_dtype(dt):
+                n_cat += 1
+                # 高基数：类别列中 nunique > 50
+                if nu > 50:
+                    n_high += 1
+        n_cols = max(len(X.columns), 1)
+        self.n_text_features = n_text
+        self.text_ratio = n_text / n_cols
+        self.n_datetime_features = n_datetime
+        self.datetime_ratio = n_datetime / n_cols
+        self.n_high_cardinality = n_high
+        self.high_cardinality_ratio = n_high / max(n_cat, 1)
 
         # 偏度和峰度
         numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(col_dtype[c])]
