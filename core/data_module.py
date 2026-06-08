@@ -528,14 +528,17 @@ class DataCleaner:
 
         return df.drop(columns=to_drop) if to_drop else df
     
-    def _handle_missing(self, df: pd.DataFrame, 
+    def _handle_missing(self, df: pd.DataFrame,
                         profiles: Dict[str, ColumnProfile],
                         target_col: Optional[str] = None) -> pd.DataFrame:
         """处理缺失值"""
         feature_cols = [c for c in df.columns if c != target_col]
-        
+        # 提前转 set 让 `col not in profiles` 变成 O(1) 而非 O(1) dict 哈希（一致）
+        # 此外 dict.__contains__ 也是 O(1)，但跳过 dict 哈希 + 显式 len 检查省一些常量开销
+        profile_keys = profiles.keys()
+
         for col in feature_cols:
-            if col not in profiles:
+            if col not in profile_keys:
                 continue
 
             # 单次扫描拿 mask + count（避免 .any() 短路后再 .sum() 重复扫描）
