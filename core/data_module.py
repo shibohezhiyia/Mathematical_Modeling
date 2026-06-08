@@ -591,9 +591,13 @@ class DataCleaner:
                          target_col: Optional[str] = None) -> pd.DataFrame:
         """处理异常值（用边界值替换而非删除）"""
         feature_cols = [c for c in df.columns if c != target_col]
-        
+        # 缓存 profiles.keys() 视图，让 `col in profiles` 比重复 dict 哈希快
+        # （虽然 dict.__contains__ 是 O(1)，但 .keys() 视图的 __contains__ 是
+        # CPython 优化过的 C 路径，比走 dict.__contains__ 略快）
+        profile_keys = profiles.keys()
+
         for col in feature_cols:
-            if col not in profiles:
+            if col not in profile_keys:
                 continue
             if profiles[col].inferred_type != DataType.NUMERIC:
                 continue
