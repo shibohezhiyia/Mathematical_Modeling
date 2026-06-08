@@ -1,12 +1,12 @@
 """
 元学习模型推荐器
 
-基于数据集元特征的相似度搜索,从知识库中找到最相似的历史数据集,
+基于数据集元特征的相似度搜索，从知识库中找到最相似的历史数据集，
 推荐其表现最好的模型。支持特征类型感知和在线学习。
 
 核心组件:
-1. DatasetFingerprint - 数据集指纹(扩展元特征)
-2. MetaKnowledgeBase - 元知识库(内存+磁盘持久化)
+1. DatasetFingerprint - 数据集指纹（扩展元特征）
+2. MetaKnowledgeBase - 元知识库（内存+磁盘持久化）
 3. MetaLearningModelRecommender - 推荐引擎
 """
 import json
@@ -27,7 +27,7 @@ from utils.helpers import log_warning
 
 @dataclass
 class DatasetFingerprint:
-    """数据集指纹(扩展元特征,用于相似度计算)"""
+    """数据集指纹（扩展元特征，用于相似度计算）"""
 
     # 基础元特征(来自 MetaFeatureExtractor)
     n_samples: int = 0
@@ -60,7 +60,7 @@ class DatasetFingerprint:
     mean_kurtosis: float = 0.0            # 数值特征平均峰度
 
     # 数据质量
-    outlier_ratio: float = 0.0            # 异常值比例(3-sigma)
+    outlier_ratio: float = 0.0            # 异常值比例（3-sigma）
     duplicate_ratio: float = 0.0          # 重复行比例
 
     # 任务信息
@@ -101,7 +101,7 @@ class DatasetFingerprint:
 
         # 一次遍历收集每列的 dtype 和 nunique
         # 原代码 N 列 × 4-5 次 dtype/nunique 查询 = O(4-5N) 重复工作
-        # 修复后:单次 O(N) 收集,后续 O(1) 查表
+        # 修复后：单次 O(N) 收集，后续 O(1) 查表
         col_dtype = {}
         col_nunique = {}
         for c in X.columns:
@@ -272,7 +272,7 @@ class MetaKnowledgeBase:
         self.max_records = max_records
         self.disk_path = disk_path
 
-        # 特征权重(用于相似度计算,可在线学习)
+        # 特征权重（用于相似度计算，可在线学习）
         self.feature_weights: Optional[np.ndarray] = None
 
         if disk_path and os.path.exists(disk_path):
@@ -282,7 +282,7 @@ class MetaKnowledgeBase:
         """添加记录"""
         self.records.append(record)
 
-        # 限制数量,保留最新的
+        # 限制数量，保留最新的
         if len(self.records) > self.max_records:
             self.records = self.records[-self.max_records:]
 
@@ -334,16 +334,16 @@ class MetaKnowledgeBase:
         """
         在线更新特征权重
 
-        如果推荐准确,增强相关特征权重;如果不准确,微调降低。
+        如果推荐准确，增强相关特征权重；如果不准确，微调降低。
         这是一个简单的 perceptron-style 更新。
         """
         if actual_best_model in predicted_models:
-            return  # 推荐正确,不调整
+            return  # 推荐正确，不调整
 
         # 初始化权重
-        # 缓存 fingerprint.to_vector():原代码在 update_weights 内 2 次调用
-        # 同一个对象 + 1 次在循环内 record.fingerprint.to_vector(),3 次冗余
-        # 实际只需调 1 次(line 339 还需要 record.fingerprint.to_vector())
+        # 缓存 fingerprint.to_vector()：原代码在 update_weights 内 2 次调用
+        # 同一个对象 + 1 次在循环内 record.fingerprint.to_vector()，3 次冗余
+        # 实际只需调 1 次（line 339 还需要 record.fingerprint.to_vector()）
         fp_vec = fingerprint.to_vector()
         dim = len(fp_vec)
         if self.feature_weights is None:
@@ -354,7 +354,7 @@ class MetaKnowledgeBase:
             best = record.best_model
             if best == actual_best_model:
                 diff = np.abs(fp_vec - record.fingerprint.to_vector())
-                # 差异大的维度权重应降低(说明这些维度不重要)
+                # 差异大的维度权重应降低（说明这些维度不重要）
                 self.feature_weights *= (1.0 - 0.01 * diff)
                 self.feature_weights = np.clip(self.feature_weights, 0.1, 5.0)
                 break
