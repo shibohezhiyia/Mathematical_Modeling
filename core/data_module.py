@@ -630,21 +630,24 @@ class DataCleaner:
             dtype = profiles[col].inferred_type
 
             if dtype == DataType.NUMERIC:
-                # 尝试降精度：按值域选择最小能容纳的整数 dtype
+                # 缓存 series：原本 df[col] 多次出现，每次都走 IndexingEngine
+                # pandas 实际上会复用 Series view，但显式存一个引用更清晰
+                series = df[col]
                 # 一次 agg 拿 min + max，省一次 O(n) 扫描
-                col_min_max = df[col].agg(['min', 'max'])
+                col_min_max = series.agg(['min', 'max'])
                 col_min, col_max = col_min_max['min'], col_min_max['max']
                 if pd.notna(col_min) and pd.notna(col_max):
                     candidates = _UNSIGNED_INT_DTYPES if col_min >= 0 else _SIGNED_INT_DTYPES
                     for target_dtype, lo, hi in candidates:
                         if col_min >= lo and col_max <= hi:
-                            df[col] = df[col].astype(target_dtype)
+                            series = series.astype(target_dtype)
+                            df[col] = series
                             break
                 else:
                     # 整列 NaN / 全空：列不会贡献有效信息，尝试降精度为 float32 省内存
                     # 仅在原 dtype 是 float64 时降级，避免强制把整数转 float
-                    if df[col].dtype == np.float64:
-                        df[col] = df[col].astype(np.float32)
+                    if series.dtype == np.float64:
+                        df[col] = series.astype(np.float32)
 
             elif dtype == DataType.CATEGORY:
                 n_unique = df[col].nunique()
