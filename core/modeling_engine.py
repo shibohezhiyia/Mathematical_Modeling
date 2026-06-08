@@ -1571,10 +1571,13 @@ def _run_single_fold(fold_idx, train_idx, val_idx, X, y, model, task_type, metri
                 if len(fold_classes) == n_classes:
                     proba_aligned = proba
                 else:
+                    # 向量化：aligned[:, fold_classes] = proba 一次赋值替代 n_classes 次循环
+                    # 用 mask 过滤越界 cls（保持原 if 0 <= cls < n_classes 防御）
                     aligned = np.zeros((len(val_idx), n_classes))
-                    for i, cls in enumerate(fold_classes):
-                        if 0 <= cls < n_classes:
-                            aligned[:, cls] = proba[:, i]
+                    fold_classes_arr = np.asarray(fold_classes, dtype=np.int64)
+                    valid_mask = (fold_classes_arr >= 0) & (fold_classes_arr < n_classes)
+                    if valid_mask.any():
+                        aligned[:, fold_classes_arr[valid_mask]] = proba[:, valid_mask]
                     proba_aligned = aligned
             else:
                 proba_aligned = proba
