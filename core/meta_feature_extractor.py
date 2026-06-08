@@ -104,28 +104,29 @@ class MetaFeatureExtractor:
     
     def extract(self, X: pd.DataFrame, y: Optional[pd.Series], task_type: TaskType) -> MetaFeatures:
         meta = MetaFeatures()
-        
+
         # 基本规模
         meta.n_samples, meta.n_features = X.shape
-        # 向量化：使用 select_dtypes 替代逐列 dtype 检查
-        meta.n_numeric = len(X.select_dtypes(include=[np.number]).columns)
+        # 缓存数值列选择：原代码在 3 处调 select_dtypes，每次都 O(n_features) 扫描
+        # 改为一次拿到 columns 列表，后续直接复用
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+        meta.n_numeric = len(numeric_cols)
         meta.n_categorical = meta.n_features - meta.n_numeric
-        
+
         meta.sample_feature_ratio = meta.n_samples / max(meta.n_features, 1)
         meta.numeric_ratio = meta.n_numeric / max(meta.n_features, 1)
         meta.categorical_ratio = meta.n_categorical / max(meta.n_features, 1)
-        
+
         # 缺失值：使用 numpy 一次性计算，避免 sum().sum() 双重遍历
         meta.missing_ratio = np.isnan(X.values).sum() / max(X.size, 1) if X.size > 0 else 0.0
-        
+
         # 稀疏度（数值列零值比例）
-        numeric_cols = X.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) > 0:
+        if meta.n_numeric > 0:
             numeric_values = X[numeric_cols].values
             meta.sparsity = (numeric_values == 0).sum() / max(numeric_values.size, 1)
-        
+
         # 特征相关性
-        if len(numeric_cols) >= 2:
+        if meta.n_numeric >= 2:
             try:
                 corr_matrix = X[numeric_cols].corr().abs().values
                 # 取上三角（排除对角线）
