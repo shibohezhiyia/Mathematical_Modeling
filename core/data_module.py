@@ -574,10 +574,12 @@ class DataCleaner:
                 continue
             if profiles[col].inferred_type != DataType.NUMERIC:
                 continue
-            
+
             series = df[col]
             if self.outlier_method == 'iqr':
-                q1, q3 = series.quantile(0.25), series.quantile(0.75)
+                # 一次 quantile 调用拿到 q1/q3，避免 2 次 O(n) 排序/扫描
+                q1, q3 = series.quantile([0.25, 0.75])
+                q1, q3 = float(q1), float(q3)
                 iqr = q3 - q1
                 lower, upper = q1 - self.outlier_threshold * iqr, q3 + self.outlier_threshold * iqr
             elif self.outlier_method == 'zscore':
@@ -585,7 +587,7 @@ class DataCleaner:
                 lower, upper = mean - self.outlier_threshold * std, mean + self.outlier_threshold * std
             else:
                 continue
-            
+
             n_outliers = ((series < lower) | (series > upper)).sum()
             if n_outliers > 0:
                 df[col] = series.clip(lower, upper)
