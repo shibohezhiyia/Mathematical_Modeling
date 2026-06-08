@@ -1,12 +1,12 @@
 """
 元学习模型推荐器
 
-基于数据集元特征的相似度搜索，从知识库中找到最相似的历史数据集，
+基于数据集元特征的相似度搜索,从知识库中找到最相似的历史数据集,
 推荐其表现最好的模型。支持特征类型感知和在线学习。
 
 核心组件:
-1. DatasetFingerprint - 数据集指纹（扩展元特征）
-2. MetaKnowledgeBase - 元知识库（内存+磁盘持久化）
+1. DatasetFingerprint - 数据集指纹(扩展元特征)
+2. MetaKnowledgeBase - 元知识库(内存+磁盘持久化)
 3. MetaLearningModelRecommender - 推荐引擎
 """
 import json
@@ -27,7 +27,7 @@ from utils.helpers import log_warning
 
 @dataclass
 class DatasetFingerprint:
-    """数据集指纹（扩展元特征，用于相似度计算）"""
+    """数据集指纹(扩展元特征,用于相似度计算)"""
 
     # 基础元特征(来自 MetaFeatureExtractor)
     n_samples: int = 0
@@ -60,7 +60,7 @@ class DatasetFingerprint:
     mean_kurtosis: float = 0.0            # 数值特征平均峰度
 
     # 数据质量
-    outlier_ratio: float = 0.0            # 异常值比例（3-sigma）
+    outlier_ratio: float = 0.0            # 异常值比例(3-sigma)
     duplicate_ratio: float = 0.0          # 重复行比例
 
     # 任务信息
@@ -101,7 +101,7 @@ class DatasetFingerprint:
 
         # 一次遍历收集每列的 dtype 和 nunique
         # 原代码 N 列 × 4-5 次 dtype/nunique 查询 = O(4-5N) 重复工作
-        # 修复后：单次 O(N) 收集，后续 O(1) 查表
+        # 修复后:单次 O(N) 收集,后续 O(1) 查表
         col_dtype = {}
         col_nunique = {}
         for c in X.columns:
@@ -154,14 +154,14 @@ class DatasetFingerprint:
             self.duplicate_ratio = n_dups / len(X)
 
     def to_vector(self) -> np.ndarray:
-        """转为数值向量（用于相似度计算）
+        """转为数值向量(用于相似度计算)
 
-        性能优化：find_similar 和 update_weights 会多次调用同一个 Fingerprint 的
-        to_vector()，每次都重新构造 21 维 numpy 数组 + 2 次 math.log1p。
-        用 instance-level 缓存（__dict__）保存结果，O(1) 复用。
-        安全前提：Fingerprint 创建后字段不再修改（dataclass 字段都是不可变标量）。
+        性能优化:find_similar 和 update_weights 会多次调用同一个 Fingerprint 的
+        to_vector(),每次都重新构造 21 维 numpy 数组 + 2 次 math.log1p。
+        用 instance-level 缓存(__dict__)保存结果,O(1) 复用。
+        安全前提:Fingerprint 创建后字段不再修改(dataclass 字段都是不可变标量)。
         """
-        # 缓存命中检查：__dict__ 中保存 _to_vector_cache 字段
+        # 缓存命中检查:__dict__ 中保存 _to_vector_cache 字段
         cached = self.__dict__.get("_to_vector_cache")
         if cached is not None:
             return cached
@@ -272,7 +272,7 @@ class MetaKnowledgeBase:
         self.max_records = max_records
         self.disk_path = disk_path
 
-        # 特征权重（用于相似度计算，可在线学习）
+        # 特征权重(用于相似度计算,可在线学习)
         self.feature_weights: Optional[np.ndarray] = None
 
         if disk_path and os.path.exists(disk_path):
@@ -282,7 +282,7 @@ class MetaKnowledgeBase:
         """添加记录"""
         self.records.append(record)
 
-        # 限制数量，保留最新的
+        # 限制数量,保留最新的
         if len(self.records) > self.max_records:
             self.records = self.records[-self.max_records:]
 
@@ -301,15 +301,22 @@ class MetaKnowledgeBase:
         query_vec = fingerprint.to_vector()
         weights = self.feature_weights
 
-        similarities = []
-        for record in self.records:
-            # 任务类型过滤
-            if task_type_filter and record.fingerprint.task_type != task_type_filter:
-                continue
-
-            ref_vec = record.fingerprint.to_vector()
-            sim = self._cosine_similarity(query_vec, ref_vec, weights)
-            similarities.append((record, sim))
+        # 向量化优化：把"每个 record 单独调 cosine"改为一次性矩阵运算
+        # 原 O(N) 次 numpy 小数组运算 → 1 次 (N, D) @ (D,) + 1 次 (N,) / (N,)
+        # 注意：to_vector() 已缓存到 instance __dict__，所以矩阵构造只是指针拷贝
+        if task_type_filter is None:
+            ref_matrix = np.array([r.fingerprint.to_vector() for r in self.records])
+            sims = self._cosine_similarity_batch(query_vec, ref_matrix, weights)
+            similarities = list(zip(self.records, sims))
+        else:
+            # 带 filter 时退化为过滤后向量化
+            filtered = [r for r in self.records
+                        if r.fingerprint.task_type == task_type_filter]
+            if not filtered:
+                return []
+            ref_matrix = np.array([r.fingerprint.to_vector() for r in filtered])
+            sims = self._cosine_similarity_batch(query_vec, ref_matrix, weights)
+            similarities = list(zip(filtered, sims))
 
         similarities.sort(key=lambda x: x[1], reverse=True)
         return similarities[:k]
@@ -328,22 +335,53 @@ class MetaKnowledgeBase:
             return 0.0
         return float(np.dot(a, b) / (norm_a * norm_b))
 
+    @staticmethod
+    def _cosine_similarity_batch(query: np.ndarray,
+                                  ref_matrix: np.ndarray,
+                                  weights: Optional[np.ndarray] = None) -> np.ndarray:
+        """批量余弦相似度：一次矩阵乘法计算 query 对 N 个 reference 的相似度
+
+        数学：sim_i = (q · r_i) / (||q|| · ||r_i||)
+        向量化：sim = (R @ q) / (||q|| * ||R||_axis1)
+        输入：
+            query: shape (D,)
+            ref_matrix: shape (N, D)
+            weights: shape (D,) 可选特征权重
+        输出：shape (N,) 浮点数组
+        """
+        if weights is not None:
+            q = query * weights
+            R = ref_matrix * weights
+        else:
+            q = query
+            R = ref_matrix
+
+        norm_q = np.linalg.norm(q)
+        norms_R = np.linalg.norm(R, axis=1)
+        # 避免除零：0 范数位置返回 0（不计入排序）
+        safe_norms = np.where(norms_R == 0, 1.0, norms_R)
+        if norm_q == 0:
+            return np.zeros(len(R))
+        sims = (R @ q) / (norm_q * safe_norms)
+        sims[norms_R == 0] = 0.0
+        return sims.astype(float)
+
     def update_weights(self, fingerprint: DatasetFingerprint,
                        actual_best_model: str,
                        predicted_models: List[str]) -> None:
         """
         在线更新特征权重
 
-        如果推荐准确，增强相关特征权重；如果不准确，微调降低。
+        如果推荐准确,增强相关特征权重;如果不准确,微调降低。
         这是一个简单的 perceptron-style 更新。
         """
         if actual_best_model in predicted_models:
-            return  # 推荐正确，不调整
+            return  # 推荐正确,不调整
 
         # 初始化权重
-        # 缓存 fingerprint.to_vector()：原代码在 update_weights 内 2 次调用
-        # 同一个对象 + 1 次在循环内 record.fingerprint.to_vector()，3 次冗余
-        # 实际只需调 1 次（line 339 还需要 record.fingerprint.to_vector()）
+        # 缓存 fingerprint.to_vector():原代码在 update_weights 内 2 次调用
+        # 同一个对象 + 1 次在循环内 record.fingerprint.to_vector(),3 次冗余
+        # 实际只需调 1 次(line 339 还需要 record.fingerprint.to_vector())
         fp_vec = fingerprint.to_vector()
         dim = len(fp_vec)
         if self.feature_weights is None:
@@ -354,7 +392,7 @@ class MetaKnowledgeBase:
             best = record.best_model
             if best == actual_best_model:
                 diff = np.abs(fp_vec - record.fingerprint.to_vector())
-                # 差异大的维度权重应降低（说明这些维度不重要）
+                # 差异大的维度权重应降低(说明这些维度不重要)
                 self.feature_weights *= (1.0 - 0.01 * diff)
                 self.feature_weights = np.clip(self.feature_weights, 0.1, 5.0)
                 break
