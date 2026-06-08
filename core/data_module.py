@@ -508,12 +508,16 @@ class DataCleaner:
         log_info(f"数据清洗完成，最终形状: {df.shape}")
         return df
     
-    def _drop_useless_columns(self, df: pd.DataFrame, 
+    def _drop_useless_columns(self, df: pd.DataFrame,
                                profiles: Dict[str, ColumnProfile]) -> pd.DataFrame:
         """删除无用列（空列、常量列）"""
+        # 一次性转 set 让 `col not in df.columns` 变成 O(1) 而非 O(n)
+        # 循环里 profiles.items() × df.columns 检查 = O(profiles * df_cols)
+        # 转 set 后 = O(profiles + df_cols) 建 set + O(profiles) 查找
+        df_cols_set = set(df.columns)
         to_drop = []
         for col, profile in profiles.items():
-            if col not in df.columns:
+            if col not in df_cols_set:
                 continue
             if profile.inferred_type in (DataType.EMPTY, DataType.CONSTANT):
                 to_drop.append(col)
@@ -521,7 +525,7 @@ class DataCleaner:
             elif profile.null_rate > self.null_threshold:
                 to_drop.append(col)
                 log_info(f"删除高缺失率({profile.null_rate:.1%})列: {col}")
-        
+
         return df.drop(columns=to_drop) if to_drop else df
     
     def _handle_missing(self, df: pd.DataFrame, 
