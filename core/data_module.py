@@ -273,14 +273,21 @@ class TypeDetector:
         
         # 基础统计
         n_total = len(series)
-        n_null = series.isnull().sum()
-        n_unique = series.nunique(dropna=True)
-        
-        profile.null_count = int(n_null)
+        # 一次 agg 拿到 isnull+isnull 计数（nunique 需要 dropna 所以单独走）
+        # 拆分：n_null 用 isnull().sum()（O(n)），n_unique 用 nunique（O(n)），
+        # sample_values 用 dropna().head(5)（短路径 O(5)）— 三者无法在一次扫描内完成，
+        # 但 dropna().head(5) 只在非空列才有意义，可以让它复用 isnull() 的 mask
+        null_mask = series.isnull()
+        n_null = int(null_mask.sum())
+        n_unique = int(series.nunique(dropna=True))
+
+        profile.null_count = n_null
         profile.null_rate = n_null / n_total if n_total > 0 else 0
-        profile.unique_count = int(n_unique)
+        profile.unique_count = n_unique
         profile.unique_rate = n_unique / n_total if n_total > 0 else 0
-        profile.sample_values = series.dropna().head(5).tolist()
+        # 复用 null_mask 避免再扫一次：取非空值的前 5 个
+        non_null = series[~null_mask]
+        profile.sample_values = non_null.head(5).tolist()
         
         # 空列检测
         if n_null == n_total or n_unique == 0:
