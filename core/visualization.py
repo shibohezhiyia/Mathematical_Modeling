@@ -1033,7 +1033,7 @@ class EvaluationVisualizer:
         model_keys = [s.model_key for s in scores]
         rankings = {key: [] for key in model_keys}
         default_rank = len(model_keys)
-        
+
         for mode in modes:
             engine = AutoDecisionEngine(mode=mode)
             report = engine.decide(scores)
@@ -1042,11 +1042,14 @@ class EvaluationVisualizer:
             rank_map = {key: i for i, key in enumerate(ranked_keys)}
             for key in model_keys:
                 rankings[key].append(rank_map.get(key, default_rank) + 1)
-        
+
         fig, ax = plt.subplots(figsize=figsize)
-        
+
+        # 优化：用 model_key -> ModelScore 的 dict 替代在循环内 O(n) 的 next()
+        # 查找。n 个 model_key × O(n) next() = O(n²) → 一次 O(n) 建 dict
+        score_by_key = {s.model_key: s for s in scores}
         for i, (key, ranks) in enumerate(rankings.items()):
-            ms = next(s for s in scores if s.model_key == key)
+            ms = score_by_key[key]
             color = self.colors['palette'][i % len(self.colors['palette'])]
             ax.plot(mode_labels, ranks, marker='o', linewidth=2,
                    label=ms.model_name, color=color, markersize=8)
