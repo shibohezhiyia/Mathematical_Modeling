@@ -34,6 +34,12 @@ _SIGNED_INT_DTYPES: Tuple[Tuple[Any, int, int], ...] = (
 )
 
 
+# 列名暗示日期的关键词（提到模块级，避免 _to_datetime 每次调用重建列表）
+_DATE_LIKE_KEYWORDS: Tuple[str, ...] = (
+    'date', 'time', 'dt', 'day', 'month', 'year',
+)
+
+
 class DataType(Enum):
     """数据类型枚举"""
     NUMERIC = "数值型"
@@ -410,7 +416,7 @@ class TypeDetector:
         
         # 列名暗示日期
         col_lower = str(series.name).lower()
-        is_date_like = any(kw in col_lower for kw in ['date', 'time', 'dt', 'day', 'month', 'year'])
+        is_date_like = any(kw in col_lower for kw in _DATE_LIKE_KEYWORDS)
         
         sample = series.dropna().head(100)
         if len(sample) == 0:
