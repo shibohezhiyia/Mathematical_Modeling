@@ -735,9 +735,10 @@ class DataModule:
         print(f"\n数据规模: {len(self.raw_data)} 行 × {len(self.profiles)} 列")
         
         print("\n【类型分布】")
-        type_dist = {}
+        # defaultdict 替代 .get(key, 0) + 1，省一次 hash 查找
+        type_dist: Dict[str, int] = defaultdict(int)
         for p in self.profiles.values():
-            type_dist[p.inferred_type.value] = type_dist.get(p.inferred_type.value, 0) + 1
+            type_dist[p.inferred_type.value] += 1
         for t, c in type_dist.items():
             print(f"  {t}: {c} 列")
         
