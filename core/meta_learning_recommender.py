@@ -102,10 +102,12 @@ class DatasetFingerprint:
         # 一次遍历收集每列的 dtype 和 nunique
         # 原代码 N 列 × 4-5 次 dtype/nunique 查询 = O(4-5N) 重复工作
         # 修复后:单次 O(N) 收集,后续 O(1) 查表
-        col_dtype = {}
+        # 向量化拿所有列 dtype：X.dtypes 一次返回所有 dtype 的 Series，
+        # 替代在循环里 X[c].dtype（每个都走一遍 __getitem__ + 属性查找）
+        all_dtypes = X.dtypes
+        col_dtype = dict(zip(X.columns, all_dtypes))
         col_nunique = {}
         for c in X.columns:
-            col_dtype[c] = X[c].dtype
             col_nunique[c] = X[c].nunique(dropna=True)
 
         # 一次遍历同时按类型分桶：避免 4 次 for c in X.columns 重复扫描
