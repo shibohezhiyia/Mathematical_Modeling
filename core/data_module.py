@@ -377,16 +377,19 @@ class TypeDetector:
         """尝试转换为数值型"""
         if pd.api.types.is_numeric_dtype(series):
             return pd.to_numeric(series, errors='coerce')
-        
+
         # 处理带逗号的数字
         if series.dtype == object:
             sample = series.dropna().head(100)
             # 检查是否看起来像数字
-            test = sample.astype(str).str.replace(',', '', regex=False)
+            # 关键：先在 sample 上小成本判断，决定是否做全列转换
+            sample_stripped = sample.astype(str).str.replace(',', '', regex=False)
             try:
-                converted = pd.to_numeric(test, errors='coerce')
-                if converted.notna().sum() / len(test) > 0.8:
-                    return pd.to_numeric(series.astype(str).str.replace(',', '', regex=False), errors='coerce')
+                converted_sample = pd.to_numeric(sample_stripped, errors='coerce')
+                if converted_sample.notna().sum() / len(sample_stripped) > 0.8:
+                    # 命中后只对全列做一次 strip + to_numeric（之前的版本会重做 strip）
+                    full_stripped = series.astype(str).str.replace(',', '', regex=False)
+                    return pd.to_numeric(full_stripped, errors='coerce')
             except Exception:
                 # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
                 pass
