@@ -586,7 +586,9 @@ class DataCleaner:
                 iqr = q3 - q1
                 lower, upper = q1 - self.outlier_threshold * iqr, q3 + self.outlier_threshold * iqr
             elif self.outlier_method == 'zscore':
-                mean, std = series.mean(), series.std()
+                # 一次 agg 拿到 mean + std，省一次扫描
+                mean_std = series.agg(['mean', 'std'])
+                mean, std = float(mean_std['mean']), float(mean_std['std'])
                 lower, upper = mean - self.outlier_threshold * std, mean + self.outlier_threshold * std
             else:
                 continue
