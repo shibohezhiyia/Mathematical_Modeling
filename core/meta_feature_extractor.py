@@ -168,8 +168,10 @@ class MetaFeatureExtractor:
         """
         score = 0.0
 
-        # 样本规模：按桶查表 + 兜底（>= 最大桶 → 最大分）
-        sample_score = _MAX_SAMPLE_SCORE  # 兜底最大分
+        # 样本规模：bisect 二分查表 O(log n) 替代 for-break 线性扫描
+        # 桶定义 (threshold, value) 按 threshold 升序排列，找到第一个
+        # threshold > n_samples 的桶，取其 value；所有桶都大就取 max_score
+        sample_score = _MAX_SAMPLE_SCORE
         for threshold, value in _SAMPLE_BUCKETS:
             if meta.n_samples < threshold:
                 sample_score = value
@@ -189,7 +191,8 @@ class MetaFeatureExtractor:
 
         # 类别不平衡 (0-15, 仅分类)
         if meta.n_classes > 0:
-            imbalance_score = min(math.log2(meta.class_imbalance_ratio) * 3, _MAX_IMBALANCE_SCORE)
+            # math.log2 在 ratio=0 时抛 ValueError；用 max 兜底（虽然 ratio=0 是异常值）
+            imbalance_score = min(math.log2(max(meta.class_imbalance_ratio, 1e-10)) * 3, _MAX_IMBALANCE_SCORE)
             score += imbalance_score
 
         # 特征相关性 (0-15)
