@@ -7,6 +7,7 @@ import json
 from typing import Dict, List, Union, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
+from collections import defaultdict
 
 import pandas as pd
 import numpy as np
@@ -694,27 +695,31 @@ class DataModule:
         """获取数据摘要报告"""
         if not self.profiles:
             return {}
-        
+
+        # 用 defaultdict(int) 替代 .get(key, 0) + 1，省一次 hash 查找
+        type_dist: Dict[str, int] = defaultdict(int)
         summary = {
             'total_columns': len(self.profiles),
             'total_rows': len(self.raw_data) if self.raw_data is not None else 0,
-            'type_distribution': {},
+            'type_distribution': type_dist,
             'high_missing_cols': [],
             'suggestions': []
         }
-        
+
         for col, profile in self.profiles.items():
             dtype_name = profile.inferred_type.value
-            summary['type_distribution'][dtype_name] = summary['type_distribution'].get(dtype_name, 0) + 1
-            
+            type_dist[dtype_name] += 1
+
             if profile.null_rate > 0.3:
                 summary['high_missing_cols'].append({
                     'column': col,
                     'null_rate': f"{profile.null_rate:.1%}"
                 })
-            
+
             summary['suggestions'].extend(profile.suggestions)
-        
+
+        # 转回普通 dict 以保持 JSON 序列化兼容
+        summary['type_distribution'] = dict(type_dist)
         return summary
     
     def print_report(self) -> None:
