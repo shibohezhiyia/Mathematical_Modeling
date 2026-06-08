@@ -520,11 +520,13 @@ class DataCleaner:
         for col in feature_cols:
             if col not in profiles:
                 continue
-            
-            null_count = df[col].isnull().sum()
-            if null_count == 0:
+
+            # 单次扫描拿 mask + count（避免 .any() 短路后再 .sum() 重复扫描）
+            null_mask = df[col].isnull()
+            if not null_mask.any():
                 continue
-            
+            null_count = int(null_mask.sum())
+
             profile = profiles[col]
             dtype = profile.inferred_type
             
