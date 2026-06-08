@@ -285,13 +285,13 @@ class MetaKnowledgeBase:
         
         query_vec = fingerprint.to_vector()
         weights = self.feature_weights
-        
+
         similarities = []
         for record in self.records:
             # 任务类型过滤
             if task_type_filter and record.fingerprint.task_type != task_type_filter:
                 continue
-            
+
             ref_vec = record.fingerprint.to_vector()
             sim = self._cosine_similarity(query_vec, ref_vec, weights)
             similarities.append((record, sim))
@@ -326,15 +326,19 @@ class MetaKnowledgeBase:
             return  # 推荐正确，不调整
         
         # 初始化权重
-        dim = len(fingerprint.to_vector())
+        # 缓存 fingerprint.to_vector()：原代码在 update_weights 内 2 次调用
+        # 同一个对象 + 1 次在循环内 record.fingerprint.to_vector()，3 次冗余
+        # 实际只需调 1 次（line 339 还需要 record.fingerprint.to_vector()）
+        fp_vec = fingerprint.to_vector()
+        dim = len(fp_vec)
         if self.feature_weights is None:
             self.feature_weights = np.ones(dim, dtype=np.float64)
-        
+
         # 找到实际最佳模型对应的历史记录
         for record in self.records:
             best = record.best_model
             if best == actual_best_model:
-                diff = np.abs(fingerprint.to_vector() - record.fingerprint.to_vector())
+                diff = np.abs(fp_vec - record.fingerprint.to_vector())
                 # 差异大的维度权重应降低（说明这些维度不重要）
                 self.feature_weights *= (1.0 - 0.01 * diff)
                 self.feature_weights = np.clip(self.feature_weights, 0.1, 5.0)
