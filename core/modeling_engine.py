@@ -1258,12 +1258,13 @@ class ModelLibrary:
                         ds = pd.date_range(start='2020-01-01', periods=len(X), freq='D')
                     
                     df = pd.DataFrame({'ds': ds, 'y': y})
-                    # 添加额外回归变量（非日期列的数值特征）
-                    extra_cols = [c for c in X.columns if c != self.date_col_]
-                    for c in extra_cols:
-                        if pd.api.types.is_numeric_dtype(X[c]):
-                            df[c] = X[c].values
-                    
+                    # 复用数值列判断（_fit / _add_regressor / predict 三处都用）
+                    # 原代码每次都遍历 extra_cols 并重复调 pd.api.types.is_numeric_dtype，
+                    # 改为一次判断后缓存结果。
+                    extra_numeric_cols = [c for c in extra_cols if pd.api.types.is_numeric_dtype(X[c])]
+                    for c in extra_numeric_cols:
+                        df[c] = X[c].values
+
                     self.model_ = Prophet(
                         yearly_seasonality=self.yearly_seasonality,
                         weekly_seasonality=self.weekly_seasonality,
@@ -1272,9 +1273,8 @@ class ModelLibrary:
                         seasonality_prior_scale=self.seasonality_prior_scale,
                         interval_width=self.interval_width,
                     )
-                    for c in extra_cols:
-                        if pd.api.types.is_numeric_dtype(X[c]):
-                            self.model_.add_regressor(c)
+                    for c in extra_numeric_cols:
+                        self.model_.add_regressor(c)
                     
                     self.model_.fit(df)
                     return self
