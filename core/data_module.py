@@ -555,7 +555,10 @@ class DataCleaner:
                         profiles: Dict[str, ColumnProfile],
                         target_col: Optional[str] = None) -> pd.DataFrame:
         """处理缺失值"""
-        feature_cols = [c for c in df.columns if c != target_col]
+        # 关键短路径：target_col 为 None 时 c != None 对所有 c 都 True，
+        # 直接 list(df.columns) 替代 list comprehension（与 _handle_outliers 一致）
+        feature_cols = list(df.columns) if target_col is None else \
+            [c for c in df.columns if c != target_col]
         # 提前转 set 让 `col not in profiles` 变成 O(1) 而非 O(1) dict 哈希（一致）
         # 此外 dict.__contains__ 也是 O(1)，但跳过 dict 哈希 + 显式 len 检查省一些常量开销
         profile_keys = profiles.keys()
