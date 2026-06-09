@@ -1892,7 +1892,13 @@ class EnsembleBuilder:
         if self.method == EnsembleMethod.STACKING:
             # Stacking 元学习器已在 fit_stacking 中训练
             if self._meta_fitted:
-                oof_blend = self.meta_model.predict(oof_preds)
+                # 关键：fit_stacking 训练时可能用 self._poly 把元特征展开为多项式交互项，
+                # OOF 评估必须用同样的 transform 展开后再喂给 meta_model，
+                # 否则特征维度对不上、OOF 分数也会是错的（之前是 bug）。
+                meta_input = oof_preds
+                if getattr(self, '_poly', None) is not None:
+                    meta_input = self._poly.transform(meta_input)
+                oof_blend = self.meta_model.predict(meta_input)
             else:
                 log_warning("[EnsembleBuilder] STACKING 未训练元模型，回退到 WEIGHTED")
                 weights = self._compute_weights(cv_results, task_type)
@@ -1983,11 +1989,13 @@ class EnsembleBuilder:
         # 鼓励选择 diverse 的模型组合
         n_models = len(cv_results)
         if n_models > 1:
-            # 收集每个模型最后一个 fold 的 OOF 预测
+            # 收集每个模型的 OOF 预测（用 cv_results 的 oof_pred 字段，非拼写错误的 oof_predictions）
             oof_preds = []
-            for r in cv_results:
-                if r.oof_predictions is not None and len(r.oof_predictions) > 0:
-                    oof_preds.append(np.asarray(r.oof_predictions).ravel())
+            valid_indices = []  # 记录有效 oof_pred 的 cv_results 索引，与 scores 数组对齐
+            for i, r in enumerate(cv_results):
+                if r.oof_pred is not None and len(r.oof_pred) > 0:
+                    oof_preds.append(np.asarray(r.oof_pred).ravel())
+                    valid_indices.append(i)
             
             if len(oof_preds) > 1:
                 # 向量化计算模型间预测相关性矩阵
@@ -2003,8 +2011,10 @@ class EnsembleBuilder:
                     # 每个模型与其他模型的平均相关性（只考虑有效的 oof_preds 对应的模型）
                     valid_n = len(oof_preds)
                     avg_corrs = corr_matrix[:valid_n, :valid_n].sum(axis=1) / (valid_n - 1)
+                    # 把平均相关性写回到 scores 对应的索引位置（默认无多样性奖励）
                     corr_penalty = np.zeros(n_models)
-                    corr_penalty[:valid_n] = 0.3 * avg_corrs
+                    for local_i, global_i in enumerate(valid_indices):
+                        corr_penalty[global_i] = 0.3 * avg_corrs[local_i]
                     # 应用惩罚：权重与 (1 - corr_penalty) 成正比
                     scores = scores * (1.0 - corr_penalty)
         
@@ -2103,6 +2113,11 @@ class EnsembleBuilder:
             meta_features.append(pred)
         
         meta_features = np.column_stack(meta_features)
+        # 关键：fit_stacking 训练时可能用了 self._poly 做特征展开，
+        # 预测时必须用同样的 transform 把测试元特征展开到相同的维度，
+        # 否则维度对不上、模型看到的特征不一致（之前是 bug）。
+        if getattr(self, '_poly', None) is not None:
+            meta_features = self._poly.transform(meta_features)
         return self.meta_model.predict(meta_features)
 
 
