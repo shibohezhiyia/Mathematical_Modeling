@@ -3031,7 +3031,11 @@ class ModelingEngine:
         )
     
     def _build_leaderboard(self, cv_results: List[CVResult]) -> pd.DataFrame:
-        """构建排行榜"""
+        """构建排行榜
+
+        优化：每行循环内 r.mean_scores.items() + r.std_scores.get() + r.fold_scores.get()
+        各做一次 dict 查找。把 std_scores / fold_scores 也走 .get + 默认值，行为等价。
+        """
         rows = []
         for r in cv_results:
             row = {
@@ -3040,11 +3044,14 @@ class ModelingEngine:
                 'model_key': r.model_key,
                 'train_time': round(r.train_time, 1),
             }
+            # 缓存到本地：避免每行重复走 3 个属性查找
+            std_scores = r.std_scores
+            fold_scores_map = r.fold_scores
             for metric, score in r.mean_scores.items():
                 row[f'{metric}_mean'] = round(score, 4)
-                row[f'{metric}_std'] = round(r.std_scores.get(metric, 0), 4)
+                row[f'{metric}_std'] = round(std_scores.get(metric, 0), 4)
                 # 保留每折原始分数供箱线图使用
-                fold_scores = r.fold_scores.get(metric, [])
+                fold_scores = fold_scores_map.get(metric)
                 if fold_scores:
                     row[f'{metric}_fold_scores'] = [round(s, 4) for s in fold_scores]
             rows.append(row)
