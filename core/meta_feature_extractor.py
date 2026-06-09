@@ -6,6 +6,7 @@
 """
 
 import math
+import bisect
 from typing import Dict, Optional, Any
 from dataclasses import dataclass
 
@@ -18,6 +19,7 @@ from core.modeling_engine import TaskType
 # _compute_complexity 用到的"规模桶"阈值
 # 5 个样本桶和 4 个特征桶，从 5 个硬编码的 if/elif 块提取。
 # 抽到模块常量便于调整且让复杂度的 100 分制评分分布可读。
+# 配合 bisect 二分查表（O(log k)，k = 桶数）
 _SAMPLE_BUCKETS = (
     (1_000,    5),    # < 1k 样本 → 5 分
     (10_000,  15),    # < 10k 样本 → 15 分
@@ -30,6 +32,12 @@ _FEATURE_BUCKETS = (
     (200,   15),      # < 200 特征 → 15 分
     # >= 200 特征 → 20 分
 )
+# 分离 thresholds 和 values 用于 bisect 二分查表
+# bisect.bisect_left 找第一个 > target 的位置，索引 = 桶匹配位置
+_SAMPLE_THRESHOLDS = [t for t, _ in _SAMPLE_BUCKETS]
+_SAMPLE_VALUES = [v for _, v in _SAMPLE_BUCKETS]
+_FEATURE_THRESHOLDS = [t for t, _ in _FEATURE_BUCKETS]
+_FEATURE_VALUES = [v for _, v in _FEATURE_BUCKETS]
 # 各项指标最大分值（cap 用）
 _MAX_SAMPLE_SCORE = 25
 _MAX_FEATURE_SCORE = 20
@@ -168,22 +176,15 @@ class MetaFeatureExtractor:
         """
         score = 0.0
 
-        # 样本规模：bisect 二分查表 O(log n) 替代 for-break 线性扫描
-        # 桶定义 (threshold, value) 按 threshold 升序排列，找到第一个
-        # threshold > n_samples 的桶，取其 value；所有桶都大就取 max_score
-        sample_score = _MAX_SAMPLE_SCORE
-        for threshold, value in _SAMPLE_BUCKETS:
-            if meta.n_samples < threshold:
-                sample_score = value
-                break
+        # 样本规模：bisect 二分查表 O(log k) 替代 for-break 线性扫描（k = 桶数）
+        # 找到第一个 > n_samples 的桶位置，没有就是 max_score
+        idx = bisect.bisect_left(_SAMPLE_THRESHOLDS, meta.n_samples)
+        sample_score = _SAMPLE_VALUES[idx] if idx < len(_SAMPLE_VALUES) else _MAX_SAMPLE_SCORE
         score += sample_score
 
         # 特征维度：同样按桶查表
-        feature_score = _MAX_FEATURE_SCORE
-        for threshold, value in _FEATURE_BUCKETS:
-            if meta.n_features < threshold:
-                feature_score = value
-                break
+        idx = bisect.bisect_left(_FEATURE_THRESHOLDS, meta.n_features)
+        feature_score = _FEATURE_VALUES[idx] if idx < len(_FEATURE_VALUES) else _MAX_FEATURE_SCORE
         score += feature_score
 
         # 缺失率 (0-15)
