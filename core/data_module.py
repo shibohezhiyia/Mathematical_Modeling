@@ -609,7 +609,10 @@ class DataCleaner:
                          profiles: Dict[str, ColumnProfile],
                          target_col: Optional[str] = None) -> pd.DataFrame:
         """处理异常值（用边界值替换而非删除）"""
-        feature_cols = [c for c in df.columns if c != target_col]
+        # 关键短路径：target_col 为 None 时 `c != None` 对所有 c 都 True，
+        # 直接 list(df.columns) 替代 list comprehension + filter，省一次遍历
+        feature_cols = list(df.columns) if target_col is None else \
+            [c for c in df.columns if c != target_col]
         # 缓存 profiles.keys() 视图，让 `col in profiles` 比重复 dict 哈希快
         # （虽然 dict.__contains__ 是 O(1)，但 .keys() 视图的 __contains__ 是
         # CPython 优化过的 C 路径，比走 dict.__contains__ 略快）
