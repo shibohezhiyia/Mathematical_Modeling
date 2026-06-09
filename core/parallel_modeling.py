@@ -419,29 +419,23 @@ class HyperparameterSearch:
                        cv_folds: int, use_gpu: bool) -> Tuple[Dict, float]:
         """Optuna贝叶斯优化"""
         import optuna
-        
-        # 找到模型key
-        model_key = None
-        for k, v in ModelRegistry._models.items():
-            if v.name == model_config.name:
-                model_key = k
-                break
-        
+
+        # 优化：用 _name_to_key 走 O(1) 哈希查找，替代原来 O(n) 的
+        # for k, v in ModelRegistry._models.items() 列表扫描
+        model_key = ModelRegistry._name_to_key.get(model_config.name)
         if not model_key:
             return self._random_search(model_config, X, y, task_type, cv_folds, use_gpu)
         
         param_dists = model_config.param_distributions
         
         def objective(trial: Any) -> float:
-            params = {}
-            for key, values in param_dists.items():
-                if all(isinstance(v, (int, np.integer)) for v in values):
-                    params[key] = trial.suggest_categorical(key, values)
-                elif all(isinstance(v, float) for v in values):
-                    params[key] = trial.suggest_categorical(key, values)
-                else:
-                    params[key] = trial.suggest_categorical(key, values)
-            
+            # 之前是 if/elif/else 三分支，每分支都执行同一条
+            # `trial.suggest_categorical(key, values)` 调用，纯冗余——三路径完全等价。
+            # 合并成单条 categorical 调用，O(1)→O(1)，省去三次 isinstance 反射。
+            params = {
+                key: trial.suggest_categorical(key, values)
+                for key, values in param_dists.items()
+            }
             model = ModelRegistry.create_model(model_key, task_type, use_gpu=use_gpu, **params)
             return self._cv_score(model, X, y, task_type, cv_folds)
         
