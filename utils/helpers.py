@@ -18,17 +18,17 @@ logging.basicConfig(
 
 class LogStore:
     """
-    内存日志存储器（环形缓冲区，最大保留 5000 条）
-    
-    支持按级别分类：INFO / WARNING / ERROR
+    内存日志存储器(环形缓冲区,最大保留 5000 条)
+
+    支持按级别分类:INFO / WARNING / ERROR
     支持按模块/类别标签分类
     """
     MAX_SIZE = 5000
-    
+
     def __init__(self):
         self._logs: deque = deque(maxlen=self.MAX_SIZE)
         self._counters = {"DEBUG": 0, "INFO": 0, "WARNING": 0, "ERROR": 0, "CRITICAL": 0}
-    
+
     def add(self, level: str, message: str, category: str = ""):
         """添加一条日志"""
         entry = {
@@ -40,7 +40,7 @@ class LogStore:
         }
         self._logs.append(entry)
         self._counters[level.upper()] = self._counters.get(level.upper(), 0) + 1
-        
+
         # 同时输出到标准日志
         if level.upper() == "INFO":
             logging.info(message)
@@ -50,28 +50,46 @@ class LogStore:
             logging.error(message)
         else:
             logging.info(message)
-    
+
     def get_logs(self, level: Optional[str] = None, limit: int = 200, offset: int = 0) -> List[Dict]:
-        """获取日志列表，支持级别筛选"""
-        logs = list(self._logs)
+        """获取日志列表，支持级别筛选
+
+        优化：原代码无 level 时 list(self._logs) + [::-1] 复制整队列 2 次。
+        deque 本身支持 reversed() 直接迭代（O(1) 视图，不复制元素），
+        切片只在取子集时做一次。对于有 level 过滤的场景，list(self._logs)
+        仍要全量建列表，但下游 filter/reverse 可以继续优化。
+        """
         if level and level.upper() != "ALL":
-            logs = [l for l in logs if l["level"] == level.upper()]
-        # 倒序返回（最新的在前）
-        logs = logs[::-1]
+            level_upper = level.upper()
+            # 反向迭代 deque，避免 reverse 切片时构建整个反向列表
+            logs = [l for l in reversed(self._logs) if l["level"] == level_upper]
+        else:
+            # reversed(deque) → 直接反向迭代，O(1) 视图
+            logs = list(reversed(self._logs))
         total = len(logs)
         return logs[offset:offset + limit], total
-    
+
     def get_stats(self) -> Dict:
-        """获取日志统计"""
+        """获取日志统计
+
+        优化：原代码 4 个独立 sum(1 for ... if ...) 各扫一次 self._logs = 4N 步。
+        改成单次 for 循环累加 level → count 字典，N 步。
+        """
+        # 用本地变量 + set membership 检查常量级别，避免每条 .upper() 反射
+        level_counts = {"DEBUG": 0, "INFO": 0, "WARNING": 0, "ERROR": 0, "CRITICAL": 0}
+        for entry in self._logs:
+            lvl = entry["level"]
+            if lvl in level_counts:
+                level_counts[lvl] += 1
         return {
             "total": len(self._logs),
-            "debug": sum(1 for l in self._logs if l["level"] == "DEBUG"),
-            "info": sum(1 for l in self._logs if l["level"] == "INFO"),
-            "warning": sum(1 for l in self._logs if l["level"] == "WARNING"),
-            "error": sum(1 for l in self._logs if l["level"] == "ERROR"),
-            "critical": sum(1 for l in self._logs if l["level"] == "CRITICAL"),
+            "debug": level_counts["DEBUG"],
+            "info": level_counts["INFO"],
+            "warning": level_counts["WARNING"],
+            "error": level_counts["ERROR"],
+            "critical": level_counts["CRITICAL"],
         }
-    
+
     def clear(self):
         """清空日志"""
         self._logs.clear()
