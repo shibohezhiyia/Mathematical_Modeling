@@ -1665,10 +1665,11 @@ class CrossValidator:
             metrics = TaskTypeDetector.get_metrics_dict(task_type)
         
         # 分类任务：一次算清最小类别数（3 个分支都需要，避免重复 O(n) value_counts）
-        _min_class_count = 0
-        if task_type == TaskType.CLASSIFICATION:
-            _y_s = pd.Series(y)
-            _min_class_count = int(_y_s.value_counts().min()) if len(_y_s) > 0 else 0
+        _y_s = pd.Series(y)
+        # 优化：把 value_counts 算一次，后面同时取 min（_min_class_count）
+        # 和 len（n_classes），省一次独立的 np.unique 扫描
+        _vc = _y_s.value_counts() if len(_y_s) > 0 else pd.Series(dtype=int)
+        _min_class_count = int(_vc.min()) if len(_vc) > 0 else 0
 
         # 创建K折（支持高级CV策略）
         if self.fold_type == 'group' and groups is not None:
@@ -1719,7 +1720,8 @@ class CrossValidator:
         oof_proba = None
         
         if task_type == TaskType.CLASSIFICATION:
-            n_classes = len(np.unique(y))
+            # 复用上面的 _vc：len(_vc) 已是类别数（之前是 np.unique(y) 又扫一次 O(n)）
+            n_classes = len(_vc)
             if n_classes == 2:
                 oof_proba = np.zeros(len(y))
             else:
