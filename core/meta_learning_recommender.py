@@ -515,14 +515,15 @@ class MetaLearningModelRecommender:
                                   task_type: TaskType) -> Dict[str, Any]:
         """基于元学习推荐"""
         # 加权投票
-        model_scores: Dict[str, List[Tuple[float, float]]] = {}
+        # 优化：用 defaultdict(list) 替代 if-not-in-then-append 模式，
+        # N 模型 × M perf 记录省 2*N*M 次 dict 哈希查找
+        from collections import defaultdict
+        model_scores: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
         dataset_names = []
 
         for record, sim in similar:
             dataset_names.append(record.dataset_name or f"dataset_{len(dataset_names)}")
             for perf in record.performances:
-                if perf.model_key not in model_scores:
-                    model_scores[perf.model_key] = []
                 model_scores[perf.model_key].append((perf.score, sim))
 
         # 计算加权平均分数
