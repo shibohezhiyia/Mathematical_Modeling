@@ -318,27 +318,26 @@ class AutoMissingPipeline:
         )
         
         # 统计摘要
-        pattern_counts: Dict[str, int] = {}
-        strategy_counts: Dict[str, int] = {}
+        # 用 defaultdict 替代 dict.get(k, 0) + 1 模式，省一次 dict 哈希 + 显式 fallback
+        from collections import defaultdict
+        pattern_counts: Dict[str, int] = defaultdict(int)
+        strategy_counts: Dict[str, int] = defaultdict(int)
         total_missing_handled = 0
+        structural_rules_count = 0
         
         for profile in self.column_profiles.values():
-            p_name = profile.pattern.value
-            pattern_counts[p_name] = pattern_counts.get(p_name, 0) + 1
-            
-            s_name = profile.recommended_strategy.value
-            strategy_counts[s_name] = strategy_counts.get(s_name, 0) + 1
+            pattern_counts[profile.pattern.value] += 1
+            strategy_counts[profile.recommended_strategy.value] += 1
             
             if profile.pattern != MissingPattern.NONE:
                 total_missing_handled += profile.missing_count
+            structural_rules_count += len(profile.structural_rules)
         
         report.execution_summary = {
-            'pattern_distribution': pattern_counts,
-            'strategy_distribution': strategy_counts,
+            'pattern_distribution': dict(pattern_counts),  # 转换回普通 dict 避免序列化问题
+            'strategy_distribution': dict(strategy_counts),
             'total_missing_handled': total_missing_handled,
-            'structural_rules_found': sum(
-                len(p.structural_rules) for p in self.column_profiles.values()
-            )
+            'structural_rules_found': structural_rules_count
         }
         
         return report
