@@ -676,7 +676,18 @@ class ParallelModelingEngine:
             return None
     
     def _generate_oof(self, model_cls: Any, params: Dict, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray]) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """生成Out-of-Fold预测"""
+        """生成Out-of-Fold预测
+
+        关键 bug 修复：原代码 model_cls(**params) 不带 GPU 配置，当 plan.use_gpu=True
+        时最终模型在 GPU 训练、OOF 折却在 CPU 训练，行为不一致且 OOF 分数会偏差。
+        现通过 auto_gpu_model 走同一条配置路径，确保 OOF 模型配置和最终模型一致。
+        """
+        # 准备 GPU 参数（与 _train_single_model 中 ModelRegistry.create_model 路径一致）
+        if self.plan.use_gpu:
+            from core.accelerators import auto_gpu_model  # 局部 import 避免循环依赖
+        else:
+            auto_gpu_model = None
+        
         if self.task_type == 'classification':
             cv = StratifiedKFold(n_splits=self.plan.cv_folds, shuffle=True, 
                                  random_state=self.random_state)
@@ -700,9 +711,11 @@ class ParallelModelingEngine:
                           X[val_idx] if isinstance(X, np.ndarray) else X.iloc[val_idx]
             y_tr = y[train_idx] if isinstance(y, np.ndarray) else y.iloc[train_idx]
             
-            # 创建模型（带GPU配置）
-            # 注意：这里需要特殊处理，因为model_cls可能是dict
-            model = model_cls(**params)
+            # 创建模型：走与最终模型相同的 GPU 配置路径，避免 OOF CPU / final GPU 不一致
+            if auto_gpu_model is not None:
+                model = auto_gpu_model(model_cls, use_gpu=True, **params)
+            else:
+                model = model_cls(**params)
             model.fit(X_tr, y_tr)
             
             if self.task_type == 'classification' and hasattr(model, 'predict_proba'):
