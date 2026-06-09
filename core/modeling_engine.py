@@ -281,6 +281,9 @@ class AutoEncoder:
         self._encoders: Dict[str, Any] = {}
         self._encoding_map: Dict[str, EncodingType] = {}
         self._target_mean: Optional[Dict] = None
+        # 预计算 LABEL/TARGET/FREQUENCY 在 transform 阶段要用的查表，避免每次 transform 重新构造
+        self._label_value_maps: Dict[str, Dict[str, int]] = {}  # col -> {原始值: 整数编码}
+        self._fallback_values: Dict[str, float] = {}  # col -> TARGET/FREQUENCY 未知值的全局均值
         self._fitted = False
     
     def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> 'AutoEncoder':
@@ -288,6 +291,8 @@ class AutoEncoder:
         self._encoders = {}
         self._encoding_map = {}
         self._target_mean = {}
+        self._label_value_maps = {}
+        self._fallback_values = {}
 
         for col in X.columns:
             # 单次 X[col] 取出 + 缓存 dtype：原代码 X[col].dtype 两次访问
@@ -309,6 +314,9 @@ class AutoEncoder:
                     enc = LabelEncoder()
                     enc.fit(X[col].astype(str))
                     self._encoders[col] = enc
+                    # 预计算 {原始值: 整数编码} 查表，transform 时直接 dict 查 O(1)，
+                    # 避免每列 N+1 次 enc.transform([v]) 反复调用
+                    self._label_value_maps[col] = {str(v): int(i) for i, v in enumerate(enc.classes_)}
                     
                 elif strategy == EncodingType.ORDINAL:
                     if col in self.ordinal_hint:
@@ -323,9 +331,14 @@ class AutoEncoder:
                     # 目标编码：用每个类别的目标均值
                     df_tmp = pd.DataFrame({col: X[col].astype(str), 'target': y})
                     self._target_mean[col] = df_tmp.groupby(col)['target'].mean().to_dict()
+                    # 预计算未知值的全局均值 fallback
+                    vals = list(self._target_mean[col].values())
+                    self._fallback_values[col] = float(np.mean(vals)) if vals else 0.0
                     
                 elif strategy == EncodingType.FREQUENCY:
                     self._target_mean[col] = X[col].value_counts(normalize=True).to_dict()
+                    vals = list(self._target_mean[col].values())
+                    self._fallback_values[col] = float(np.mean(vals)) if vals else 0.0
         
         self._fitted = True
         return self
@@ -334,6 +347,8 @@ class AutoEncoder:
         """执行编码
         
         优化：批量收集所有需要 drop 和 concat 的列，一次性合并，避免多次 pd.concat 内存开销。
+        LABEL/TARGET/FREQUENCY 直接用 fit 阶段预计算的查表，避免 transform 时 N+1 次
+        enc.transform / np.mean(list(mapping.values())) 重复工作。
         """
         if not self._fitted:
             raise ValueError("请先调用 fit()")
@@ -356,18 +371,10 @@ class AutoEncoder:
                 dfs_to_concat.append(df_enc)
                 
             elif strategy == EncodingType.LABEL:
-                enc = self._encoders[col]
-                # 处理未知值
-                values = X_out[col].astype(str)
-                known = set(enc.classes_)
-                # 向量化编码：使用映射替代 apply(lambda...)
-                mapping = {}
-                for v in known:
-                    try:
-                        mapping[v] = enc.transform([v])[0]
-                    except Exception:
-                        mapping[v] = -1
-                X_out[col] = values.map(mapping).fillna(-1).astype(int)
+                # 直接用 fit 阶段预计算的 {原始值: 整数} 查表（O(1) 哈希查找）
+                # 未知值（包括 NaN 和未出现过的类别）填 -1，与原 enc.transform 行为一致
+                value_map = self._label_value_maps.get(col, {})
+                X_out[col] = X_out[col].astype(str).map(value_map).fillna(-1).astype(int)
                 
             elif strategy == EncodingType.ORDINAL:
                 enc = self._encoders[col]
@@ -376,7 +383,8 @@ class AutoEncoder:
                 
             elif strategy in (EncodingType.TARGET, EncodingType.FREQUENCY):
                 mapping = self._target_mean.get(col, {})
-                global_mean = np.mean(list(mapping.values())) if mapping else 0
+                # 用 fit 阶段缓存的全局均值，避免每列重新构造 list + np.mean
+                global_mean = self._fallback_values.get(col, 0.0)
                 X_out[col] = X_out[col].astype(str).map(mapping).fillna(global_mean)
         
         # 一次性合并所有 one-hot 编码结果（避免多次 pd.concat 的内存碎片）
