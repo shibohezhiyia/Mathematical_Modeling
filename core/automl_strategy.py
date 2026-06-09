@@ -161,15 +161,15 @@ class AutoMLStrategy:
             if meta.n_samples > _BIG_DATA_SAMPLES:
                 base_models = [m for m in base_models if m not in ['svm', 'knn']]
 
-            # 高维：增加线性模型
-            if meta.n_features > 100:
-                if 'lr' not in base_models:
-                    base_models.insert(0, 'lr')
+            # 高维：把线性模型放最前（'lr' 必然已在 base_models，insert(0, 'lr') 是 no-op，但保留
+            # 兜底逻辑以防 base_models 初始列表未来被修改时漏掉 'lr'）
+            if meta.n_features > 100 and 'lr' not in base_models:
+                base_models.insert(0, 'lr')
 
-            # 类别不平衡：增加对不平衡鲁棒的模型
-            if meta.class_imbalance_ratio > 5:
-                if 'xgb' not in base_models:
-                    base_models.append('xgb')
+            # 类别不平衡：增加对不平衡鲁棒的模型（同理，'xgb' 必然已在，append 是 no-op，
+            # 保留以防未来 base_models 初始列表变化时漏掉 'xgb'）
+            if meta.class_imbalance_ratio > 5 and 'xgb' not in base_models:
+                base_models.append('xgb')
 
             return base_models[:5]  # 最多5个
 
