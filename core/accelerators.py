@@ -511,34 +511,43 @@ def optimize_memory(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
     """
     start_mem = df.memory_usage(deep=True).sum() / 1024 ** 2
     
+    # 缓存 len(df) 避免每列都重新调（O(1) 但 Python 调用有常量开销）
+    n_total = len(df)
+    
     for col in df.columns:
-        col_type = df[col].dtype
+        # 缓存 series：原代码 df[col] 在 min/max/astype 之间多次出现，
+        # 每次都走 IndexingEngine + 可能的拷贝。
+        series = df[col]
+        col_type = series.dtype
         
         if pd.api.types.is_integer_dtype(col_type):
-            c_min, c_max = df[col].min(), df[col].max()
+            # 一次 agg 拿 min + max，省一次 O(n) 扫描
+            cmin_cmax = series.agg(['min', 'max'])
+            c_min, c_max = cmin_cmax['min'], cmin_cmax['max']
             if c_min >= 0:
                 if c_max < 255:
-                    df[col] = df[col].astype(np.uint8)
+                    df[col] = series.astype(np.uint8)
                 elif c_max < 65535:
-                    df[col] = df[col].astype(np.uint16)
+                    df[col] = series.astype(np.uint16)
                 elif c_max < 4294967295:
-                    df[col] = df[col].astype(np.uint32)
+                    df[col] = series.astype(np.uint32)
             else:
                 if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
-                    df[col] = df[col].astype(np.int8)
+                    df[col] = series.astype(np.int8)
                 elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
-                    df[col] = df[col].astype(np.int16)
+                    df[col] = series.astype(np.int16)
                 elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
-                    df[col] = df[col].astype(np.int32)
+                    df[col] = series.astype(np.int32)
         
         elif pd.api.types.is_float_dtype(col_type):
-            df[col] = df[col].astype(np.float32)
+            # dtype check：已经是 float32 时跳过 astype，省一次 O(n) 复制
+            if col_type != np.float32:
+                df[col] = series.astype(np.float32)
         
         elif col_type == object:
-            n_unique = df[col].nunique()
-            n_total = len(df)
+            n_unique = series.nunique()
             if n_unique / n_total < 0.5:
-                df[col] = df[col].astype('category')
+                df[col] = series.astype('category')
     
     end_mem = df.memory_usage(deep=True).sum() / 1024 ** 2
     
