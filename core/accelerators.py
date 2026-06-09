@@ -546,7 +546,9 @@ def optimize_memory(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
         
         elif col_type == object:
             n_unique = series.nunique()
-            if n_unique / n_total < 0.5:
+            # 鲁棒性：n_total = 0（空 df）时 n_unique / n_total 抛 ZeroDivisionError；
+            # 这种情况下没有 row 可被 cast 到 category，直接跳过
+            if n_total > 0 and n_unique / n_total < 0.5:
                 df[col] = series.astype('category')
     
     end_mem = df.memory_usage(deep=True).sum() / 1024 ** 2
