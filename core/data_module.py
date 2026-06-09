@@ -451,16 +451,14 @@ class TypeDetector:
 
         # 缓存到模块级 import 避免每次重新导入
         from concurrent.futures import ThreadPoolExecutor
-        from core.progress_bar import progress_iter as _progress_iter
         
         profiles: Dict[str, ColumnProfile] = {}
         # max_workers 限制为 min(8, n_cols)：超过 CPU 核心数反而因 context switch 退化
         max_workers = min(8, n_cols)
-        # 把 df 包装到列表里传进 worker，闭包捕获开销 > 直接传参
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 用 submit 替代 map 拿回 future 对应 col_name
             futures = {executor.submit(self.detect, df[col], col): col for col in cols}
-            for fut in _progress_iter(futures, total=n_cols, desc="列分析", disable=True):
+            for fut in progress_iter(futures, total=n_cols, desc="列分析", disable=True):
                 col = futures[fut]
                 _, profile = fut.result()
                 profiles[col] = profile
