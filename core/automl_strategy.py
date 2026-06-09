@@ -18,6 +18,17 @@ _SMALL_DATA_SAMPLES = 1_000       # 小数据阈值
 _HIGH_COMPLEXITY = 70             # 高复杂度阈值（满分 100）
 _MEDIUM_COMPLEXITY = 60           # 中等复杂度阈值
 
+# 优化器 → 时间倍增映射：原代码每次 _estimate_time 调用都重建此 dict，提到模块级避免重复
+_OPTIMIZER_TIME_MULTIPLIER = {
+    'random': 1.0,
+    'bayesian': 2.0,
+    'tpe': 2.0,
+    'cmaes': 2.5,
+    'rl': 3.0,
+    'genetic': 2.5,
+    'hyperband': 1.5,
+}
+
 
 @dataclass
 class StrategyRecommendation:
@@ -218,16 +229,8 @@ class AutoMLStrategy:
         """预估训练时间"""
         base_time = len(model_keys) * 2  # 每个模型约2分钟基础时间
         
-        # 优化器倍增
-        multiplier = {
-            'random': 1.0,
-            'bayesian': 2.0,
-            'tpe': 2.0,
-            'cmaes': 2.5,
-            'rl': 3.0,
-            'genetic': 2.5,
-            'hyperband': 1.5,
-        }.get(optimizer, 1.5)
+        # 优化器倍增（dict 提到模块级 _OPTIMIZER_TIME_MULTIPLIER，避免每次重建）
+        multiplier = _OPTIMIZER_TIME_MULTIPLIER.get(optimizer, 1.5)
         
         # 数据规模倍增
         if meta.n_samples > _BIG_DATA_SAMPLES:
