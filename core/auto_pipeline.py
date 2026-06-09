@@ -193,7 +193,9 @@ class AutoMissingPipeline:
             if any(hint in col for hint in self.config.id_pattern_hints):
                 continue
             
-            missing_rate = df[col].isnull().sum() / len(df)
+            # 优化：df[col].isnull().mean() 单次扫描直接返回 Python float，
+            # 替代 df[col].isnull().sum() / len(df)（.sum() 返回 int + 再除法）
+            missing_rate = df[col].isnull().mean()
             
             # 缺失率在合理范围（可能是部分有标签的数据）
             if 0.1 <= missing_rate <= 0.9:
