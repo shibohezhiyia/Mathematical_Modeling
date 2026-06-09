@@ -561,7 +561,11 @@ class MetaLearningModelRecommender:
         heuristic_rec = self._heuristic_recommend(fingerprint, task_type, preference)
 
         # 合并模型列表(元学习优先)
-        combined = meta_rec['model_keys'][:3] + [m for m in heuristic_rec['model_keys'] if m not in meta_rec['model_keys']]
+        # 优化：m not in meta_rec['model_keys'] 在 list 上 O(n) 查找，
+        # N 项 = O(N²)。改用 set 后 O(N) 总开销（5 项内小，但代码更稳）
+        meta_keys = meta_rec['model_keys']
+        meta_set = set(meta_keys)
+        combined = meta_keys[:3] + [m for m in heuristic_rec['model_keys'] if m not in meta_set]
 
         reasoning = (
             f"混合推荐: 相似度 {meta_rec['similarity']:.2f} 低于阈值 {self.min_similarity},"
