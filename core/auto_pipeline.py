@@ -115,9 +115,15 @@ class AutoMissingPipeline:
         target_col = self._identify_target(df)
         log_info(f"[Step 1] 目标列识别: {target_col or '未识别'}")
         
-        # Step 2: 分离 train/test
-        train_df, test_df = self._split_train_test(df, target_col)
-        log_info(f"[Step 2] 数据分割: 训练集={len(train_df) if train_df is not None else 0}, 测试集={len(test_df) if test_df is not None else 0}")
+        # Step 2: 初步分离 train/test（仅用于日志，详见 Step 7 重新分离）
+        # 优化：原代码把 _split_train_test 的结果赋给 train_df/test_df 后又丢弃，
+        # 等到 Step 7 在 processed_df 上重新做一次同样的 mask。浪费 O(n) 一次 + 一次 copy()。
+        # 改为直接根据 target_col 状态记一次日志，省掉 _split_train_test 调用 + 临时 DataFrame
+        if target_col and target_col in df.columns:
+            n_null_target = int(df[target_col].isnull().sum())
+            log_info(f"[Step 2] 初步分离: 训练集={len(df) - n_null_target}, 测试集={n_null_target}")
+        else:
+            log_info(f"[Step 2] 初步分离: 训练集={len(df)}, 测试集=0（无目标列）")
         
         # Step 3: 分类列类型
         self.type_profiles = self.detector.analyze_dataframe(df)
@@ -134,8 +140,8 @@ class AutoMissingPipeline:
         # Step 7: 执行处理
         processed_df = self._execute_processing(df)
         
-        # 重新分离（基于处理后的数据）
-        if target_col:
+        # 基于处理后的数据重新分离
+        if target_col and target_col in processed_df.columns:
             train_mask = processed_df[target_col].notna()
             final_train = processed_df[train_mask].copy()
             final_test = processed_df[~train_mask].copy() if (~train_mask).any() else None
