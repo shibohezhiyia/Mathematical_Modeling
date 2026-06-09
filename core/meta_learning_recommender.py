@@ -116,15 +116,18 @@ class DatasetFingerprint:
         for c in X.columns:
             dt = col_dtype[c]
             nu = col_nunique[c]
+            # 优化：pd.api.types.is_numeric_dtype 在循环里多次重复算（O(n_features) 列 × 1 次/列），
+            # 提到内部一次：dt == object 和 is_numeric 互斥，省一次反射 + 类型检查
+            is_numeric = pd.api.types.is_numeric_dtype(dt)
             # 时间特征
             if 'datetime' in str(dt):
                 n_datetime += 1
-            # 文本特征：object 且 nunique > 10
-            if dt == object and nu > 10:
-                n_text += 1
             # 类别特征：非数值
-            if not pd.api.types.is_numeric_dtype(dt):
+            if not is_numeric:
                 n_cat += 1
+                # 文本特征：object 且 nunique > 10
+                if dt == object and nu > 10:
+                    n_text += 1
                 # 高基数：类别列中 nunique > 50
                 if nu > 50:
                     n_high += 1
