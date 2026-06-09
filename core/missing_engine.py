@@ -564,6 +564,12 @@ class MissingValueHandler:
     def __init__(self, cache: Optional[CacheManager] = None) -> None:
         self.cache = cache or CacheManager()
         self._imputer_cache: Dict[str, Any] = {}
+        # 优化：handler_map 在 handle() 每次调用都重新构造一份 dict，提到 __init__
+        # 里只算一次（_HANDLER_MAP 是类级别常量，handler 是实例方法，构造时绑定
+        # getattr 的结果不会变）
+        self._handler_map = {
+            k: getattr(self, v) for k, v in self._HANDLER_MAP.items()
+        }
     
     def handle(self,
                df: pd.DataFrame,
@@ -591,11 +597,7 @@ class MissingValueHandler:
             log_info(f"[{col}] 目标缺失，保留NaN待预测")
             return df
         
-        handler_map = {
-            k: getattr(self, v) for k, v in self._HANDLER_MAP.items()
-        }
-        
-        handler = handler_map.get(strategy)
+        handler = self._handler_map.get(strategy)
         if handler is None:
             log_warning(f"[{col}] 未知策略 {strategy}，跳过处理")
             return df
