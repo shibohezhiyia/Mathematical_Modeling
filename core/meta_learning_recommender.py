@@ -619,17 +619,22 @@ class MetaLearningModelRecommender:
         """根据特征类型分布调整模型优先级"""
         adjusted = list(model_keys)
 
+        # 关键 bug 修复：原代码 for x in [...]: insert(0, x) 会让最终顺序是反向的
+        # （因为每次 insert(0, x) 把已插入的挤到后面），导致 ['lr', 'ridge', ...] 这种
+        # 期望优先级列表变 ['sgd', 'linear', 'ridge', 'lr']。改成 reversed(...) 循环
+        # 保持期望的优先级（lr 在最前，ridge 次之，...，sgd 最后）。
+
         # 高文本比例 → 优先线性模型(对高维稀疏友好)
         if fingerprint.text_ratio > 0.3:
-            for linear in ['lr', 'ridge', 'linear', 'sgd']:
+            for linear in reversed(['lr', 'ridge', 'linear', 'sgd']):
                 if linear in adjusted:
                     adjusted.remove(linear)
                     adjusted.insert(0, linear)
 
         # 高时间特征比例 → 优先树模型(对时间特征交互好)
         if fingerprint.datetime_ratio > 0.2:
-            for tree in ['xgb', 'lgb', 'rf']:
-                if tree in adjusted and tree != adjusted[0]:
+            for tree in reversed(['xgb', 'lgb', 'rf']):
+                if tree in adjusted:
                     adjusted.remove(tree)
                     adjusted.insert(0, tree)
 
@@ -641,7 +646,7 @@ class MetaLearningModelRecommender:
 
         # 高度偏态数据 → 优先鲁棒模型
         if abs(fingerprint.mean_skewness) > 2:
-            for robust in ['lgb', 'xgb', 'et']:
+            for robust in reversed(['lgb', 'xgb', 'et']):
                 if robust in adjusted and robust != adjusted[0]:
                     adjusted.remove(robust)
                     adjusted.insert(0, robust)
