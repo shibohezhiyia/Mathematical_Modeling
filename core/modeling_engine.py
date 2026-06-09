@@ -1890,7 +1890,22 @@ class EnsembleBuilder:
             }
         
         # 收集OOF预测
-        oof_preds = np.column_stack([r.oof_pred for r in cv_results])
+        # 鲁棒性：过滤掉 oof_pred 为 None 的模型，避免 np.column_stack 抛 TypeError；
+        # 同步把 weights 对齐到有效 oof_preds 列表（按 cv_results 顺序）。之前 oof_predictions 拼写错误
+        # 导致 _compute_weights 整个 negative-correlation 块被静默跳过，权重按 scores 简单归一化
+        valid_cv = [r for r in cv_results if r.oof_pred is not None]
+        if not valid_cv:
+            raise ValueError("[EnsembleBuilder] 没有任何 CVResult 含 oof_pred，无法融合")
+        oof_preds = np.column_stack([r.oof_pred for r in valid_cv])
+        # 同步把 weights 对齐到 valid_cv 顺序（与 oof_preds 列顺序一致）
+        if len(valid_cv) != len(cv_results):
+            log_warning(f"[EnsembleBuilder] {len(cv_results) - len(valid_cv)} 个 CVResult 缺 oof_pred，已过滤")
+            valid_keys = {r.model_key: i for i, r in enumerate(cv_results)}
+            weights = np.array([weights[valid_keys[r.model_key]] for r in valid_cv], dtype=float)
+            # 重新归一化 weights
+            wsum = weights.sum()
+            if wsum > 0:
+                weights = weights / wsum
         
         # Stacking 分支
         if self.method == EnsembleMethod.STACKING:
@@ -2087,7 +2102,21 @@ class EnsembleBuilder:
                 self.meta_model = RidgeCV(alphas=np.logspace(-3, 3, 13), cv=3)
         
         # 构建元特征
-        meta_features = np.column_stack([r.oof_pred for r in cv_results])
+        # 鲁棒性：oof_pred 字段为 Optional，理论上可能为 None（用户手构 CVResult），
+        # 直接 stack 会抛 TypeError。降级为拿不到 oof 的模型 → 全 0 占位。
+        oof_arrays = []
+        valid_mask = []
+        for r in cv_results:
+            arr = r.oof_pred
+            if arr is None:
+                # 用 0 填充；标记为 invalid，最后在训练时用一行空预测占位
+                # 实际更安全的做法是抛错（让用户知道有 CVResult 缺 oof_pred）
+                raise ValueError(
+                    f"[EnsembleBuilder] CVResult {r.model_key} 缺少 oof_pred，无法 stacking"
+                )
+            oof_arrays.append(arr)
+            valid_mask.append(True)
+        meta_features = np.column_stack(oof_arrays)
         
         # 新增：添加多项式特征（捕捉模型间的非线性交互）
         if meta_features.shape[1] >= 2 and meta_features.shape[1] <= 20:
