@@ -512,17 +512,24 @@ class AutoDecisionEngine:
     def _build_comparison_table(self, scored_models: List[Tuple[ModelScore, float]],
                                  weights: Dict[str, float]) -> pd.DataFrame:
         """构建对比表格"""
+        # 关键优化：原代码在循环内反复 f'精度({weights["accuracy"]:.0%})' 拼接列名，
+        # 每个 model 都重算 5 个 f-string + dict lookup。提到循环外只算一次。
+        acc_col = f'精度({weights["accuracy"]:.0%})'
+        spd_col = f'速度({weights["speed"]:.0%})'
+        sta_col = f'稳定性({weights["stability"]:.0%})'
+        sim_col = f'简单度({weights["simplicity"]:.0%})'
+        gen_col = f'泛化({weights["generalization"]:.0%})'
         rows = []
         for ms, mode_score in scored_models:
             row = {
                 '排名': ms.rank,
                 '模型': ms.model_name,
                 '模式得分': round(mode_score, 1),
-                f'精度({weights["accuracy"]:.0%})': round(ms.accuracy_score, 1),
-                f'速度({weights["speed"]:.0%})': round(ms.speed_score, 1),
-                f'稳定性({weights["stability"]:.0%})': round(ms.stability_score, 1),
-                f'简单度({weights["simplicity"]:.0%})': round(ms.simplicity_score, 1),
-                f'泛化({weights["generalization"]:.0%})': round(ms.generalization_score, 1),
+                acc_col: round(ms.accuracy_score, 1),
+                spd_col: round(ms.speed_score, 1),
+                sta_col: round(ms.stability_score, 1),
+                sim_col: round(ms.simplicity_score, 1),
+                gen_col: round(ms.generalization_score, 1),
                 '主指标': f"{ms.primary_score:.4f} ± {ms.primary_std:.4f}",
                 '耗时': f"{ms.train_time:.1f}s",
                 '过拟合风险': ms.overfit_risk.value,
