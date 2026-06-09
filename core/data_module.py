@@ -568,18 +568,21 @@ class DataCleaner:
             
             if dtype in (DataType.NUMERIC, DataType.BOOLEAN):
                 # 数值型：中位数填充
-                median_val = df[col].median()
-                df[col] = df[col].fillna(median_val)
+                # 优化：df[col] 顶部 cache 到 series，下面的 median/fillna 复用
+                series = df[col]
+                median_val = series.median()
+                df[col] = series.fillna(median_val)
                 log_info(f"数值列 '{col}' 使用 {median_val:.4f} 填充 {null_count} 个缺失值")
                 
             elif dtype == DataType.CATEGORY:
                 # 类别型：众数填充
-                mode_val = df[col].mode()
+                series = df[col]
+                mode_val = series.mode()
                 if len(mode_val) > 0:
-                    df[col] = df[col].fillna(mode_val[0])
+                    df[col] = series.fillna(mode_val[0])
                     log_info(f"类别列 '{col}' 使用 '{mode_val[0]}' 填充 {null_count} 个缺失值")
                 else:
-                    df[col] = df[col].fillna('未知')
+                    df[col] = series.fillna('未知')
                     
             elif dtype == DataType.DATETIME:
                 # 日期型：前向填充 + 后向填充
