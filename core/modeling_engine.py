@@ -1534,6 +1534,8 @@ def _run_single_fold(fold_idx, train_idx, val_idx, X, y, model, task_type, metri
     if approx_mode:
         pred = model_fold.predict(X_val_input)
     elif precomputed_mode:
+        # 关键：K_val 之前在 pred 和 proba 两个分支各算一次，pairwise_kernels 是 O(n*m) 矩阵乘
+        # 改在前面算一次 K_val 缓存到局部变量，两个分支复用
         K_val = pairwise_kernels(X_val.values, X_tr.values, metric=orig_kernel, n_jobs=min(os.cpu_count() or 1, 8), **kernel_params)
         pred = model_fold.predict(K_val)
     else:
@@ -1559,13 +1561,7 @@ def _run_single_fold(fold_idx, train_idx, val_idx, X, y, model, task_type, metri
         if approx_mode:
             proba = model_fold.predict_proba(X_val_input)
         elif precomputed_mode:
-            params = model_fold.get_params()
-            kernel_params = {}
-            for k in ('gamma', 'degree', 'coef0'):
-                if k in params:
-                    kernel_params[k] = params[k]
-
-            K_val = pairwise_kernels(X_val.values, X_tr.values, metric=orig_kernel, n_jobs=min(os.cpu_count() or 1, 8), **kernel_params)
+            # 复用上面的 K_val（O(n*m) 矩阵乘只算一次）
             proba = model_fold.predict_proba(K_val)
         else:
             proba = model_fold.predict_proba(X_val)
