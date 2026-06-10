@@ -464,7 +464,14 @@ class TypeDetector:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 用 submit 替代 map 拿回 future 对应 col_name
             futures = {executor.submit(self.detect, df[col], col): col for col in cols}
-            for fut in progress_iter(futures, total=n_cols, desc="列分析", disable=True):
+            # 优化：用 as_completed 替代 dict 顺序迭代 —— dict.__iter__ 是按 submission
+            # 顺序，但第一个 future 不一定先完成。as_completed 让每完成一个 future
+            # 立即处理，缩短 critical path：
+            #   - 串行 dict 迭代：T_total = sum of (max(individual_finish_time) at each iter)
+            #   - as_completed：T_total = max(individual_finish_time)（实际接近 critical path）
+            # 对齐 pandas 操作中耗时差异较大的列（datetime vs numeric）特别有效
+            from concurrent.futures import as_completed
+            for fut in as_completed(futures):
                 col = futures[fut]
                 _, profile = fut.result()
                 profiles[col] = profile
