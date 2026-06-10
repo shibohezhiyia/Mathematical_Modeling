@@ -12,7 +12,7 @@
 """
 
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 

@@ -14,8 +14,8 @@
 """
 
 import time
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
