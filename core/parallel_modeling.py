@@ -14,6 +14,7 @@
 """
 
 import time
+import threading
 from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 from dataclasses import dataclass, field
 
@@ -582,7 +583,7 @@ class ParallelModelingEngine:
             tasks.append((model_key, config, X, y, X_test, feature_names))
 
         # 线程池并行(避免模型序列化问题)
-        import threading
+        # threading 已提到模块级 import，避免每次 _fit_parallel 重复 import
         results = {}
         errors = {}
 
