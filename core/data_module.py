@@ -577,7 +577,11 @@ class DataCleaner:
         profile_keys = profiles.keys()
 
         for col in feature_cols:
-            if col not in profile_keys:
+            # 合并"存在性" + "profile 取出"为一次 dict.get：
+            # 之前是 if col not in profile_keys: continue; profile = profiles[col]
+            # 现在用 walrus 一次 dict.get 完成两件事
+            profile = profiles.get(col)
+            if profile is None:
                 continue
 
             # 单次扫描拿 count（避免 .any() 短路 + .sum() 重复扫描）
@@ -589,7 +593,6 @@ class DataCleaner:
             if null_count == 0:
                 continue
 
-            profile = profiles[col]
             dtype = profile.inferred_type
 
             if dtype in (DataType.NUMERIC, DataType.BOOLEAN):
@@ -643,9 +646,12 @@ class DataCleaner:
         profile_keys = profiles.keys()
 
         for col in feature_cols:
-            if col not in profile_keys:
-                continue
-            if profiles[col].inferred_type != DataType.NUMERIC:
+            # 合并两次 profiles[] 查询为一次 dict.get(col)：
+            # 1) 存在性检查（之前是 col not in profile_keys）
+            # 2) inferred_type 数值判断（之前是 profiles[col].inferred_type != NUMERIC）
+            # 用 walrus 让 profile 在判断通过后继续使用，省一次 dict 哈希
+            profile = profiles.get(col)
+            if profile is None or profile.inferred_type != DataType.NUMERIC:
                 continue
 
             series = df[col]
