@@ -395,8 +395,11 @@ class TypeDetector:
     
     def _to_numeric(self, series: pd.Series) -> Optional[pd.Series]:
         """尝试转换为数值型"""
+        # 优化：已经是数值 dtype 的 series 直接返回，不再调 pd.to_numeric 触发 O(n) 复制
+        # 之前 pd.to_numeric(numeric_series) 会对整个 series 做一遍 copy
+        # （即使 dtype 不变，pandas 内部还是会构造新的 ndarray 返回）
         if pd.api.types.is_numeric_dtype(series):
-            return pd.to_numeric(series, errors='coerce')
+            return series
 
         # 处理带逗号的数字
         if series.dtype == object:
