@@ -573,44 +573,42 @@ class DataCleaner:
             if col not in profile_keys:
                 continue
 
-            # 单次扫描拿 mask + count（避免 .any() 短路后再 .sum() 重复扫描）
-            null_mask = df[col].isnull()
-            if not null_mask.any():
+            # 单次扫描拿 count（避免 .any() 短路 + .sum() 重复扫描）
+            # sum() 比 any() 略贵（多一次加法），但永远 1 次扫描；而 any()+sum() 最差 2 次
+            # 对"无空值列"是热路径（占比通常 >50%），sum() > 0 vs any() 都是 1 次扫描
+            # 对"有空值列"是冷路径，sum() 直接给出 count 省一次
+            series = df[col]
+            null_count = int(series.isnull().sum())
+            if null_count == 0:
                 continue
-            null_count = int(null_mask.sum())
+            null_mask = series.isnull()  # 复用：后续 fillna 之前会再算
 
             profile = profiles[col]
             dtype = profile.inferred_type
-            
+
             if dtype in (DataType.NUMERIC, DataType.BOOLEAN):
                 # 数值型：中位数填充
-                # 优化：df[col] 顶部 cache 到 series，下面的 median/fillna 复用
-                series = df[col]
+                # 上面已经 cache 了 series，下面 median/fillna 复用
                 median_val = series.median()
                 df[col] = series.fillna(median_val)
                 log_info(f"数值列 '{col}' 使用 {median_val:.4f} 填充 {null_count} 个缺失值")
-                
+
             elif dtype == DataType.CATEGORY:
                 # 类别型：众数填充
-                series = df[col]
                 mode_val = series.mode()
                 if len(mode_val) > 0:
                     df[col] = series.fillna(mode_val[0])
                     log_info(f"类别列 '{col}' 使用 '{mode_val[0]}' 填充 {null_count} 个缺失值")
                 else:
                     df[col] = series.fillna('未知')
-                    
+
             elif dtype == DataType.DATETIME:
                 # 日期型：前向填充 + 后向填充
-                # 优化：df[col] 顶部 cache 到 series（与其他分支一致）
-                series = df[col]
                 df[col] = series.ffill().bfill()
                 log_info(f"日期列 '{col}' 使用前后向填充 {null_count} 个缺失值")
-                
+
             elif dtype == DataType.TEXT:
                 # 文本型：填充空字符串
-                # 优化：df[col] 顶部 cache 到 series（与 NUMERIC/BOOLEAN/CATEGORY/DATETIME 一致）
-                series = df[col]
                 df[col] = series.fillna('')
                 log_info(f"文本列 '{col}' 使用空字符串填充 {null_count} 个缺失值")
         
