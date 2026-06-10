@@ -202,37 +202,29 @@ class DataLoader:
         
         log_info(f"[DataLoader] 大文件分块读取: {file_path}, chunk_size={chunk_size}")
         
-        chunks = []
-        total_rows = 0
+        # 提取共用的"读+合并+优化"逻辑，让 try/except 不再重复 30+ 行代码
+        # 之前 UTF-8 失败回退 GBK 的分支完整重写了读分块→concat→optimize 流程，
+        # 维护时容易让两处逻辑漂移（已经发生过"是否 optimize_memory"是否一致的争论）
+        def _read_and_concat(kwargs: dict) -> pd.DataFrame:
+            local_chunks: List[pd.DataFrame] = []
+            local_total = 0
+            for i, chunk in enumerate(progress_iter(reader(file_path, **kwargs), desc="读取", disable=not verbose)):
+                local_chunks.append(chunk)
+                local_total += len(chunk)
+                if verbose and (i + 1) % 5 == 0:
+                    log_info(f"[DataLoader] 已读取 {local_total:,} 行...")
+            if not local_chunks:
+                return pd.DataFrame()
+            return optimize_memory(pd.concat(local_chunks, axis=0, ignore_index=True, copy=False), verbose=verbose)
         
         try:
-            for i, chunk in enumerate(progress_iter(reader(file_path, **default_kwargs), desc="读取", disable=not verbose)):
-                chunks.append(chunk)
-                total_rows += len(chunk)
-                if verbose and (i + 1) % 5 == 0:
-                    log_info(f"[DataLoader] 已读取 {total_rows:,} 行...")
-            
-            if len(chunks) == 0:
-                return pd.DataFrame()
-            
-            # 合并所有分块
-            df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
-            
-            # 内存优化
-            df = optimize_memory(df, verbose=verbose)
-            
+            df = _read_and_concat(default_kwargs)
             log_info(f"[DataLoader] 分块读取完成: {file_path}, 总行数: {len(df)}, 列数: {len(df.columns)}")
             return df
-        
         except UnicodeDecodeError:
             log_warning(f"编码错误，尝试使用 gbk 编码分块读取: {file_path}")
             default_kwargs['encoding'] = 'gbk'
-            chunks = []
-            for chunk in progress_iter(reader(file_path, **default_kwargs), desc="读取", disable=not verbose):
-                chunks.append(chunk)
-            df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
-            df = optimize_memory(df, verbose=verbose)
-            return df
+            return _read_and_concat(default_kwargs)
         except Exception as e:
             log_error(f"分块读取失败: {file_path}, 错误: {str(e)}")
             raise
