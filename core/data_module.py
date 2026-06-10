@@ -685,8 +685,9 @@ class DataCleaner:
                 lower, upper = q1 - self.outlier_threshold * iqr, q3 + self.outlier_threshold * iqr
             elif self.outlier_method == 'zscore':
                 # 一次 agg 拿到 mean + std，省一次扫描
-                mean_std = series.agg(['mean', 'std'])
-                mean, std = float(mean_std['mean']), float(mean_std['std'])
+                # 优化：unpacking 替代 ['mean']/['std'] 字符串索引（少 2 次 dict 哈希）
+                mean, std = series.agg(['mean', 'std'])
+                mean, std = float(mean), float(std)
                 lower, upper = mean - self.outlier_threshold * std, mean + self.outlier_threshold * std
             else:
                 continue
@@ -712,8 +713,9 @@ class DataCleaner:
                 # pandas 实际上会复用 Series view，但显式存一个引用更清晰
                 series = df[col]
                 # 一次 agg 拿 min + max，省一次 O(n) 扫描
-                col_min_max = series.agg(['min', 'max'])
-                col_min, col_max = col_min_max['min'], col_min_max['max']
+                # 优化：用 unpacking 替代 'min'/'max' 字符串索引（少 2 次 dict 哈希）
+                # pandas Series 是 __iter__ 的（按 index 顺序 yield 值），所以 unpack 直接拿 min/max
+                col_min, col_max = series.agg(['min', 'max'])
                 if pd.notna(col_min) and pd.notna(col_max):
                     candidates = _UNSIGNED_INT_DTYPES if col_min >= 0 else _SIGNED_INT_DTYPES
                     for target_dtype, lo, hi in candidates:
