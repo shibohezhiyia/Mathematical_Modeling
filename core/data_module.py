@@ -693,10 +693,15 @@ class DataCleaner:
                         df[col] = series.astype(np.float32)
 
             elif dtype == DataType.CATEGORY:
-                n_unique = df[col].nunique()
+                # 优化：df[col] cache + 整除改乘法
+                # 1) df[col] 调一次算 nunique，再调一次做 astype — 两次 IndexingEngine
+                # 2) n_unique / n_total 涉及浮点除法（虽然 pandas 已经快但每次会构造浮点结果）
+                # 改用 n_unique * 2 < n_total 避免浮点除法（同样的语义，对小整数更快）
+                series = df[col]
+                n_unique = series.nunique()
                 n_total = len(df)
-                if n_unique / n_total < 0.5:  # 类别数占比小于50%时使用category类型
-                    df[col] = df[col].astype('category')
+                if n_unique * 2 < n_total:  # 类别数占比小于50%时使用category类型
+                    df[col] = series.astype('category')
 
         return df
 
