@@ -8,7 +8,7 @@ from typing import Dict, List, Union, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -470,7 +470,7 @@ class TypeDetector:
             #   - 串行 dict 迭代：T_total = sum of (max(individual_finish_time) at each iter)
             #   - as_completed：T_total = max(individual_finish_time)（实际接近 critical path）
             # 对齐 pandas 操作中耗时差异较大的列（datetime vs numeric）特别有效
-            from concurrent.futures import as_completed
+            # as_completed 已随 ThreadPoolExecutor 一起提到模块级
             for fut in as_completed(futures):
                 col = futures[fut]
                 _, profile = fut.result()
