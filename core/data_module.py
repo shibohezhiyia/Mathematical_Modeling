@@ -39,6 +39,10 @@ _DATE_LIKE_KEYWORDS: Tuple[str, ...] = (
     'date', 'time', 'dt', 'day', 'month', 'year',
 )
 
+# 布尔型检测的候选值集合（提到模块级避免每次 detect 重建）
+# 使用 frozenset 替代 set 让 issubset 调用走 C 路径
+_BOOL_VALUE_SET: frozenset = frozenset({0, 1, 0.0, 1.0, True, False})
+
 
 class DataType(Enum):
     """数据类型枚举"""
@@ -335,7 +339,9 @@ class TypeDetector:
             }
             
             # 布尔型检测（只有0/1或True/False）
-            if set(series.dropna().unique()).issubset({0, 1, 0.0, 1.0}):
+            # 优化：先看 n_unique 上界快速 reject（>6 一定不是布尔），
+            # 再用 frozenset 做 issubset（_BOOL_VALUE_SET 已含 True/False，对 pd 自动转为 0/1 的数据也兼容）
+            if n_unique <= len(_BOOL_VALUE_SET) and set(series.dropna().unique()).issubset(_BOOL_VALUE_SET):
                 profile.inferred_type = DataType.BOOLEAN
                 profile.suggestions.append("布尔型变量，可考虑作为类别型处理")
                 return DataType.BOOLEAN, profile

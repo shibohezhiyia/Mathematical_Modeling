@@ -2303,19 +2303,26 @@ class ModelingEngine:
         self._feature_engineer: Optional[Any] = None
         self.result: Optional[ModelingResult] = None
 
+    # 模型成本分类：这些模型在大数据上训练非常慢
+    # 用 frozenset 替代普通 set 让 _is_expensive_model 成员查找 O(1) 且不可变
+    _EXPENSIVE_MODELS = frozenset({
+        'svr', 'svm', 'knn',
+        'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'tabnet',
+    })
+
     def _apply_large_data_model_guards(self, models: Dict[str, Any], task_type: TaskType, n_samples: int) -> Dict[str, Any]:
         """针对大数据自动记录慢模型，保持全部模型但提示性能风险。"""
         if self.model_keys is not None or n_samples <= 30000:
             return models
 
-        expensive = {'svr', 'svm', 'knn', 'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'tabnet'}
-        slow_models = sorted([k for k in models if k in expensive])
+        # 复用类级别 _EXPENSIVE_MODELS 常量，避免在两个方法里重复定义同一份 set
+        slow_models = sorted(k for k in models if k in self._EXPENSIVE_MODELS)
         if slow_models:
             log_info(f"[ModelingEngine] 大数据检测到可能慢模型: {slow_models}，将保留训练但自动降低超参搜索/折数")
         return models
 
     def _is_expensive_model(self, model_key: str) -> bool:
-        return model_key in {'svr', 'svm', 'knn', 'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'tabnet'}
+        return model_key in self._EXPENSIVE_MODELS
 
     def _get_hyperopt_sample(self, X: pd.DataFrame, y: pd.Series, model_key: str) -> Tuple[pd.DataFrame, pd.Series]:
         """对慢模型的超参优化使用子样本，提高搜索速度。"""
