@@ -81,11 +81,12 @@ def _create_kernel_approximation(X_tr, X_val, orig_kernel, kernel_params, n_comp
         try:
             # 使用随机 SVD 快速估计有效秩
             from sklearn.utils.extmath import randomized_svd
-            U, S, Vt = randomized_svd(X_tr.values, n_components=min(50, n_samples, n_features), random_state=42)
+            # 只关心奇异值 S：U/Vt 不需要，用 _ 占位避免一次性分配 (n, k) 和 (k, m) 数组
+            _, S, _ = randomized_svd(X_tr.values, n_components=min(50, n_samples, n_features), random_state=42)
             # 有效秩：累积奇异值能量达到 90% 的位置
-            total_energy = np.sum(S ** 2)
+            total_energy = float(np.sum(S ** 2))
             cumsum = np.cumsum(S ** 2)
-            effective_rank = np.searchsorted(cumsum, 0.9 * total_energy) + 1
+            effective_rank = int(np.searchsorted(cumsum, 0.9 * total_energy)) + 1
             # 自适应 n_components：有效秩的 1.5~3 倍，但不超过样本数的 1/4
             adaptive_n = min(max(int(effective_rank * 2), 128), n_samples // 4, KERNEL_APPROX_COMPONENTS)
             n_components = min(n_components, adaptive_n)

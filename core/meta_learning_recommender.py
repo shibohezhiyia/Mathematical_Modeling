@@ -13,6 +13,7 @@ import json
 import math
 import os
 import time
+from collections import defaultdict
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field, asdict
 
@@ -517,7 +518,6 @@ class MetaLearningModelRecommender:
         # 加权投票
         # 优化：用 defaultdict(list) 替代 if-not-in-then-append 模式，
         # N 模型 × M perf 记录省 2*N*M 次 dict 哈希查找
-        from collections import defaultdict
         model_scores: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
         dataset_names = []
 

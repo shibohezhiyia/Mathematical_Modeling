@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.inspection import permutation_importance
+from sklearn.inspection import permutation_importance as _sk_permutation_importance
 
 warnings.filterwarnings('ignore')
 
@@ -38,8 +38,6 @@ def compute_permutation_importance(
     Returns:
         DataFrame[feature, importance, std]
     """
-    sk_pi = permutation_importance
-
     # 分出 holdout 验证集
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=y if len(y.unique()) <= 10 else None
@@ -50,7 +48,7 @@ def compute_permutation_importance(
     model_copy.fit(X_train, y_train)
 
     # 计算 PI
-    result = sk_pi(
+    result = _sk_permutation_importance(
         model_copy, X_val, y_val,
         scoring=scoring,
         n_repeats=n_repeats,
