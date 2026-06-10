@@ -8,6 +8,7 @@ from typing import Dict, List, Union, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import numpy as np
@@ -465,9 +466,6 @@ class TypeDetector:
         if n_cols < 8:
             return {col: self.detect(df[col], col)[1] for col in cols}
 
-        # 缓存到模块级 import 避免每次重新导入
-        from concurrent.futures import ThreadPoolExecutor
-        
         profiles: Dict[str, ColumnProfile] = {}
         # max_workers 限制为 min(8, n_cols)：超过 CPU 核心数反而因 context switch 退化
         max_workers = min(8, n_cols)
