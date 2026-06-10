@@ -666,10 +666,6 @@ class DataCleaner:
         # 直接 list(df.columns) 替代 list comprehension + filter，省一次遍历
         feature_cols = list(df.columns) if target_col is None else \
             [c for c in df.columns if c != target_col]
-        # 缓存 profiles.keys() 视图，让 `col in profiles` 比重复 dict 哈希快
-        # （虽然 dict.__contains__ 是 O(1)，但 .keys() 视图的 __contains__ 是
-        # CPython 优化过的 C 路径，比走 dict.__contains__ 略快）
-        profile_keys = profiles.keys()
 
         for col in feature_cols:
             # 合并两次 profiles[] 查询为一次 dict.get(col)：
