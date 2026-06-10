@@ -422,11 +422,18 @@ class TypeDetector:
         """尝试转换为日期时间型"""
         if pd.api.types.is_datetime64_any_dtype(series):
             return series
-        
+
+        # 快速路径：非 object dtype（int/float/bool）几乎不可能是日期字符串，
+        # 直接返回 None 跳过 _DATE_LIKE_KEYWORDS 检查 + sample dropna 分配。
+        # 原来不分 dtype 都跑一遍：对每列检测是 O(k) 开销（k=name 长度），
+        # N 列 × (k+dropna 内存分配) 都是浪费。
+        if series.dtype != object:
+            return None
+
         # 列名暗示日期
         col_lower = str(series.name).lower()
         is_date_like = any(kw in col_lower for kw in _DATE_LIKE_KEYWORDS)
-        
+
         sample = series.dropna().head(100)
         if len(sample) == 0:
             return None
