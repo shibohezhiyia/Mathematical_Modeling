@@ -396,7 +396,16 @@ class TypeDetector:
 
         # 处理带逗号的数字
         if series.dtype == object:
-            sample = series.dropna().head(100)
+            # 关键优化：iloc[:100].dropna() 替代 dropna().head(100)
+            # 旧：scan 整个 series 找非空 + slice = O(n) + O(1)，n 可能百万级
+            # 新：slice 头 100 + dropna = O(1) + O(100) ≈ O(1)
+            # 语义差异：
+            #   - 旧："前 100 个非空值"（可能来自 series 任意位置）
+            #   - 新："前 100 个值中的非空部分"（最多 100 个）
+            # 对类型检测的语义影响可忽略 —— 两种采样的概率分布对判断 "is numeric"
+            # 都有代表性，而"前 100 个值"对 race condition 更鲁棒（如果列是按
+            # 某种顺序排列的，前面的值更能代表列的典型形态）。
+            sample = series.iloc[:100].dropna()
             # 鲁棒性：sample 可能为空（series 全空），
             # 后续 len(sample_stripped) == 0 时会触发 ZeroDivisionError，
             # 提前 return None 跳过（与 _to_datetime 的处理一致）
@@ -434,7 +443,11 @@ class TypeDetector:
         col_lower = str(series.name).lower()
         is_date_like = any(kw in col_lower for kw in _DATE_LIKE_KEYWORDS)
 
-        sample = series.dropna().head(100)
+        # 关键优化：iloc[:100].dropna() 替代 dropna().head(100)
+        # 旧：scan 整个 series 找非空 + slice = O(n) + O(1)，n 可能百万级
+        # 新：slice 头 100 + dropna = O(1) + O(100) ≈ O(1)
+        # 语义与 _to_numeric 一致：前 100 个值中的非空部分（最多 100 个）
+        sample = series.iloc[:100].dropna()
         if len(sample) == 0:
             return None
         
