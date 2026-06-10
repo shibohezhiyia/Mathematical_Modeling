@@ -595,12 +595,16 @@ class DataCleaner:
                     
             elif dtype == DataType.DATETIME:
                 # 日期型：前向填充 + 后向填充
-                df[col] = df[col].ffill().bfill()
+                # 优化：df[col] 顶部 cache 到 series（与其他分支一致）
+                series = df[col]
+                df[col] = series.ffill().bfill()
                 log_info(f"日期列 '{col}' 使用前后向填充 {null_count} 个缺失值")
                 
             elif dtype == DataType.TEXT:
                 # 文本型：填充空字符串
-                df[col] = df[col].fillna('')
+                # 优化：df[col] 顶部 cache 到 series（与 NUMERIC/BOOLEAN/CATEGORY/DATETIME 一致）
+                series = df[col]
+                df[col] = series.fillna('')
                 log_info(f"文本列 '{col}' 使用空字符串填充 {null_count} 个缺失值")
         
         # 删除仍含缺失值的行（主要针对目标变量）
