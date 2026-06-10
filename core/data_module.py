@@ -581,7 +581,6 @@ class DataCleaner:
             null_count = int(series.isnull().sum())
             if null_count == 0:
                 continue
-            null_mask = series.isnull()  # 复用：后续 fillna 之前会再算
 
             profile = profiles[col]
             dtype = profile.inferred_type
