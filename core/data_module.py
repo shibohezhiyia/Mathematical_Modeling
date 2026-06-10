@@ -414,11 +414,19 @@ class TypeDetector:
             # 检查是否看起来像数字
             # 关键：先在 sample 上小成本判断，决定是否做全列转换
             sample_stripped = sample.astype(str).str.replace(',', '', regex=False)
+            # 鲁棒性：sample_stripped 与 sample 等长（astype + str.replace 都是 1-to-1），
+            # 但要保留 len>0 守卫，万一 sample 是空 Series（虽然上面已 check 过）
+            sample_len = len(sample_stripped)
+            if sample_len == 0:
+                return None
             try:
                 converted_sample = pd.to_numeric(sample_stripped, errors='coerce')
-                # 加 len(sample_stripped) > 0 守卫（理论上 sample_len > 0 但保险起见）
-                if (len(sample_stripped) > 0 and
-                        converted_sample.notna().sum() / len(sample_stripped) > 0.8):
+                # 优化：避免浮点除法，改用整数乘法比较
+                # 旧：n_valid / sample_len > 0.8 (含 .sum() + / + 比较 3 个运算)
+                # 新：n_valid * 5 >= sample_len * 4 (整数比较 + 2 次乘法)
+                # 对 100 个元素的 sample 速度差异不大，但避免了浮点结果构造
+                n_valid = int(converted_sample.notna().sum())
+                if n_valid * 5 >= sample_len * 4:
                     # 命中后只对全列做一次 strip + to_numeric（之前的版本会重做 strip）
                     full_stripped = series.astype(str).str.replace(',', '', regex=False)
                     return pd.to_numeric(full_stripped, errors='coerce')
@@ -453,12 +461,20 @@ class TypeDetector:
         
         try:
             converted = pd.to_datetime(sample, errors='coerce')
-            success_rate = converted.notna().sum() / len(sample)
-            
-            # 日期相关列名降低阈值
-            threshold = 0.5 if is_date_like else 0.8
-            if success_rate >= threshold:
-                return pd.to_datetime(series, errors='coerce')
+            # 优化：避免浮点除法，改用整数乘法比较
+            # 旧：success_rate >= threshold (含 .sum() + / + 比较 3 个运算)
+            # 新：n_valid * threshold_denom >= len(sample) * threshold_num (整数比较)
+            n_valid = int(converted.notna().sum())
+            sample_len = len(sample)
+            # threshold=0.8 → 4/5; threshold=0.5 → 1/2
+            if is_date_like:
+                # n_valid * 2 >= sample_len * 1
+                if n_valid * 2 >= sample_len:
+                    return pd.to_datetime(series, errors='coerce')
+            else:
+                # n_valid * 5 >= sample_len * 4
+                if n_valid * 5 >= sample_len * 4:
+                    return pd.to_datetime(series, errors='coerce')
         except Exception:
             # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass
