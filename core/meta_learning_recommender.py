@@ -107,9 +107,9 @@ class DatasetFingerprint:
         # 替代在循环里 X[c].dtype（每个都走一遍 __getitem__ + 属性查找）
         all_dtypes = X.dtypes
         col_dtype = dict(zip(X.columns, all_dtypes))
-        col_nunique = {}
-        for c in X.columns:
-            col_nunique[c] = X[c].nunique(dropna=True)
+        # 用 X.nunique(dropna=True) 一次性拿所有列的 unique 数（向量化），
+        # 替代逐列 X[c].nunique() 的 N 次独立扫描。原 O(N*n) → O(n) 一次。
+        col_nunique = X.nunique(dropna=True).to_dict()
 
         # 一次遍历同时按类型分桶：避免 4 次 for c in X.columns 重复扫描
         # 注释字段（>10 unique + object）、时间字段、类别字段、高基数字段
