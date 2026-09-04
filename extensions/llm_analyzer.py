@@ -7,7 +7,8 @@
 
 import textwrap
 from typing import Dict, Any, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import requests
 
@@ -15,20 +16,61 @@ import requests
 @dataclass
 class LLMConfig:
     """大模型配置"""
-    provider: str = "openai"  # "openai" 或 "ollama"
+    provider: str = "openai"  # "openai"、"deepseek" 或 "ollama"
     base_url: str = "https://api.openai.com/v1"
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     model_name: str = "gpt-4o"
     timeout: int = 120
+
+    def validate(self) -> "LLMConfig":
+        self.provider = str(self.provider).strip().lower()
+        if self.provider not in {"openai", "openai_compatible", "deepseek", "ollama"}:
+            raise ValueError("LLM provider 必须是 openai/openai_compatible/deepseek/ollama")
+        self.base_url = str(self.base_url).strip().rstrip("/")
+        self.model_name = str(self.model_name).strip()
+        if not self.base_url or not self.model_name:
+            raise ValueError("LLM 服务地址和模型名称不能为空")
+        if len(self.base_url) > 2048 or len(self.model_name) > 200:
+            raise ValueError("LLM 服务地址或模型名称过长")
+        if not isinstance(self.timeout, int) or isinstance(self.timeout, bool) or not 5 <= self.timeout <= 300:
+            raise ValueError("LLM 请求超时必须是 5 到 300 秒的整数")
+        parsed = urlparse(self.base_url)
+        if not parsed.hostname or parsed.scheme not in {"http", "https"}:
+            raise ValueError("LLM 服务地址必须是完整的 HTTP(S) URL")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("LLM 服务地址不能包含账号、查询参数或锚点")
+        if self.provider == "deepseek":
+            if parsed.scheme != "https" or parsed.hostname.lower() != "api.deepseek.com":
+                raise ValueError("DeepSeek 官方 API 地址必须是 https://api.deepseek.com")
+            if parsed.path.rstrip("/") not in {"", "/v1"}:
+                raise ValueError("DeepSeek API 地址只支持根地址或 /v1")
+            if not str(self.api_key).strip():
+                raise ValueError("DeepSeek API Key 不能为空")
+        return self
 
 
 class LLMClient:
     """统一的 LLM 调用客户端"""
 
     def __init__(self, config: LLMConfig):
-        self.config = config
+        self.config = config.validate()
 
-    def _call_openai_api(self, messages: List[Dict[str, str]]) -> str:
+    @staticmethod
+    def _http_error_detail(error: requests.exceptions.HTTPError) -> str:
+        response = error.response
+        if response is None:
+            return str(error)
+        detail = ""
+        try:
+            payload = response.json()
+            raw = payload.get("error", payload) if isinstance(payload, dict) else payload
+            detail = raw.get("message", "") if isinstance(raw, dict) else str(raw)
+        except (ValueError, TypeError):
+            detail = ""
+        detail = str(detail).strip()[:500]
+        return f"HTTP {response.status_code}" + (f"：{detail}" if detail else "")
+
+    def _call_openai_api(self, messages: List[Dict[str, Any]]) -> str:
         """调用 OpenAI 兼容 API"""
         config = self.config
         url = f"{config.base_url.rstrip('/')}/chat/completions"
@@ -47,7 +89,7 @@ class LLMClient:
         data = resp.json()
         return data["choices"][0]["message"]["content"]
 
-    def _call_ollama_native(self, messages: List[Dict[str, str]]) -> str:
+    def _call_ollama_native(self, messages: List[Dict[str, Any]]) -> str:
         """调用 Ollama 原生 /api/chat API（fallback）"""
         config = self.config
         base = config.base_url.rstrip('/')
@@ -73,7 +115,7 @@ class LLMClient:
             return data["response"]
         raise ValueError(f"Ollama 返回格式异常: {list(data.keys())}")
 
-    def chat_completion(self, messages: List[Dict[str, str]]) -> str:
+    def chat_completion(self, messages: List[Dict[str, Any]]) -> str:
         """
         调用大模型对话接口
         优先使用 OpenAI 兼容 API，失败时 fallback 到 Ollama 原生 API
@@ -93,8 +135,11 @@ class LLMClient:
             raise TimeoutError(
                 f"LLM 请求超时 ({config.timeout}s)。请稍后重试或选择更快的模型。"
             ) from e
-        except (requests.exceptions.HTTPError, ValueError) as e:
-            last_error = e
+        except requests.exceptions.HTTPError as e:
+            last_error = self._http_error_detail(e)
+            # OpenAI 兼容外部 API 不存在 Ollama 原生回退，直接保留可操作错误。
+        except (ValueError, KeyError, IndexError, TypeError) as e:
+            last_error = str(e)
             # OpenAI 兼容 API 失败，继续尝试原生 API
 
         # 2. Fallback 到 Ollama 原生 API（仅对 ollama provider）
@@ -120,8 +165,41 @@ class LLMClient:
 
         # 3. 都不是 ollama，抛出原始错误
         raise ValueError(
-            f"LLM 调用失败: {last_error}。请检查模型名称或 API 配置。"
-        ) from last_error
+            f"{'DeepSeek' if config.provider == 'deepseek' else 'LLM'} 调用失败: "
+            f"{last_error}。请检查 API Key、模型名称和账户额度。"
+        )
+
+    def list_models(self) -> List[str]:
+        """用轻量模型列表请求测试连接，不生成内容也不保存密钥。"""
+        config = self.config
+        headers = {"Accept": "application/json"}
+        if config.api_key:
+            headers["Authorization"] = f"Bearer {config.api_key}"
+        base = config.base_url.rstrip("/")
+        if config.provider == "ollama":
+            if base.endswith("/v1"):
+                base = base[:-3]
+            url = f"{base}/api/tags"
+        else:
+            url = f"{base}/models"
+        try:
+            response = requests.get(url, headers=headers, timeout=min(config.timeout, 20), allow_redirects=False)
+            if 300 <= response.status_code < 400:
+                raise ValueError("LLM 服务返回了不允许的重定向")
+            response.raise_for_status()
+            payload = response.json()
+        except requests.exceptions.Timeout as exc:
+            raise TimeoutError("LLM 连接测试超时") from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise ConnectionError(f"无法连接到 LLM 服务 ({config.base_url})") from exc
+        except requests.exceptions.HTTPError as exc:
+            raise ValueError(f"LLM 连接测试失败：{self._http_error_detail(exc)}") from exc
+        except ValueError:
+            raise
+        except (TypeError, KeyError) as exc:
+            raise ValueError("LLM 模型列表响应格式异常") from exc
+        entries = payload.get("models", []) if config.provider == "ollama" else payload.get("data", [])
+        return sorted({str(item.get("name") or item.get("id")) for item in entries if isinstance(item, dict) and (item.get("name") or item.get("id"))})
 
 
 class AnalysisPromptBuilder:
@@ -312,6 +390,7 @@ class LLMAnalyzer:
         self,
         analysis_type: str,
         session_data: Dict[str, Any],
+        images: List[Dict[str, Any]] | None = None,
     ) -> str:
         """
         执行 LLM 分析
@@ -319,6 +398,7 @@ class LLMAnalyzer:
         Args:
             analysis_type: "eda" | "result" | "error"
             session_data: Flask session 中的数据字典
+            images: 已由 Web 层校验的图片 data URL；按 OpenAI 兼容多模态格式附加
 
         Returns:
             Markdown 格式的分析文本
@@ -346,16 +426,63 @@ class LLMAnalyzer:
         else:
             raise ValueError(f"未知的分析类型: {analysis_type}")
 
+        if images:
+            if self.client.config.provider == "ollama":
+                raise ValueError("图片输入请使用 DeepSeek Vision 或其他支持 image_url 的 OpenAI 兼容模型")
+            messages = attach_multimodal_images(messages, images)
+
         return self.client.chat_completion(messages)
 
 
-def get_default_configs() -> Dict[str, Dict[str, str]]:
+def attach_multimodal_images(
+    messages: List[Dict[str, Any]],
+    images: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """将图片以 OpenAI 兼容的 content parts 格式附加到最后一条 user 消息。
+
+    返回新消息列表，不修改 PromptBuilder 生成的原始对象，避免同一会话重试时图片累加。
+    """
+    if not images:
+        return messages
+    result = [dict(message) for message in messages]
+    target_index = next(
+        (index for index in range(len(result) - 1, -1, -1)
+         if result[index].get("role") == "user"),
+        None,
+    )
+    if target_index is None:
+        raise ValueError("多模态消息缺少 user 消息")
+
+    target = result[target_index]
+    text = target.get("content", "")
+    parts: List[Dict[str, Any]] = [{"type": "text", "text": str(text)}]
+    for image in images:
+        data_url = str(image.get("data_url", "")).strip()
+        if not data_url:
+            raise ValueError("图片数据为空")
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": data_url, "detail": "high"},
+        })
+    target["content"] = parts
+    return result
+
+
+def get_default_configs() -> Dict[str, Dict[str, Any]]:
     """获取默认配置模板"""
     return {
         "openai": {
             "name": "OpenAI 兼容 API",
             "base_url": "https://api.openai.com/v1",
             "model_name": "gpt-4o",
+            "model_options": ["gpt-4o", "gpt-4o-mini"],
+            "needs_api_key": True,
+        },
+        "deepseek": {
+            "name": "DeepSeek API",
+            "base_url": "https://api.deepseek.com",
+            "model_name": "deepseek-v4-pro",
+            "model_options": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"],
             "needs_api_key": True,
         },
         "ollama": {

@@ -14,12 +14,12 @@
 """
 
 import time
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any, Callable, Union
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 from sklearn.metrics import accuracy_score, roc_auc_score, f1_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.linear_model import Ridge, LogisticRegression

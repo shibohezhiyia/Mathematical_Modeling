@@ -24,6 +24,16 @@ from core.explainability import ExplainabilityEngine
 from core.fairness import FairnessEngine, FAIRLEARN_AVAILABLE
 from core.performance_scheduler import PerformanceScheduler, DataScaleEvaluator, StrategyLevel
 from core.modeling_engine import ModelLibrary, TaskType, ModelingEngine
+from core.workspace_manager import set_workspace_config
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_workspace_config():
+    """pipeline 的 allow_disk_write 会写入全局 workspace 单例，每个测试后恢复，避免污染其他测试"""
+    yield
+    set_workspace_config(allow_disk_write=True)
 
 # Trigger registration of deep-learning / multimodal models
 # (core.__init__ imports this automatically when any core submodule is loaded)

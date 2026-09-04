@@ -233,7 +233,7 @@ class TaskTypeDetector:
                 'mae': mean_absolute_error,
                 'r2': r2_score,
                 'mse': mean_squared_error,
-                'mape': lambda y, p: np.mean(np.abs((y - p) / (y + 1e-8))) * 100,
+                'mape': TaskTypeDetector._safe_mape,
             }
         elif task_type == TaskType.CLUSTERING:
             return {
@@ -242,6 +242,23 @@ class TaskTypeDetector:
                 'davies_bouldin': davies_bouldin_score,
             }
         return {}
+
+    @staticmethod
+    def _safe_mape(y_true: Union[pd.Series, np.ndarray],
+                   y_pred: Union[pd.Series, np.ndarray],
+                   epsilon: float = 1e-12) -> float:
+        """计算对零值稳健的 MAPE（百分比）。
+
+        MAPE 在实际值为零时没有定义。以极小常数替代分母会把普通误差
+        放大到数十亿个百分点，因此只在绝对值大于 epsilon 的有限样本上
+        计算；没有可计算样本时返回 0，由 MAE/RMSE 提供绝对误差判断。
+        """
+        actual = np.asarray(y_true, dtype=float).ravel()
+        predicted = np.asarray(y_pred, dtype=float).ravel()
+        valid = np.isfinite(actual) & np.isfinite(predicted) & (np.abs(actual) > epsilon)
+        if not np.any(valid):
+            return 0.0
+        return float(np.mean(np.abs((actual[valid] - predicted[valid]) / actual[valid])) * 100.0)
     
     @staticmethod
     def get_primary_metric(task_type: TaskType) -> str:
@@ -273,10 +290,14 @@ class AutoEncoder:
     def __init__(self,
                  onehot_max_categories: int = 10,
                  target_encode_max: int = 500,
-                 ordinal_categories: Optional[Dict[str, List]] = None) -> None:
+                 ordinal_categories: Optional[Dict[str, List]] = None,
+                 strategy: EncodingType = EncodingType.AUTO,
+                 max_dense_onehot_categories: int = 100) -> None:
         self.onehot_max = onehot_max_categories
         self.target_encode_max = target_encode_max
         self.ordinal_hint = ordinal_categories or {}
+        self.strategy = strategy
+        self.max_dense_onehot_categories = max_dense_onehot_categories
         
         self._encoders: Dict[str, Any] = {}
         self._encoding_map: Dict[str, EncodingType] = {}
@@ -302,11 +323,33 @@ class AutoEncoder:
                 n_unique = col_series.nunique()
                 
                 # 判断编码策略
-                strategy = self._choose_strategy(col, n_unique, y is not None)
+                strategy = self.strategy if self.strategy != EncodingType.AUTO \
+                    else self._choose_strategy(col, n_unique, y is not None)
+                if strategy == EncodingType.TARGET:
+                    # Encoding is currently learned before CV.  Full-data target
+                    # means would therefore expose validation labels to every
+                    # fold.  Frequency encoding is unsupervised and fold-safe;
+                    # target encoding can be restored only when preprocessing is
+                    # moved inside each fold/pipeline.
+                    log_warning(
+                        f"[AutoEncoder] 列 '{col}' 的目标编码会污染交叉验证，"
+                        "已自动改用 Frequency Encoding"
+                    )
+                    strategy = EncodingType.FREQUENCY
+                if strategy == EncodingType.ONEHOT and n_unique > self.max_dense_onehot_categories:
+                    log_warning(
+                        f"[AutoEncoder] 列 '{col}' 有 {n_unique} 个类别，稠密 One-Hot "
+                        f"可能耗尽内存，自动回退到 Frequency Encoding"
+                    )
+                    strategy = EncodingType.FREQUENCY
                 self._encoding_map[col] = strategy
                 
                 if strategy == EncodingType.ONEHOT:
-                    enc = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+                    enc = OneHotEncoder(
+                        sparse_output=False,
+                        handle_unknown='ignore',
+                        dtype=np.float32,
+                    )
                     enc.fit(X[[col]].astype(str))
                     self._encoders[col] = enc
                     
@@ -336,9 +379,13 @@ class AutoEncoder:
                     self._fallback_values[col] = float(np.mean(vals)) if vals else 0.0
                     
                 elif strategy == EncodingType.FREQUENCY:
-                    self._target_mean[col] = X[col].value_counts(normalize=True).to_dict()
+                    self._target_mean[col] = X[col].astype(str).value_counts(normalize=True).to_dict()
                     vals = list(self._target_mean[col].values())
                     self._fallback_values[col] = float(np.mean(vals)) if vals else 0.0
+
+                elif strategy == EncodingType.NONE:
+                    # 显式不编码：由调用方保证下游模型能处理原始类别列。
+                    continue
         
         self._fitted = True
         return self
@@ -571,7 +618,9 @@ class AutoFeatureSelector:
         elif self.strategy == FeatureSelectionStrategy.MI_KNN:
             # k-NN估计的互信息：比直方图法更稳定，适合连续变量
             try:
-                from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+                # 注意：不要在此局部 import mutual_info_classif/mutual_info_regression，
+                # 否则会使其成为本函数的局部变量，导致上方 MI 分支触发 UnboundLocalError
+                # （模块顶部已导入这两个函数）
                 # 使用k-NN估计（通过设置n_neighbors参数）
                 if task_type == TaskType.REGRESSION:
                     score_func = lambda X, y: mutual_info_regression(X, y, n_neighbors=5, random_state=42)
@@ -725,15 +774,34 @@ class ModelLibrary:
         
         # 线性/统计模型
         try:
+            import sklearn
             from sklearn.linear_model import LogisticRegression
+            sklearn_version = tuple(
+                int(part) for part in sklearn.__version__.split('.')[:2]
+            )
+            if sklearn_version >= (1, 8):
+                lr_defaults = {
+                    'max_iter': 1000, 'random_state': 42,
+                    'solver': 'liblinear', 'l1_ratio': 0.0,
+                }
+                lr_space = {
+                    'C': {'type': 'float', 'low': 1e-3, 'high': 1e3, 'scale': 'log'},
+                    'l1_ratio': [0.0, 1.0],
+                }
+            else:
+                # liblinear supports both listed penalties. Keeping solver fixed
+                # avoids invalid l1+lbfgs trials that previously wasted searches.
+                lr_defaults = {
+                    'max_iter': 1000, 'random_state': 42, 'solver': 'liblinear',
+                }
+                lr_space = {
+                    'C': {'type': 'float', 'low': 1e-3, 'high': 1e3, 'scale': 'log'},
+                    'penalty': ['l1', 'l2'],
+                }
             cls._register('classification', 'lr', 'LogisticRegression',
                           LogisticRegression, 'linear',
-                          default_params={'max_iter': 1000, 'random_state': 42},
-                          hyperparam_space={
-                              'C': {'type': 'float', 'low': 1e-3, 'high': 1e3, 'scale': 'log'},
-                              'penalty': ['l1', 'l2'],
-                              'solver': ['liblinear', 'lbfgs'],
-                          })
+                          default_params=lr_defaults,
+                          hyperparam_space=lr_space)
         except Exception as e:
             log_warning(f"[ModelLibrary] LogisticRegression 注册失败: {e}")
         
@@ -1347,6 +1415,19 @@ class ModelLibrary:
             log_warning(f"[ModelLibrary] Birch 注册失败: {e}")
         
         cls._initialized = True
+
+        # ``core`` now exposes modules lazily, so importing modeling_engine no
+        # longer imports deep_learning as a side effect.  Register optional
+        # deep/multimodal models explicitly after the base registry is ready;
+        # otherwise availability depends on unrelated test/import order.
+        try:
+            from core.deep_learning import register_deep_learning_models
+            register_deep_learning_models()
+        except Exception as e:
+            cls._warn_once(
+                'deep_learning',
+                f"[ModelLibrary] 深度学习/多模态模型注册失败，保留基础模型: {e}",
+            )
         
         # 统计
         for task in [TaskType.CLASSIFICATION.value, TaskType.REGRESSION.value, TaskType.CLUSTERING.value]:
@@ -1718,11 +1799,17 @@ class CrossValidator:
         fold_scores = {name: [] for name in metrics.keys()}
         oof_pred = np.zeros(len(y))
         oof_proba = None
+        # n_classes 仅分类任务有意义，回归等非分类任务初始化为0，
+        # 避免下方无条件传给 _run_single_fold 时触发 UnboundLocalError
+        n_classes = 0
         
         if task_type == TaskType.CLASSIFICATION:
             # 复用上面的 _vc：len(_vc) 已是类别数（之前是 np.unique(y) 又扫一次 O(n)）
             n_classes = len(_vc)
-            if n_classes == 2:
+            # n_classes<=2 时 oof_proba 用一维（存正类/单类概率）；
+            # 单类别（n_classes==1）若用 (n,1) 二维数组，_run_single_fold 返回的
+            # 一维 proba 赋值时会触发广播错误（shape (k,) → (k,1)）
+            if n_classes <= 2:
                 oof_proba = np.zeros(len(y))
             else:
                 oof_proba = np.zeros((len(y), n_classes))
@@ -1884,7 +1971,9 @@ class EnsembleBuilder:
             {'oof': oof_blend, 'test': test_blend, 'weights': weights}
         """
         if self.method == EnsembleMethod.BEST_SINGLE:
-            best = cv_results[0]
+            best = next((r for r in cv_results if r.oof_pred is not None), None)
+            if best is None:
+                raise ValueError("[EnsembleBuilder] 没有任何 CVResult 含 oof_pred，无法融合")
             return {
                 'oof': best.oof_pred,
                 'test': None,
@@ -1898,16 +1987,12 @@ class EnsembleBuilder:
         valid_cv = [r for r in cv_results if r.oof_pred is not None]
         if not valid_cv:
             raise ValueError("[EnsembleBuilder] 没有任何 CVResult 含 oof_pred，无法融合")
-        oof_preds = np.column_stack([r.oof_pred for r in valid_cv])
-        # 同步把 weights 对齐到 valid_cv 顺序（与 oof_preds 列顺序一致）
+        # 后续所有权重、测试集预测和结果字典都只使用有效模型。此前这里
+        # 会在 weights 尚未计算时尝试对它做切片，导致含缺失 OOF 的结果无法融合。
         if len(valid_cv) != len(cv_results):
             log_warning(f"[EnsembleBuilder] {len(cv_results) - len(valid_cv)} 个 CVResult 缺 oof_pred，已过滤")
-            valid_keys = {r.model_key: i for i, r in enumerate(cv_results)}
-            weights = np.array([weights[valid_keys[r.model_key]] for r in valid_cv], dtype=float)
-            # 重新归一化 weights
-            wsum = weights.sum()
-            if wsum > 0:
-                weights = weights / wsum
+        cv_results = valid_cv
+        oof_preds = np.column_stack([r.oof_pred for r in cv_results])
         
         # Stacking 分支
         if self.method == EnsembleMethod.STACKING:
@@ -1947,21 +2032,20 @@ class EnsembleBuilder:
         
         # OOF融合
         if task_type == TaskType.CLASSIFICATION and self.method in [EnsembleMethod.VOTING_HARD]:
-            # 硬投票 - 向量化实现（比 np.apply_along_axis 快 10-100x）
-            # 使用 one-hot 编码 + 求和替代逐行循环
-            n_samples, n_models = oof_preds.shape
-            n_classes = int(oof_preds.max()) + 1
-            oof_preds_int = oof_preds.astype(int)
-            # 构建 one-hot 矩阵: (n_samples, n_models, n_classes)
-            one_hot = np.zeros((n_samples, n_models, n_classes), dtype=np.int32)
-            rows = np.arange(n_samples)[:, None]
-            cols = np.arange(n_models)[None, :]
-            one_hot[rows, cols, oof_preds_int] = 1
-            # 统计每类的票数
-            votes = one_hot.sum(axis=1)  # (n_samples, n_classes)
-            oof_blend = votes.argmax(axis=1)
+            oof_blend = self._hard_vote(oof_preds)
+            oof_proba = None
+        elif task_type == TaskType.CLASSIFICATION:
+            # 类别编号没有距离意义，不能直接做加权平均（如 0 和 2 的均值 1
+            # 并不表示任何模型预测了类别 1）。优先融合 OOF 概率；没有完整概率
+            # 时退化为投票，保持离散分类的数学语义。
+            oof_proba = self._average_probabilities(
+                [r.oof_proba for r in cv_results], weights
+            )
+            oof_blend = self._probabilities_to_labels(oof_proba) \
+                if oof_proba is not None else self._hard_vote(oof_preds)
         else:
-            # 加权平均（概率或回归值）
+            oof_proba = None
+            # 回归值可直接做加权平均
             try:
                 oof_blend = np.average(oof_preds, axis=1, weights=weights)
             except ValueError as e:
@@ -1977,9 +2061,39 @@ class EnsembleBuilder:
         
         return {
             'oof': oof_blend,
+            'oof_proba': oof_proba,
             'test': test_blend,
             'weights': weight_dict
         }
+
+    @staticmethod
+    def _hard_vote(predictions: np.ndarray) -> np.ndarray:
+        """按真实类别值投票，支持非连续或非整数标签。"""
+        predictions = np.asarray(predictions)
+        classes, encoded = np.unique(predictions, return_inverse=True)
+        encoded = encoded.reshape(predictions.shape)
+        votes = np.zeros((predictions.shape[0], len(classes)), dtype=np.int32)
+        np.add.at(votes, (np.repeat(np.arange(predictions.shape[0]), predictions.shape[1]), encoded.ravel()), 1)
+        return classes[votes.argmax(axis=1)]
+
+    @staticmethod
+    def _average_probabilities(probabilities: List[Optional[np.ndarray]],
+                               weights: np.ndarray) -> Optional[np.ndarray]:
+        """仅在所有模型提供同形状概率时做加权概率融合。"""
+        if len(probabilities) != len(weights) or any(p is None for p in probabilities):
+            return None
+        arrays = [np.asarray(p, dtype=float) for p in probabilities]
+        first_shape = arrays[0].shape
+        if any(a.shape != first_shape for a in arrays[1:]):
+            return None
+        return np.average(np.stack(arrays, axis=-1), axis=-1, weights=weights)
+
+    @staticmethod
+    def _probabilities_to_labels(probabilities: np.ndarray) -> np.ndarray:
+        """将二分类/多分类概率转换为类别标签。"""
+        if probabilities.ndim == 1:
+            return (probabilities >= 0.5).astype(int)
+        return probabilities.argmax(axis=1)
     
     def _compute_weights(self, cv_results: List[CVResult], task_type: TaskType) -> np.ndarray:
         """基于CV分数计算权重，添加负相关惩罚（diversity bonus）
@@ -2049,6 +2163,8 @@ class EnsembleBuilder:
                     weights: np.ndarray, task_type: TaskType) -> np.ndarray:
         """融合测试集预测"""
         test_preds = []
+        test_probas = []
+        all_have_proba = task_type == TaskType.CLASSIFICATION and self.method != EnsembleMethod.VOTING_HARD
         
         for result in cv_results:
             # 用最后一个fold的模型预测
@@ -2058,26 +2174,24 @@ class EnsembleBuilder:
             
             pred = model.predict(X_test)
             test_preds.append(np.asarray(pred).ravel())
+            if all_have_proba and hasattr(model, 'predict_proba'):
+                proba = np.asarray(model.predict_proba(X_test), dtype=float)
+                # 与 CrossValidator.oof_proba 保持一致：二分类使用正类概率。
+                if proba.ndim == 2 and proba.shape[1] == 2:
+                    proba = proba[:, 1]
+                test_probas.append(proba)
+            else:
+                all_have_proba = False
         
         if not test_preds:
             return None
         
         test_preds = np.column_stack(test_preds)
         
-        if task_type == TaskType.CLASSIFICATION and self.method == EnsembleMethod.VOTING_HARD:
-            # 硬投票 - 向量化实现（比 np.apply_along_axis 快 10-100x）
-            # 使用 one-hot 编码 + 求和替代逐行循环
-            n_samples, n_models = test_preds.shape
-            n_classes = int(test_preds.max()) + 1
-            test_preds_int = test_preds.astype(int)
-            # 构建 one-hot 矩阵: (n_samples, n_models, n_classes)
-            one_hot = np.zeros((n_samples, n_models, n_classes), dtype=np.int32)
-            rows = np.arange(n_samples)[:, None]
-            cols = np.arange(n_models)[None, :]
-            one_hot[rows, cols, test_preds_int] = 1
-            # 统计每类的票数
-            votes = one_hot.sum(axis=1)  # (n_samples, n_classes)
-            return votes.argmax(axis=1)
+        if task_type == TaskType.CLASSIFICATION:
+            averaged_proba = self._average_probabilities(test_probas, weights) if all_have_proba else None
+            return self._probabilities_to_labels(averaged_proba) \
+                if averaged_proba is not None else self._hard_vote(test_preds)
         
         try:
             return np.average(test_preds, axis=1, weights=weights)
@@ -2121,11 +2235,15 @@ class EnsembleBuilder:
         meta_features = np.column_stack(oof_arrays)
         
         # 新增：添加多项式特征（捕捉模型间的非线性交互）
+        # 注意：只有当展开后的特征真正被采用时才保留 self._poly，
+        # 否则 blend/predict_stacking 会把元特征展开到与训练时不同的维度（维度不匹配 bug）
+        self._poly = None
         if meta_features.shape[1] >= 2 and meta_features.shape[1] <= 20:
-            self._poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
-            meta_features_poly = self._poly.fit_transform(meta_features)
+            poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+            meta_features_poly = poly.fit_transform(meta_features)
             # 限制特征数避免过拟合
             if meta_features_poly.shape[1] <= 100:
+                self._poly = poly
                 meta_features = meta_features_poly
                 log_info(f"[EnsembleBuilder] Stacking 使用多项式特征: {meta_features.shape[1]} 维")
         
@@ -2209,7 +2327,7 @@ class ModelingEngine:
                  model_keys: Optional[List[str]] = None,
                  n_splits: int = 5,
                  encoding: Union[str, EncodingType] = EncodingType.AUTO,
-                 feature_selection: Union[str, FeatureSelectionStrategy] = FeatureSelectionStrategy.MI,
+                 feature_selection: Union[str, FeatureSelectionStrategy] = FeatureSelectionStrategy.NONE,
                  ensemble: Union[str, EnsembleMethod] = EnsembleMethod.WEIGHTED,
                  random_state: int = 42,
                  n_jobs: int = -1,
@@ -2263,9 +2381,9 @@ class ModelingEngine:
         self.user_task_type = task_type
         self.model_keys = model_keys
         self.n_splits = n_splits
-        self.encoding = encoding if isinstance(encoding, EncodingType) else EncodingType.AUTO
-        self.feature_selection = feature_selection if isinstance(feature_selection, FeatureSelectionStrategy) else FeatureSelectionStrategy.MI
-        self.ensemble = ensemble if isinstance(ensemble, EnsembleMethod) else EnsembleMethod.WEIGHTED
+        self.encoding = self._parse_encoding(encoding)
+        self.feature_selection = self._parse_feature_selection(feature_selection)
+        self.ensemble = self._parse_ensemble(ensemble)
         self.random_state = random_state
         self.n_jobs = n_jobs
         self.use_gpu = use_gpu
@@ -2301,18 +2419,119 @@ class ModelingEngine:
         self._label_encoder: Optional[LabelEncoder] = None
         self._autoencoder: Optional[Any] = None
         self._feature_engineer: Optional[Any] = None
+        self._original_shape: Tuple[int, int] = (0, 0)
+        self._input_memory_mb: float = 0.0
+        self._large_workload: bool = False
         self.result: Optional[ModelingResult] = None
 
+    @staticmethod
+    def _parse_encoding(value: Union[str, EncodingType]) -> EncodingType:
+        if isinstance(value, EncodingType):
+            return value
+        try:
+            return EncodingType(str(value).lower())
+        except ValueError as exc:
+            raise ValueError(f"不支持的编码策略: {value}") from exc
+
+    @staticmethod
+    def _parse_feature_selection(value: Union[str, FeatureSelectionStrategy]) -> FeatureSelectionStrategy:
+        if isinstance(value, FeatureSelectionStrategy):
+            return value
+        aliases = {
+            'variance': FeatureSelectionStrategy.VARIANCE,
+            'mi': FeatureSelectionStrategy.MI,
+            'mi_knn': FeatureSelectionStrategy.MI_KNN,
+            'rfe': FeatureSelectionStrategy.RFE,
+            'correlation': FeatureSelectionStrategy.CORRELATION,
+            'pca': FeatureSelectionStrategy.PCA_DIM,
+        }
+        normalized = str(value).lower()
+        if normalized in aliases:
+            return aliases[normalized]
+        try:
+            return FeatureSelectionStrategy(normalized)
+        except ValueError as exc:
+            raise ValueError(f"不支持的特征选择策略: {value}") from exc
+
+    @staticmethod
+    def _parse_ensemble(value: Union[str, EnsembleMethod]) -> EnsembleMethod:
+        if isinstance(value, EnsembleMethod):
+            return value
+        normalized = str(value).lower()
+        if normalized == 'weighted':
+            return EnsembleMethod.WEIGHTED
+        try:
+            return EnsembleMethod(normalized)
+        except ValueError as exc:
+            raise ValueError(f"不支持的融合策略: {value}") from exc
+
     def _apply_large_data_model_guards(self, models: Dict[str, Any], task_type: TaskType, n_samples: int) -> Dict[str, Any]:
-        """针对大数据自动记录慢模型，保持全部模型但提示性能风险。"""
-        if self.model_keys is not None or n_samples <= 30000:
+        """在用户未指定模型时，为大数据选择有界复杂度的候选集。"""
+        if self.model_keys is not None or not self._large_workload:
             return models
 
-        expensive = {'svr', 'svm', 'knn', 'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'tabnet'}
-        slow_models = sorted([k for k in models if k in expensive])
-        if slow_models:
-            log_info(f"[ModelingEngine] 大数据检测到可能慢模型: {slow_models}，将保留训练但自动降低超参搜索/折数")
-        return models
+        if task_type == TaskType.CLASSIFICATION:
+            preferred = ['hist_gb', 'lgb', 'xgb', 'sgd', 'lr', 'rf', 'et']
+        else:
+            preferred = ['hist_gb', 'lgb', 'xgb', 'sgd', 'ridge', 'rf', 'et']
+
+        original_rows, original_cols = self._original_shape
+        max_models = 3 if original_rows > 200_000 or original_rows * original_cols > 20_000_000 else 5
+        selected_keys = [key for key in preferred if key in models][:max_models]
+        selected = {key: models[key] for key in selected_keys}
+        if not selected:
+            selected = dict(list(models.items())[:max_models])
+
+        skipped = len(models) - len(selected)
+        log_info(
+            f"[ModelingEngine] 大数据安全模式: 候选模型 {len(models)} → {len(selected)} "
+            f"({list(selected)}), 跳过 {skipped} 个高成本模型"
+        )
+        return selected
+
+    def _configure_workload(self, X: pd.DataFrame) -> None:
+        """记录原始工作量，供采样、模型和并行预算共同使用。"""
+        self._original_shape = X.shape
+        rows, cols = X.shape
+        try:
+            memory_mb = float(X.memory_usage(deep=True).sum()) / (1024 ** 2)
+        except Exception:
+            memory_mb = float(X.memory_usage().sum()) / (1024 ** 2)
+        self._input_memory_mb = memory_mb
+        self._large_workload = rows > 30_000 or rows * max(cols, 1) > 5_000_000 or memory_mb > 512
+
+    def _get_adaptive_sample_limit(self, X: pd.DataFrame) -> int:
+        """按行宽和可用内存收紧样本上限，避免宽表在 CV 中被多次复制。"""
+        configured = max(1, int(self.max_samples))
+        if len(X) == 0:
+            return configured
+        try:
+            bytes_per_row = max(float(X.memory_usage(deep=True).sum()) / len(X), 1.0)
+        except Exception:
+            bytes_per_row = max(float(X.memory_usage().sum()) / len(X), 1.0)
+        try:
+            import psutil
+            available_bytes = psutil.virtual_memory().available
+        except Exception:
+            available_bytes = 4 * 1024 ** 3
+
+        # CV、编码和模型拟合会产生多份副本，只给输入矩阵约 10% 可用内存，
+        # 且单次预算不超过 512 MiB。
+        matrix_budget = min(512 * 1024 ** 2, max(64 * 1024 ** 2, int(available_bytes * 0.10)))
+        rows_by_memory = max(1, int(matrix_budget / bytes_per_row))
+        rows_by_cells = max(1, int(8_000_000 / max(X.shape[1], 1)))
+        original_rows, _ = self._original_shape
+        if original_rows > 1_000_000:
+            tier_cap = 20_000
+        elif original_rows > 200_000:
+            tier_cap = 30_000
+        elif original_rows > 30_000:
+            tier_cap = 40_000
+        else:
+            tier_cap = configured
+        adaptive = min(configured, tier_cap, rows_by_memory, rows_by_cells)
+        # 极宽表可能连 1000 行都无法安全复制，最低只保留 100 行。
+        return max(min(configured, 100), adaptive)
 
     def _is_expensive_model(self, model_key: str) -> bool:
         return model_key in {'svr', 'svm', 'knn', 'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'tabnet'}
@@ -2330,15 +2549,55 @@ class ModelingEngine:
 
     def _get_effective_cv_folds(self, n_samples: int) -> int:
         """大数据时自动降低 CV 折数，提高训练速度。"""
-        if self.n_splits > 3 and n_samples > 50000:
-            log_info(f"[ModelingEngine] 大数据自动降低CV折数: {self.n_splits} -> 3")
-            return 3
+        rows, cols = self._original_shape
+        cap = self.n_splits
+        if self._large_workload:
+            cap = 2 if rows > 200_000 or rows * max(cols, 1) > 20_000_000 else 3
+        effective = min(self.n_splits, cap, max(2, n_samples // 2))
+        if effective != self.n_splits:
+            log_info(f"[ModelingEngine] 按资源预算降低CV折数: {self.n_splits} -> {effective}")
+        return effective
+
+    def _get_effective_cv_jobs(self, n_splits: int) -> int:
+        """限制折级并行，避免与模型内部线程形成乘法级过度并行。"""
+        if self._large_workload:
+            return 1
+        requested = (os.cpu_count() or 1) if self.n_jobs == -1 else max(1, self.n_jobs)
+        return max(1, min(requested, n_splits, 4))
+
+    def _create_runtime_model(self, model_key: str, task_type: TaskType,
+                              params: Optional[Dict[str, Any]] = None) -> BaseEstimator:
+        """创建服从当前资源预算的模型实例。"""
+        runtime_params = dict(params or {})
+        if self._large_workload:
+            model_threads = max(1, min(os.cpu_count() or 1, 4))
+            threaded_keys = {'knn', 'rf', 'et', 'xgb', 'lgb'}
+            if task_type == TaskType.CLASSIFICATION:
+                threaded_keys.update({'lr', 'sgd'})
+            if model_key in threaded_keys:
+                configured_jobs = runtime_params.get('n_jobs', model_threads)
+                runtime_params['n_jobs'] = model_threads if configured_jobs == -1 else min(int(configured_jobs), model_threads)
+
+            estimator_caps = {'rf': 150, 'et': 150, 'xgb': 400, 'lgb': 400}
+            if model_key in estimator_caps:
+                cap = estimator_caps[model_key]
+                runtime_params['n_estimators'] = min(int(runtime_params.get('n_estimators', cap)), cap)
+            if model_key == 'hist_gb':
+                runtime_params['max_iter'] = min(int(runtime_params.get('max_iter', 200)), 200)
+            if model_key == 'mlp':
+                runtime_params['max_iter'] = min(int(runtime_params.get('max_iter', 200)), 200)
+
+        return ModelLibrary.create_model(
+            model_key, task_type, use_gpu=self.use_gpu, **runtime_params
+        )
         return self.n_splits
 
     def _get_effective_hyperparam_trials(self, n_samples: int) -> int:
         """大数据时自动限制超参试验次数，避免过度搜索。"""
-        if self.optimize_hyperparams and n_samples > 50000:
-            effective = min(self.hyperparam_trials, 20)
+        if self.optimize_hyperparams and self._large_workload:
+            rows, cols = self._original_shape
+            cap = 5 if rows > 200_000 or rows * max(cols, 1) > 20_000_000 else 10
+            effective = min(self.hyperparam_trials, cap)
             if effective != self.hyperparam_trials:
                 log_info(f"[ModelingEngine] 大数据自动限制 hyperparam_trials: {self.hyperparam_trials} -> {effective}")
             return effective
@@ -2347,17 +2606,22 @@ class ModelingEngine:
     @staticmethod
     def _sanitize_datetime_columns(X: pd.DataFrame) -> pd.DataFrame:
         """把 datetime64 列拆分为数值特征，防止 numpy dtype 提升错误"""
+        datetime_cols = [
+            col for col in X.columns
+            if pd.api.types.is_datetime64_any_dtype(X[col])
+        ]
+        if not datetime_cols:
+            return X
         X = X.copy()
-        for col in list(X.columns):
-            if pd.api.types.is_datetime64_any_dtype(X[col]):
-                dt = pd.to_datetime(X[col], errors='coerce')
-                X[f'{col}_year'] = dt.dt.year.astype('float64')
-                X[f'{col}_month'] = dt.dt.month.astype('float64')
-                X[f'{col}_day'] = dt.dt.day.astype('float64')
-                X[f'{col}_dayofweek'] = dt.dt.dayofweek.astype('float64')
-                X[f'{col}_is_weekend'] = (dt.dt.dayofweek >= 5).astype('float64')
-                X[f'{col}_quarter'] = dt.dt.quarter.astype('float64')
-                X = X.drop(columns=[col])
+        for col in datetime_cols:
+            dt = pd.to_datetime(X[col], errors='coerce')
+            X[f'{col}_year'] = dt.dt.year.astype('float64')
+            X[f'{col}_month'] = dt.dt.month.astype('float64')
+            X[f'{col}_day'] = dt.dt.day.astype('float64')
+            X[f'{col}_dayofweek'] = dt.dt.dayofweek.astype('float64')
+            X[f'{col}_is_weekend'] = (dt.dt.dayofweek >= 5).astype('float64')
+            X[f'{col}_quarter'] = dt.dt.quarter.astype('float64')
+            X = X.drop(columns=[col])
         return X
     
     def fit(self,
@@ -2376,11 +2640,31 @@ class ModelingEngine:
             ModelingResult
         """
         start_time = time.time()
+        self._configure_workload(X)
         
         # 0. 统一清洗 datetime64 列（防止下游 sklearn 报错）
         X = self._sanitize_datetime_columns(X)
         if X_test is not None:
             X_test = self._sanitize_datetime_columns(X_test)
+
+        # Group identifiers are split metadata, never model features.  Extract
+        # them before encoding/feature selection so an entity id cannot be
+        # one-hot encoded, selected as a predictor, or silently disappear before
+        # GroupKFold is constructed.
+        group_source = None
+        if self.fold_type == 'group':
+            if self.group_col and self.group_col in X.columns:
+                group_source = pd.Series(X[self.group_col].to_numpy()).reset_index(drop=True)
+                X = X.drop(columns=[self.group_col]).reset_index(drop=True)
+                if y is not None:
+                    y = pd.Series(y).reset_index(drop=True)
+                if X_test is not None and self.group_col in X_test.columns:
+                    X_test = X_test.drop(columns=[self.group_col])
+            else:
+                log_warning(
+                    f"[ModelingEngine] fold_type='group' 但分组列 {self.group_col!r} 不存在，"
+                    "将退化为普通交叉验证"
+                )
         
         # 1. 判断任务类型
         task_type = TaskTypeDetector.detect(y, X, self.user_task_type)
@@ -2411,8 +2695,15 @@ class ModelingEngine:
         if self.auto_sample:
             try:
                 from core.sampling_engine import AutoSampler
+                adaptive_max_samples = self._get_adaptive_sample_limit(X)
+                if adaptive_max_samples < self.max_samples:
+                    log_info(
+                        f"[ModelingEngine] 按内存/宽表预算收紧样本上限: "
+                        f"{self.max_samples:,} → {adaptive_max_samples:,}"
+                    )
                 sampler = AutoSampler(
-                    max_samples=self.max_samples,
+                    max_samples=adaptive_max_samples,
+                    min_samples=min(1000, adaptive_max_samples),
                     task_type=task_type,
                     random_state=self.random_state
                 )
@@ -2485,7 +2776,13 @@ class ModelingEngine:
             except Exception as e:
                 log_warning(f"[MetaLearning] 推荐失败: {e}，回退到默认模型")
         
-        # 5. 获取模型列表
+        # 5. 获取模型列表。深度学习注册涉及大型可选依赖，只在用户明确
+        # 启用时加载；普通表格分析无需为 PyTorch/多模态模型支付启动成本。
+        if self.deep_learning.get('enabled', False):
+            try:
+                import core.deep_learning  # noqa: F401
+            except ImportError as e:
+                log_warning(f"[ModelingEngine] 深度学习依赖不可用: {e}")
         models = ModelLibrary.get_models(task_type, recommended_model_keys)
         if not models:
             raise ValueError(f"没有可用的{task_type.value}模型")
@@ -2511,6 +2808,10 @@ class ModelingEngine:
             raise ValueError(f"没有可用的{task_type.value}模型（检查深度学习配置）")
         
         log_info(f"[ModelingEngine] 将训练 {len(models)} 个模型")
+        effective_cv_folds = self._get_effective_cv_folds(X_sel.shape[0])
+        effective_cv_jobs = self._get_effective_cv_jobs(effective_cv_folds)
+        if effective_cv_jobs != self.n_jobs:
+            log_info(f"[ModelingEngine] CV并行预算: n_jobs={effective_cv_jobs}")
         
         # 6. 超参数优化（可选）
         optimized_params: Dict[str, Dict] = {}
@@ -2519,16 +2820,18 @@ class ModelingEngine:
             try:
                 from core.optimizer_factory import OptimizerFactory
                 effective_trials = self._get_effective_hyperparam_trials(X_sel.shape[0])
-                effective_cv_folds = min(3, self._get_effective_cv_folds(X_sel.shape[0]))
+                hyperopt_cv_folds = min(3, effective_cv_folds)
                 optimizer = OptimizerFactory.create(
                     self.optimizer,
                     n_trials=effective_trials,
-                    cv_folds=effective_cv_folds,
+                    cv_folds=hyperopt_cv_folds,
                     random_state=self.random_state,
                     sampler=self.hyperparam_sampler,
-                    n_jobs=self.n_jobs
+                    n_jobs=effective_cv_jobs,
+                    fold_type=self.fold_type,
                 )
                 log_info(f"[ModelingEngine] 启动 {self.optimizer} 超参数优化，每个模型 {self.hyperparam_trials} 次尝试")
+                optimization_metric = TaskTypeDetector.get_primary_metric(task_type)
                 # 深度学习模型专用 trial 限制
                 DL_KEYS = {'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'torch_ae', 'torch_resmlp', 'tabnet'}
                 
@@ -2557,9 +2860,10 @@ class ModelingEngine:
                                 random_state=self.random_state,
                                 sampler=self.hyperparam_sampler,
                                 n_jobs=1,  # DL 模型避免并行
-                                trial_timeout=60  # DL 模型更短超时
+                                trial_timeout=60,  # DL 模型更短超时
+                                fold_type=self.fold_type,
                             )
-                            opt_result = dl_optimizer.optimize(key, X_opt, y_opt, task_type)
+                            opt_result = dl_optimizer.optimize(key, X_opt, y_opt, task_type, metric=optimization_metric)
                             log_info(f"[ModelingEngine] {key} DL hyperopt: {dl_trials} trials, {min(2, self._get_effective_cv_folds(X_sel.shape[0]))}-fold")
                         elif is_expensive:
                             exp_trials = min(15, self.hyperparam_trials)
@@ -2570,13 +2874,14 @@ class ModelingEngine:
                                 cv_folds=min(2, self._get_effective_cv_folds(X_sel.shape[0])),
                                 random_state=self.random_state,
                                 sampler=self.hyperparam_sampler,
-                                n_jobs=max(1, self.n_jobs // 2),
-                                trial_timeout=60
+                                n_jobs=effective_cv_jobs,
+                                trial_timeout=60,
+                                fold_type=self.fold_type,
                             )
-                            opt_result = exp_optimizer.optimize(key, X_opt, y_opt, task_type)
+                            opt_result = exp_optimizer.optimize(key, X_opt, y_opt, task_type, metric=optimization_metric)
                             log_info(f"[ModelingEngine] {key} expensive-model hyperopt: {exp_trials} trials, {min(2, self._get_effective_cv_folds(X_sel.shape[0]))}-fold")
                         else:
-                            opt_result = optimizer.optimize(key, X_opt, y_opt, task_type)
+                            opt_result = optimizer.optimize(key, X_opt, y_opt, task_type, metric=optimization_metric)
                         
                         optimized_params[key] = opt_result.best_params
                         optimization_history[key] = opt_result.optimization_history
@@ -2592,25 +2897,21 @@ class ModelingEngine:
                 log_warning(f"[ModelingEngine] 优化器初始化失败: {e}，跳过超参优化")
         
         # 6. K折交叉验证训练
-        effective_cv_folds = self._get_effective_cv_folds(X_sel.shape[0])
         cv = CrossValidator(
             n_splits=effective_cv_folds,
             random_state=self.random_state,
             verbose=self.verbose,
             fold_type=self.fold_type,
-            n_jobs=self.n_jobs,
+            n_jobs=effective_cv_jobs,
             enable_kernel_approximation=self.enable_kernel_approximation,
             enable_precomputed_kernel_cache=self.enable_precomputed_kernel_cache
         )
         cv_results = []
         
-        # 提取分组列（GroupKFold 用）
+        # AutoSampler 保留原始行索引；据此同步已提前隔离的分组标签。
         groups = None
-        if self.fold_type == 'group' and self.group_col and self.group_col in X_sel.columns:
-            groups = X_sel[self.group_col].values
-            X_sel = X_sel.drop(columns=[self.group_col])
-            if X_test_sel is not None and self.group_col in X_test_sel.columns:
-                X_test_sel = X_test_sel.drop(columns=[self.group_col])
+        if group_source is not None:
+            groups = group_source.reindex(X_sel.index).to_numpy()
         
         # 多模态模型需要的特殊列
         MULTIModal_COLS = {'image_resnet': 'image_path', 'text_bert': 'text'}
@@ -2630,7 +2931,7 @@ class ModelingEngine:
                 params = optimized_params.get(key, {})
                 if key in DL_MODEL_KEYS and self.deep_learning.get('enabled', False):
                     params.setdefault('use_amp', self.deep_learning.get('use_amp', False))
-                model = ModelLibrary.create_model(key, task_type, use_gpu=self.use_gpu, **params)
+                model = self._create_runtime_model(key, task_type, params)
                 result = cv.cross_validate(model, X_sel, y, task_type,
                     progress_callback=self.progress_callback,
                     model_key=key, model_name=spec.name,
@@ -2699,10 +3000,12 @@ class ModelingEngine:
                 from core.permutation_importance import compute_permutation_importance
                 best_key = cv_results[0].model_key
                 params = optimized_params.get(best_key, {})
-                best_model = ModelLibrary.create_model(best_key, task_type, use_gpu=self.use_gpu, **params)
-                best_model.fit(X_sel, y)
+                best_model = self._create_runtime_model(best_key, task_type, params)
                 scoring = 'accuracy' if task_type == TaskType.CLASSIFICATION else 'r2'
-                pi_df = compute_permutation_importance(best_model, X_sel, y, scoring=scoring, n_repeats=3)
+                pi_df = compute_permutation_importance(
+                    best_model, X_sel, y, scoring=scoring, n_repeats=3,
+                    max_samples=5000, max_features=100,
+                )
                 log_info(f"[ModelingEngine] Permutation Importance 计算完成，Top3: {pi_df['feature'].iloc[:3].tolist()}")
             except Exception as e:
                 log_warning(f"[ModelingEngine] Permutation Importance 计算失败: {e}")
@@ -2714,7 +3017,7 @@ class ModelingEngine:
                 from core.pseudo_labeling import PseudoLabeler
                 best_key = cv_results[0].model_key
                 params = optimized_params.get(best_key, {})
-                best_model = ModelLibrary.create_model(best_key, task_type, use_gpu=self.use_gpu, **params)
+                best_model = self._create_runtime_model(best_key, task_type, params)
                 best_model.fit(X_sel, y)
                 
                 pl = PseudoLabeler(threshold=self.pseudo_label_threshold)
@@ -2760,7 +3063,7 @@ class ModelingEngine:
                     if X_test_sel is not None:
                         best_key = best_result.model_key
                         params = optimized_params.get(best_key, {})
-                        best_model = ModelLibrary.create_model(best_key, task_type, use_gpu=self.use_gpu, **params)
+                        best_model = self._create_runtime_model(best_key, task_type, params)
                         best_model.fit(X_sel, y)
                         test_pred = best_model.predict(X_test_sel)
                         lower = test_pred - q_hat
@@ -2869,12 +3172,30 @@ class ModelingEngine:
                 log_info(f"[ModelingEngine] 用户覆盖了自动选择: {self.user_override_model}")
         except Exception as e:
             log_warning(f"[ModelingEngine] 自动评估失败: {e}")
+
+        # CV models are diagnostics, not deployment models. Refit the selected model
+        # on every available training row so predict() does not use an arbitrary fold.
+        try:
+            selected_key = self.result.best_model_key
+            selected_cv = self.result.best_cv_result
+            if selected_key and selected_cv is not None:
+                final_params = optimized_params.get(selected_key, {})
+                final_model = self._create_runtime_model(selected_key, task_type, final_params)
+                final_model.fit(X_sel, y)
+                selected_cv.fitted_models.append(final_model)
+                self.result.preprocessing_info['final_refit_samples'] = int(len(X_sel))
+        except Exception as e:
+            log_warning(f"[ModelingEngine] 最终全量重拟合失败，将保留CV折模型: {e}")
         
         return self.result
     
     def _encode_features(self, X: pd.DataFrame, X_test: Optional[pd.DataFrame],
                          y: Optional[pd.Series]) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         """自动编码特征"""
+        if self.encoding == EncodingType.NONE:
+            log_info("[ModelingEngine] 用户指定不编码分类变量")
+            return X, X_test, None
+
         cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
         
         if not cat_cols:
@@ -2883,7 +3204,7 @@ class ModelingEngine:
         
         log_info(f"[ModelingEngine] 发现 {len(cat_cols)} 个分类变量: {cat_cols}")
         
-        self._encoder = AutoEncoder()
+        self._encoder = AutoEncoder(strategy=self.encoding)
         X_enc = self._encoder.fit_transform(X, y)
         
         X_test_enc = None
@@ -2919,43 +3240,84 @@ class ModelingEngine:
         start_time = time.time()
         
         # 聚类前必须将所有特征数值化（字符串列编码 + 数值列标准化）
-        X_proc = X.copy()
+        X_proc = X
         cat_cols = X_proc.select_dtypes(include=['object', 'category']).columns.tolist()
         if cat_cols:
             encoder = AutoEncoder()
             X_proc = encoder.fit_transform(X_proc)
             log_info(f"[ModelingEngine] 聚类编码: {len(cat_cols)}个分类变量 → {X_proc.shape[1]}列")
-        
-        # 标准化（KMeans/Spectral等对尺度敏感）
+
+        # 大数据聚类只在有界样本上拟合；全量标签用可预测模型分块生成。
+        fit_limit = min(len(X_proc), self._get_adaptive_sample_limit(X_proc), 20_000)
+        if len(X_proc) > fit_limit:
+            fit_raw = X_proc.sample(n=fit_limit, random_state=self.random_state)
+            log_info(f"[ModelingEngine] 聚类拟合采样: {len(X_proc):,} → {fit_limit:,}")
+        else:
+            fit_raw = X_proc
+
+        # 标准化（KMeans/Spectral等对尺度敏感），只保留拟合样本矩阵。
         scaler = StandardScaler()
-        X_scaled = pd.DataFrame(
-            scaler.fit_transform(X_proc),
+        X_fit_scaled = pd.DataFrame(
+            scaler.fit_transform(fit_raw),
             columns=X_proc.columns,
-            index=X_proc.index
+            index=fit_raw.index,
         )
         
         models = ModelLibrary.get_models(TaskType.CLUSTERING, self.model_keys)
+        if self._large_workload and self.model_keys is None:
+            scalable_keys = ['minibatch_kmeans', 'kmeans', 'birch']
+            models = {key: models[key] for key in scalable_keys if key in models}
+            log_info(f"[ModelingEngine] 大数据聚类安全模型: {list(models)}")
         cv_results = []
         
         for key, spec in models.items():
             try:
                 model = ModelLibrary.create_model(key, TaskType.CLUSTERING, use_gpu=self.use_gpu)
+                model_input = X_fit_scaled
+                if self._large_workload and key in {'spectral', 'agg', 'dbscan', 'optics', 'gmm'} and len(model_input) > 3000:
+                    model_input = model_input.sample(n=3000, random_state=self.random_state)
+                    log_info(f"[ModelingEngine] {spec.name} 二次采样至 3,000 行")
                 t0 = time.time()
-                model.fit(X_scaled)
+                model.fit(model_input)
                 train_time = time.time() - t0
-                labels = model.labels_ if hasattr(model, 'labels_') else model.predict(X_scaled)
+
+                if hasattr(model, 'predict'):
+                    metric_input = model_input.sample(
+                        n=min(2000, len(model_input)), random_state=self.random_state
+                    )
+                    metric_labels = model.predict(metric_input)
+                    if len(X_proc) == len(model_input) and X_proc.index.equals(model_input.index):
+                        labels = model.predict(model_input)
+                    else:
+                        label_chunks = []
+                        chunk_size = 20_000
+                        for start in range(0, len(X_proc), chunk_size):
+                            chunk = X_proc.iloc[start:start + chunk_size]
+                            chunk_scaled = scaler.transform(chunk)
+                            label_chunks.append(np.asarray(model.predict(chunk_scaled)))
+                        labels = np.concatenate(label_chunks)
+                else:
+                    labels = np.asarray(model.labels_)
+                    metric_input = model_input
+                    metric_labels = labels
+                    if len(metric_input) > 2000:
+                        positions = np.random.RandomState(self.random_state).choice(
+                            len(metric_input), size=2000, replace=False
+                        )
+                        metric_input = metric_input.iloc[positions]
+                        metric_labels = metric_labels[positions]
                 
                 scores = {}
                 try:
-                    scores['silhouette'] = silhouette_score(X_scaled, labels)
+                    scores['silhouette'] = silhouette_score(metric_input, metric_labels)
                 except Exception as e:
                     log_warning(f"[Clustering] {spec.name} silhouette_score 计算失败: {e}")
                 try:
-                    scores['calinski_harabasz'] = calinski_harabasz_score(X_scaled, labels)
+                    scores['calinski_harabasz'] = calinski_harabasz_score(metric_input, metric_labels)
                 except Exception as e:
                     log_warning(f"[Clustering] {spec.name} calinski_harabasz_score 计算失败: {e}")
                 try:
-                    scores['davies_bouldin'] = davies_bouldin_score(X_scaled, labels)
+                    scores['davies_bouldin'] = davies_bouldin_score(metric_input, metric_labels)
                 except Exception as e:
                     log_warning(f"[Clustering] {spec.name} davies_bouldin_score 计算失败: {e}")
                 
@@ -3025,6 +3387,7 @@ class ModelingEngine:
             preprocessing_info={
                 'original_features': X.shape[1],
                 'encoded_features': X_proc.shape[1],
+                'fit_samples': len(fit_raw),
                 'encoder': encoder if cat_cols else None,
                 'scaler': scaler,
             }
@@ -3065,7 +3428,9 @@ class ModelingEngine:
         if self.result is None:
             raise ValueError("请先调用 fit()")
         
-        X_proc = X_test.copy()
+        X_proc = self._sanitize_datetime_columns(X_test.copy())
+        if self.fold_type == 'group' and self.group_col in X_proc.columns:
+            X_proc = X_proc.drop(columns=[self.group_col])
         if self._feature_engineer:
             X_proc = self._feature_engineer.transform(X_proc)
         if self._encoder:

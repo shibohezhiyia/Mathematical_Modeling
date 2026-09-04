@@ -29,7 +29,7 @@
 import os
 import warnings
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
@@ -242,13 +242,19 @@ class TimeSeriesForecaster:
             ensemble=self.cfg.ensemble,
             random_state=self.cfg.random_state,
             n_jobs=self.cfg.n_jobs,
+            # 滞后/滚动特征只能用过去数据验证；随机 K 折会让未来样本进入
+            # 训练集，产生时间穿越并高估离线得分。
+            fold_type='time',
             auto_decision_mode='balanced'
         )
         result = engine.fit(X, y)
         
         cv_rmse = None
-        if result.leaderboard is not None and not result.leaderboard.empty and 'rmse' in result.leaderboard.columns:
-            cv_rmse = result.leaderboard.iloc[0]['rmse']
+        if result.leaderboard is not None and not result.leaderboard.empty:
+            # ModelingEngine 的排行榜列以 "<metric>_mean" 命名。
+            rmse_col = 'rmse_mean' if 'rmse_mean' in result.leaderboard.columns else 'rmse'
+            if rmse_col in result.leaderboard.columns:
+                cv_rmse = float(result.leaderboard.iloc[0][rmse_col])
         
         # 获取最佳模型（最后一个fold的拟合模型）
         best_model = result.best_cv_result.fitted_models[-1] if result.best_cv_result and result.best_cv_result.fitted_models else None

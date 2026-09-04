@@ -141,7 +141,11 @@ class TorchNAS(BaseEstimator):
             if self.task_type == 'classification':
                 loss = criterion(outputs, yb)
             else:
-                loss = criterion(outputs.squeeze(), yb.float())
+                if outputs.numel() != yb.numel():
+                    raise ValueError(
+                        f"回归输出与目标元素数不一致: {tuple(outputs.shape)} vs {tuple(yb.shape)}"
+                    )
+                loss = criterion(outputs.reshape(-1), yb.float().reshape(-1))
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -163,7 +167,11 @@ class TorchNAS(BaseEstimator):
                     correct += (preds == yb).sum().item()
                     total += yb.size(0)
                 else:
-                    loss = criterion(outputs.squeeze(), yb.float())
+                    if outputs.numel() != yb.numel():
+                        raise ValueError(
+                            f"回归输出与目标元素数不一致: {tuple(outputs.shape)} vs {tuple(yb.shape)}"
+                        )
+                    loss = criterion(outputs.reshape(-1), yb.float().reshape(-1))
                     total_loss += loss.item()
         if self.task_type == 'classification':
             return correct / max(total, 1)
@@ -290,7 +298,12 @@ class TorchNAS(BaseEstimator):
             if self.task_type == 'classification':
                 preds = torch.argmax(outputs, dim=1).cpu().numpy()
                 return self.label_encoder_.inverse_transform(preds)
-            return outputs.squeeze().cpu().numpy()
+            values = outputs.detach().cpu().numpy()
+            if values.ndim == 0:
+                return values.reshape(1)
+            if values.ndim == 2 and values.shape[1] == 1:
+                return values[:, 0]
+            return values
     
     def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         if self.task_type != 'classification':

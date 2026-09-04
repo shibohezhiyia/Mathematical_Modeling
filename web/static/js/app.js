@@ -10,6 +10,19 @@ let trainEventSinceId = -1;
 let selectedOverrideModel = null;
 let llmTimer = null;
 let selectedAnalysisType = null;
+let llmImageAttachments = [];
+let researchImageAttachments = [];
+let interactiveVizSchema = null;
+let interactiveVizResult = null;
+let interactiveVizChart = null;
+let interactiveVizRefreshTimer = null;
+let interactiveVizPlaybackTimer = null;
+let interactiveVizRequestId = 0;
+let transformPreviewChart = null;
+let transformPreviewResult = null;
+let transformPreviewPresets = [];
+let transformPreviewView = { orientation: 'horizontal', sort: 'desc', topN: 15, labels: true };
+let transformEditingStepIndex = null;
 
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', () => {
@@ -18,6 +31,13 @@ document.addEventListener('DOMContentLoaded', () => {
     initModeHint();
     initDragDrop();
     loadDatasets();  // 加载已有数据集列表
+    loadTransformCapabilities();
+    onResearchSemanticProviderChange();
+    initResearchImageUpload();
+});
+
+window.addEventListener('resize', () => {
+    if (transformPreviewChart) transformPreviewChart.resize();
 });
 
 // ==================== 步骤导航 ====================
@@ -42,6 +62,10 @@ function markStepCompleted(n) {
 // ==================== 文件上传（支持多文件和多sheet） ====================
 let uploadedFiles = [];  // 存储上传的文件信息
 let selectedSheets = new Set();  // 合并时选中的sheet
+let transformCapabilities = [];
+let transformRecommendations = [];
+let transformValidationSuggestion = null;
+let mathematicalDataCompilation = null;
 
 function initUpload() {
     const input = document.getElementById('file-input');
@@ -94,15 +118,15 @@ async function analyzeProblem() {
         if (data.success && data.result) {
             const r = data.result;
             let html = '<div style="background:#f8f9fa;padding:12px;border-radius:6px;">';
-            html += '<h4 style="margin:0 0 8px;color:#2c3e50;">' + r.model + ' <span style="font-size:12px;color:#27ae60;">(' + r.confidence + '% 匹配)</span></h4>';
+            html += '<h4 style="margin:0 0 8px;color:#2c3e50;">' + escapeHtml(r.model_class || r.model || '建模任务') + ' <span style="font-size:12px;color:#27ae60;">(' + r.confidence + '% 匹配)</span></h4>';
             html += '<h5 style="margin:10px 0 4px;font-size:13px;">关键公式</h5><ul style="font-size:12px;margin:0;padding-left:16px;">';
-            r.formulas.forEach(f => { html += '<li>' + f + '</li>'; });
+            (r.formulas || []).forEach(f => { html += '<li>' + escapeHtml(f) + '</li>'; });
             html += '</ul>';
             html += '<h5 style="margin:10px 0 4px;font-size:13px;">建模步骤</h5><ol style="font-size:12px;margin:0;padding-left:16px;">';
-            r.approach.forEach(a => { html += '<li>' + a + '</li>'; });
+            (r.approach || r.steps || []).forEach(a => { html += '<li>' + escapeHtml(a) + '</li>'; });
             html += '</ol>';
             html += '<h5 style="margin:10px 0 4px;font-size:13px;">关键变量</h5><p style="font-size:12px;margin:0;">' + r.key_features.join('、') + '</p>';
-            html += '<h5 style="margin:10px 0 4px;font-size:13px;">Python 代码框架</h5><pre style="background:#fff;padding:8px;border-radius:4px;font-size:11px;overflow:auto;border:1px solid #e5e7eb;">' + r.code_template.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>';
+            html += '<h5 style="margin:10px 0 4px;font-size:13px;">Python 代码框架</h5><pre style="background:#fff;padding:8px;border-radius:4px;font-size:11px;overflow:auto;border:1px solid #e5e7eb;">' + escapeHtml(r.code_template || r.code_framework || '') + '</pre>';
             html += '</div>';
             if (contentDiv) contentDiv.innerHTML = html;
         } else {
@@ -111,6 +135,915 @@ async function analyzeProblem() {
     } catch (e) {
         if (contentDiv) contentDiv.innerHTML = '<div class="hint">错误: ' + e.message + '</div>';
     }
+}
+
+function initResearchImageUpload() {
+    const input = document.getElementById('research-image-input');
+    if (!input || input.dataset.bound === '1') return;
+    input.dataset.bound = '1';
+    input.addEventListener('change', async event => {
+        const files = Array.from(event.target.files || []);
+        event.target.value = '';
+        if (!files.length) return;
+        const remaining = LLM_IMAGE_MAX_COUNT - researchImageAttachments.length;
+        if (remaining <= 0) {
+            showToast(`最多上传 ${LLM_IMAGE_MAX_COUNT} 张题图`, 'error');
+            return;
+        }
+        for (const file of files.slice(0, remaining)) {
+            if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
+                showToast(`${file.name} 不是支持的图片格式`, 'error');
+                continue;
+            }
+            if (file.size <= 0 || file.size > LLM_IMAGE_MAX_BYTES) {
+                showToast(`${file.name} 超过 6 MB 限制`, 'error');
+                continue;
+            }
+            const total = researchImageAttachments.reduce((sum, image) => sum + image.size, 0);
+            if (total + file.size > LLM_IMAGE_TOTAL_MAX_BYTES) {
+                showToast('题图总大小不能超过 20 MB', 'error');
+                break;
+            }
+            try {
+                const dataUrl = await readFileAsDataUrl(file);
+                researchImageAttachments.push({ name: file.name, mime_type: file.type.toLowerCase(), size: file.size, data_url: dataUrl });
+            } catch (error) {
+                showToast(`读取 ${file.name} 失败`, 'error');
+            }
+        }
+        renderResearchImagePreview();
+    });
+    renderResearchImagePreview();
+}
+
+function removeResearchImage(index) {
+    researchImageAttachments.splice(index, 1);
+    renderResearchImagePreview();
+}
+
+function renderResearchImagePreview() {
+    const container = document.getElementById('research-image-preview');
+    const status = document.getElementById('research-image-status');
+    if (!container || !status) return;
+    container.innerHTML = '';
+    if (!researchImageAttachments.length) {
+        status.textContent = '未选择图片';
+        return;
+    }
+    status.textContent = `已选择 ${researchImageAttachments.length}/${LLM_IMAGE_MAX_COUNT} 张题图`;
+    researchImageAttachments.forEach((image, index) => {
+        const card = document.createElement('div');
+        card.className = 'llm-image-card';
+        const preview = document.createElement('img');
+        preview.className = 'llm-image-thumb';
+        preview.src = image.data_url;
+        preview.alt = image.name;
+        const meta = document.createElement('div');
+        meta.className = 'llm-image-meta';
+        const name = document.createElement('span');
+        name.textContent = image.name;
+        const size = document.createElement('small');
+        size.textContent = `${(image.size / 1024).toFixed(0)} KB`;
+        meta.append(name, size);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'llm-image-remove';
+        remove.title = '移除题图';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => removeResearchImage(index));
+        card.append(preview, meta, remove);
+        container.appendChild(card);
+    });
+}
+
+function onResearchSemanticProviderChange() {
+    const provider = document.getElementById('research-semantic-provider').value;
+    const baseUrl = document.getElementById('research-semantic-base-url');
+    const modelName = document.getElementById('research-semantic-model-name');
+    const keyGroup = document.getElementById('research-semantic-key-group');
+    if (provider === 'ollama') {
+        baseUrl.value = 'http://localhost:11434';
+        modelName.value = 'qwen2.5:3b';
+        keyGroup.classList.add('hidden');
+    } else if (provider === 'local_openai') {
+        baseUrl.value = 'http://localhost:1234/v1';
+        modelName.value = 'local-model';
+        keyGroup.classList.add('hidden');
+    } else if (provider === 'deepseek') {
+        baseUrl.value = 'https://api.deepseek.com';
+        modelName.value = 'deepseek-v4-pro';
+        keyGroup.classList.remove('hidden');
+    } else {
+        baseUrl.value = 'https://api.openai.com/v1';
+        modelName.value = 'gpt-4o-mini';
+        keyGroup.classList.remove('hidden');
+    }
+    const status = document.getElementById('research-semantic-test-status');
+    if (status) status.textContent = '';
+    populateModelPresetSelect('research-semantic-model-preset', provider, modelName.value);
+}
+
+const BUILTIN_MODEL_PRESETS = {
+    ollama: ['qwen2.5:3b', 'llama3', 'deepseek-r1:7b'],
+    local_openai: ['local-model'],
+    openai_compatible: ['gpt-4o', 'gpt-4o-mini'],
+    openai: ['gpt-4o', 'gpt-4o-mini'],
+    deepseek: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'],
+};
+
+function populateModelPresetSelect(selectId, provider, currentValue = '') {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const remoteConfig = window.llmProviders?.[provider] || {};
+    const options = Array.from(new Set([...(remoteConfig.model_options || []), ...(BUILTIN_MODEL_PRESETS[provider] || [])].filter(Boolean)));
+    select.innerHTML = '<option value="">选择常用模型…</option>' + options.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
+    select.value = options.includes(currentValue) ? currentValue : '';
+}
+
+function mergeRemoteModelPresetOptions(selectId, models, currentValue = '') {
+    const select = document.getElementById(selectId);
+    if (!select || !Array.isArray(models) || !models.length) return;
+    const existing = Array.from(select.options).map(option => option.value).filter(Boolean);
+    const options = Array.from(new Set([...existing, ...models.map(String).filter(Boolean)]));
+    select.innerHTML = '<option value="">选择常用模型…</option>' + options.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
+    select.value = options.includes(currentValue) ? currentValue : '';
+}
+
+function useResearchSemanticModelPreset(value) {
+    if (!value) return;
+    const input = document.getElementById('research-semantic-model-name');
+    if (input) input.value = value;
+}
+
+async function requestLLMConnectionTest(config, button, status) {
+    if (!config.base_url || !config.model_name) {
+        showToast('请填写服务地址和模型名称', 'error');
+        return false;
+    }
+    if (config.provider === 'deepseek' && !config.api_key) {
+        showToast('请输入 DeepSeek API Key', 'error');
+        return false;
+    }
+    if (button) button.disabled = true;
+    if (status) {
+        status.textContent = '正在验证…';
+        status.style.color = 'var(--text-light)';
+    }
+    try {
+        const response = await fetch('/api/llm/test-connection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '连接失败');
+        if (status) {
+            status.textContent = data.message;
+            status.style.color = data.model_available ? '#16845b' : '#a26805';
+        }
+        const presetId = button?.id === 'research-semantic-test-btn'
+            ? 'research-semantic-model-preset'
+            : 'llm-model-preset';
+        mergeRemoteModelPresetOptions(presetId, data.available_models, config.model_name);
+        showToast(data.message, data.model_available ? 'success' : 'warning');
+        return true;
+    } catch (error) {
+        if (status) {
+            status.textContent = error.message;
+            status.style.color = '#c0392b';
+        }
+        showToast('API 验证失败: ' + error.message, 'error');
+        return false;
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function testResearchSemanticConnection() {
+    return requestLLMConnectionTest({
+        provider: document.getElementById('research-semantic-provider').value,
+        base_url: document.getElementById('research-semantic-base-url').value.trim(),
+        model_name: document.getElementById('research-semantic-model-name').value.trim(),
+        api_key: document.getElementById('research-semantic-api-key').value,
+    }, document.getElementById('research-semantic-test-btn'), document.getElementById('research-semantic-test-status'));
+}
+
+async function runResearch() {
+    const description = document.getElementById('problem-description').value.trim();
+    if (!description) {
+        showToast('请先粘贴完整题目', 'error');
+        return;
+    }
+    const button = document.getElementById('research-run-btn');
+    const progress = document.getElementById('research-progress');
+    const resultBox = document.getElementById('research-result');
+    const hasDataset = uploadedFiles.length > 0 || Boolean(uploadedData);
+    const messages = [
+        hasDataset ? '正在读取全部数据表并建立字段画像…' : '正在从题面抽取实体、参数、单位与数学关系…',
+        hasDataset ? '正在推断主表、明细表和跨表关联键…' : '正在构建题目无关的数学中间表示…',
+        hasDataset ? '正在计算跨数据集变量交互，控制联表膨胀…' : '正在组合动力学、几何、事件和优化算子…',
+        '正在检查变量、单位、假设、初边值和约束…',
+        '正在安全编译可执行部分并保留未决条件…',
+        '正在执行泄漏、置乱、稳定性和敏感性反证…',
+        '正在编译论证图、结论等级和数学证据包…'
+    ];
+    let messageIndex = 0;
+    button.disabled = true;
+    progress.classList.remove('hidden');
+    resultBox.classList.add('hidden');
+    progress.innerHTML = `<span class="research-spinner"></span><span>${messages[0]}</span>`;
+    const timer = setInterval(() => {
+        messageIndex = Math.min(messageIndex + 1, messages.length - 1);
+        progress.innerHTML = `<span class="research-spinner"></span><span>${messages[messageIndex]}</span>`;
+    }, 3500);
+    try {
+        const target = document.getElementById('research-target').value.trim();
+        const semanticEnabled = document.getElementById('research-semantic-model').checked;
+        const response = await fetch('/api/research/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                description,
+                target: target || null,
+                run_modeling: document.getElementById('research-run-model').checked,
+                feedback_optimization: document.getElementById('research-feedback-optimize').checked,
+                credibility_audit: document.getElementById('research-credibility-audit').checked,
+                semantic_model_compiler: semanticEnabled,
+                semantic_provider: document.getElementById('research-semantic-provider').value,
+                semantic_base_url: document.getElementById('research-semantic-base-url').value.trim(),
+                semantic_model_name: document.getElementById('research-semantic-model-name').value.trim(),
+                semantic_api_key: semanticEnabled
+                    ? document.getElementById('research-semantic-api-key').value
+                    : '',
+                images: researchImageAttachments.map(image => ({
+                    name: image.name,
+                    mime_type: image.mime_type,
+                    data_url: image.data_url,
+                })),
+                async: true,
+                generate_plots: true
+            })
+        });
+        let data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '研究流程执行失败');
+        if (data.status === 'running') {
+            let completed = false;
+            for (let poll = 0; poll < 800; poll++) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                const statusResponse = await fetch('/api/research/status');
+                const statusData = await statusResponse.json();
+                if (statusData.status === 'error') throw new Error(statusData.error || '研究任务执行失败');
+                if (statusData.status === 'done') {
+                    data = { success: true, result: statusData.result };
+                    completed = true;
+                    break;
+                }
+            }
+            if (!completed) throw new Error('研究任务超过等待时限，请稍后重试');
+        }
+        renderResearchResult(data.result);
+        resultBox.classList.remove('hidden');
+        showToast('研究完成：已生成可审计数学证据包', 'success');
+    } catch (error) {
+        resultBox.innerHTML = `<div class="research-warning">研究未完成：${escapeHtml(error.message)}</div>`;
+        resultBox.classList.remove('hidden');
+        showToast('研究流程失败: ' + error.message, 'error');
+    } finally {
+        clearInterval(timer);
+        progress.classList.add('hidden');
+        button.disabled = false;
+    }
+}
+
+async function clearResearchCache(button) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = '正在清理…';
+    try {
+        const response = await fetch('/api/research/cache', { method: 'DELETE' });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '缓存清理失败');
+        const cleanup = data.cleanup || {};
+        showToast(`已清理 ${cleanup.deleted_files || 0} 个缓存文件；证据、报告和图表均保留`, 'success');
+        button.textContent = '本次缓存已清理';
+    } catch (error) {
+        button.disabled = false;
+        button.textContent = original;
+        showToast(error.message, 'error');
+    }
+}
+
+function formatResearchValue(value) {
+    if (typeof value !== 'number') return escapeHtml(String(value ?? '-'));
+    if (!Number.isFinite(value)) return '-';
+    return Math.abs(value) >= 1000 ? value.toLocaleString() : Number(value.toPrecision(5)).toString();
+}
+
+function renderResearchResult(result) {
+    const box = document.getElementById('research-result');
+    const profiles = result.dataset_profiles || [];
+    const relations = result.relationships || [];
+    const interactions = result.interactions || [];
+    const researchStatusLabels = {
+        model_draft_ready: '数学草案已形成', needs_confirmation: '待符号与单位确认',
+        not_applicable: '不适用', not_applicable_without_observations: '无观测数据时不适用',
+        not_assessed: '未评估', needs_input: '需要补充输入', partial: '部分完成',
+        ready: '已就绪', executed: '已执行', solver_ready: '求解器已就绪',
+        partially_executed: '部分数值已执行', partially_ready: '部分关系可执行',
+        complete: '完整', complete_with_gaps: '完整但有待绑定项',
+        draft_only: '仅数学草案', runnable: '可运行', deferred: '已延后',
+        blocked: '受阻', warning: '有条件通过', fail: '未通过',
+        supported: '当前契约内支持', conditionally_supported: '有条件支持',
+        rejected: '拒绝结论',
+        machine_compiled: '题面确定性编译',
+        needs_model_completion: '数学草案已形成，数值契约待确认',
+        conceptual_model_compiled: '规范方程草案已编译',
+        numerically_executable: '可执行数值模型',
+        template_requires_binding: '规范形式待绑定', roles_bound: '角色已绑定',
+        ready_to_compile: '可编译', partially_specified: '部分绑定',
+        accepted: '候选全部通过', partially_accepted: '部分候选通过',
+        no_accepted_relations: '候选均未通过', failed_safe: '失败并安全降级',
+        pass: '通过', restricted: '限定范围内采用', unresolved: '待完成'
+    };
+    const researchRequirementLabels = {
+        machine_readable_equations_or_algorithms: '可机器读取的方程或算法',
+        verified_symbol_and_unit_bindings: '题面符号、单位与规范方程的最终核验',
+        model_contract_confirmation: '模型契约确认'
+    };
+    const researchStatusText = value => researchStatusLabels[value] || value || '-';
+    const researchRequirementText = value => researchRequirementLabels[value] || value;
+    let html = '<div class="research-hero">';
+    html += `<div><span class="research-kicker">自动研究已完成</span><h3>${escapeHtml(result.problem_analysis.model_class || '数学建模分析')}</h3><p>${escapeHtml(result.problem_analysis.model_description || '')}</p></div>`;
+    html += `<div class="research-score">${result.problem_analysis.confidence || '-'}<small>% 题型识别置信度</small></div></div>`;
+
+    html += '<div class="research-stats">';
+    if (profiles.length) {
+    html += `<div><strong>${profiles.length}</strong><span>数据集</span></div>`;
+    html += `<div><strong>${relations.length}</strong><span>跨表关系</span></div>`;
+    html += `<div><strong>${interactions.length}</strong><span>变量交互</span></div>`;
+    } else {
+        const mechanismPreview = ((result.specialized_results || {}).mechanistic_model || {});
+        const graphPreview = (result.problem_analysis || {}).task_graph || [];
+        html += `<div><strong>${graphPreview.length}</strong><span>子问题</span></div>`;
+        html += `<div><strong>${graphPreview.filter(item => item.status === 'executed').length}</strong><span>已执行节点</span></div>`;
+        html += `<div><strong>${(mechanismPreview.numerical_results || []).length}</strong><span>数值结果</span></div>`;
+    }
+    html += `<div><strong>${(result.charts || []).length}</strong><span>自动图表</span></div></div>`;
+
+    const spec = result.mathematical_model_spec || {};
+    const evidence = result.evidence_bundle || {};
+    if (Object.keys(spec).length || Object.keys(evidence).length) {
+        const overallStatus = evidence.overall_status || 'no_claims';
+        const overallClass = overallStatus === 'contains_rejected_claims'
+            ? 'research-fail'
+            : (['empirical', 'conditional'].includes(overallStatus) ? 'research-safe' : 'research-risk');
+        const integrity = (evidence.argument_integrity || {}).status;
+        const integrityClass = integrity === 'pass' ? 'research-safe' : 'research-fail';
+        const readinessTracks = spec.readiness_by_track || {};
+        const supportedClaims = (evidence.claims || []).filter(claim => ['accepted_with_scope', 'restricted'].includes(claim.disposition)).length;
+        const pendingClaims = (evidence.claims || []).filter(claim => claim.disposition === 'unresolved').length;
+        html += '<details class="research-section" open><summary>数学规范与论证证据</summary>';
+        html += `<div class="research-metrics"><span><small>机理数学结构</small><strong>${escapeHtml(researchStatusText(readinessTracks.mechanistic_structure || spec.readiness))}</strong></span><span><small>数值执行</small><strong>${escapeHtml(researchStatusText(readinessTracks.numerical_execution || 'not_assessed'))}</strong></span><span><small>观测数据建模</small><strong>${escapeHtml(researchStatusText(readinessTracks.observational_modeling || 'not_assessed'))}</strong></span><span><small>论证总状态</small><strong class="${overallClass}">${escapeHtml(evidence.overall_label || '尚无数值结论')}</strong></span><span><small>有据结论 / 待验证</small><strong>${supportedClaims} / ${pendingClaims}</strong></span><span><small>证据引用完整性</small><strong class="${integrityClass}">${escapeHtml(researchStatusText(integrity || '-'))}</strong></span></div>`;
+        const roleLabels = { spatial_entities: '空间实体', stated_parameters: '题面参数', treatment: '处理变量', outcome: '结果变量', target: '目标变量', time: '时间变量' };
+        const roles = Object.entries(spec.role_bindings || {}).map(([role, value]) => `${roleLabels[role] || role}=${value}`).join('；') || '尚无显式角色绑定';
+        const pendingRequirements = (spec.missing_requirements || []).map(researchRequirementText).join('；') || '无';
+        html += `<p class="hint"><strong>已绑定角色：</strong>${escapeHtml(roles)}<br><strong>未执行节点仍需：</strong>${escapeHtml(pendingRequirements)}<br><strong>静态矛盾：</strong>${escapeHtml((spec.contradictions || []).map(item => item.message).join('；') || '未发现')}</p>`;
+        if ((evidence.claims || []).length) {
+            html += '<h4>结论分级与处置</h4><div class="table-wrapper"><table class="data-table"><thead><tr><th>等级</th><th>结论</th><th>处置</th><th>适用边界</th></tr></thead><tbody>';
+            evidence.claims.slice(0, 30).forEach(claim => {
+                const claimClass = claim.disposition === 'rejected' ? 'research-fail' : (claim.disposition === 'unresolved' ? 'research-risk' : 'research-safe');
+                html += `<tr><td><span class="${claimClass}">${escapeHtml(claim.label || '-')}</span></td><td>${escapeHtml(claim.statement || '-')}</td><td>${escapeHtml(researchStatusText(claim.disposition || '-'))}</td><td>${escapeHtml(claim.scope || '-')}</td></tr>`;
+            });
+            html += '</tbody></table></div>';
+        }
+        const criticalAssumptions = (evidence.assumption_ledger || []).filter(item => item.critical && item.status !== 'checked');
+        if (criticalAssumptions.length) {
+            html += '<h4>仍限制结论的关键假设</h4><div class="table-wrapper"><table class="data-table"><thead><tr><th>假设</th><th>状态</th><th>当前证据</th><th>补强方式</th></tr></thead><tbody>';
+            criticalAssumptions.slice(0, 20).forEach(item => {
+                const assumptionClass = item.status === 'failed' ? 'research-fail' : 'research-risk';
+                html += `<tr><td>${escapeHtml(item.text || '-')}</td><td><span class="${assumptionClass}">${escapeHtml(item.status || '-')}</span></td><td>${escapeHtml(item.evidence || '-')}</td><td>${escapeHtml(item.falsification || '-')}</td></tr>`;
+            });
+            html += '</tbody></table></div>';
+        }
+        if ((evidence.model_tournament || []).length) {
+            html += `<p class="hint"><strong>竞争模型：</strong>已记录 ${evidence.model_tournament.length} 组候选比较；被选模型仍须通过独立确认与反证，胜出不等于真实。</p>`;
+        }
+        html += '<p class="research-warning">论文写作 API 当前关闭。它在最后阶段只能改写获准结论，并必须保留假设、边界和反证。</p></details>';
+    }
+
+    const taskGraph = result.problem_analysis.task_graph || [];
+    if (taskGraph.length) {
+        html += '<details class="research-section" open><summary>多子问题执行图</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>节点</th><th>识别任务</th><th>状态</th><th>上游</th><th>证据与缺失条件</th></tr></thead><tbody>';
+        taskGraph.forEach(node => {
+            const dependencies = (node.depends_on || []).join('、') || '-';
+            const missing = (node.missing_requirements || []).length ? `；缺少：${node.missing_requirements.map(researchRequirementText).join('、')}` : '';
+            html += `<tr><td><strong>${escapeHtml(node.id || '-')}</strong><br><small>${escapeHtml(node.text || '')}</small></td><td>${escapeHtml(node.task_type || '-')}</td><td><span class="capability-status status-${escapeHtml(node.status || 'planned')}">${escapeHtml(researchStatusText(node.status || 'planned'))}</span></td><td>${escapeHtml(dependencies)}</td><td>${escapeHtml((node.evidence || '-') + missing)}</td></tr>`;
+        });
+        html += '</tbody></table></div><p class="hint">后续问题会显式引用上游结果；上游证据不足时，下游节点会标记为 blocked，而不是继续编造数值。</p></details>';
+    }
+
+    if (profiles.length) {
+    html += '<details class="research-section" open><summary>数据集角色与结构</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>数据集</th><th>角色</th><th>规模</th><th>数值/类别/时间列</th><th>目标候选</th></tr></thead><tbody>';
+    profiles.forEach(profile => {
+        const candidates = (profile.target_candidates || []).slice(0, 2).map(item => `${item.column} (${Math.round(item.score * 100)}%)`).join('、') || '-';
+        html += `<tr><td>${escapeHtml(profile.name)}</td><td><span class="research-role role-${escapeHtml(profile.role)}">${escapeHtml(profile.role)}</span></td><td>${Number(profile.source_rows).toLocaleString()} × ${profile.n_columns}</td><td>${profile.numeric_columns.length} / ${profile.categorical_columns.length} / ${profile.datetime_columns.length}</td><td>${escapeHtml(candidates)}</td></tr>`;
+    });
+    html += '</tbody></table></div></details>';
+
+    html += '<details class="research-section" open><summary>自动发现的数据关系</summary>';
+    if (relations.length) {
+        html += '<div class="research-relation-list">';
+        relations.slice(0, 20).forEach(relation => {
+            const safety = relation.safe_to_join ? '<span class="research-safe">可安全关联</span>' : '<span class="research-risk">需先聚合</span>';
+            html += `<div class="research-relation"><div><strong>${escapeHtml(relation.left_dataset)}.${escapeHtml(relation.left_key)}</strong><span> ↔ </span><strong>${escapeHtml(relation.right_dataset)}.${escapeHtml(relation.right_key)}</strong></div><div>${escapeHtml(relation.relationship)} · 置信度 ${relation.confidence}% · 值域覆盖 ${Math.round(relation.value_overlap * 100)}% ${safety}</div>${relation.warning ? `<small>${escapeHtml(relation.warning)}</small>` : ''}</div>`;
+        });
+        html += '</div>';
+    } else {
+        html += '<p class="hint">没有发现证据充分的跨表键；系统不会凭列位置强行拼接数据。</p>';
+    }
+    html += '</details>';
+    html += '<details class="research-section" open><summary>跨数据集交互结论</summary>';
+    if (interactions.length) {
+        html += '<ol class="research-findings">';
+        interactions.slice(0, 12).forEach(item => {
+            const interval = item.confidence_interval ? `，区间=[${formatResearchValue(item.confidence_interval[0])}, ${formatResearchValue(item.confidence_interval[1])}]` : '';
+            const qValue = item.q_value !== null && item.q_value !== undefined ? '，FDR q=' + formatResearchValue(item.q_value) : '';
+            const conditional = item.conditional_strength !== null && item.conditional_strength !== undefined ? '，条件ρ=' + formatResearchValue(item.conditional_strength) : '';
+            const stability = item.stability_score !== null && item.stability_score !== undefined ? '，稳定性=' + Math.round(item.stability_score * 100) + '%' : '';
+            const significance = item.significant === true
+                ? ' <span class="research-safe">FDR显著</span>'
+                : (item.significant === false
+                    ? ' <span class="research-risk">FDR不显著，仅探索</span>'
+                    : ' <span class="research-warning">未检验显著性</span>');
+            html += `<li><strong>${escapeHtml(item.method)}=${formatResearchValue(item.strength)}</strong> ${escapeHtml(item.interpretation)}${significance} <small>n=${item.sample_size}${item.p_value !== null && item.p_value !== undefined ? '，p=' + formatResearchValue(item.p_value) : ''}${qValue}${interval}${conditional}${stability}</small></li>`;
+        });
+        html += '</ol>';
+    } else {
+        html += '<p class="hint">当前阈值下没有发现稳定的跨表数值关系，报告中保留了非线性和时滞分析建议。</p>';
+    }
+    html += '</details>';
+    }
+
+    if (result.capability_report) {
+        html += '<details class="research-section" open><summary>题型执行能力与待补充条件</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>识别任务</th><th>状态</th><th>执行证据</th><th>仍需条件</th></tr></thead><tbody>';
+        (result.capability_report.tasks || []).forEach(item => {
+            const requirement = item.requirement ? String(item.requirement).split('；').map(researchRequirementText).join('；') : '-';
+            html += `<tr><td>${escapeHtml(item.task_type)}</td><td><span class="capability-status status-${escapeHtml(item.status)}">${escapeHtml(researchStatusText(item.status))}</span></td><td>${escapeHtml(item.evidence || '-')}</td><td>${escapeHtml(requirement)}</td></tr>`;
+        });
+        html += '</tbody></table></div><div class="robustness-guards">';
+        (result.capability_report.robustness_guards || []).forEach(item => { html += `<span>✓ ${escapeHtml(item)}</span>`; });
+        html += '</div></details>';
+    }
+
+    const specialized = result.specialized_results || {};
+    const mechanismCandidate = specialized.mechanistic_model || null;
+    const mechanismIrCandidate = (mechanismCandidate || {}).mathematical_ir || {};
+    const hasMechanism = (mechanismCandidate || {}).presentation_scope !== 'internal_semantic_support' && Boolean(mechanismCandidate) && (
+        ((mechanismCandidate.operator_graph || []).length > 0) ||
+        ['entities', 'quantities', 'relations', 'objectives', 'constraints']
+            .some(key => (mechanismIrCandidate[key] || []).length > 0) ||
+        ![undefined, null, 'not_configured'].includes(
+            (mechanismCandidate.semantic_model_compilation || {}).status
+        )
+    );
+    const hasOtherSpecialized = Object.entries(specialized)
+        .some(([key, value]) => key !== 'mechanistic_model' && Boolean(value));
+    if (hasMechanism || hasOtherSpecialized) {
+        html += '<details class="research-section" open><summary>专项数学分析</summary>';
+        const dataCompilation = specialized.mathematical_data_compilation || null;
+        if (dataCompilation) {
+            const contract = dataCompilation.contract || {};
+            const compilationSummary = dataCompilation.summary || {};
+            const compilationClass = dataCompilation.status === 'contradicted'
+                ? 'research-fail'
+                : (dataCompilation.status === 'assessed' ? 'research-safe' : 'research-risk');
+            html += `<h4>数学数据多视图编译 <span class="${compilationClass}">${escapeHtml(dataCompilation.status || '-')}</span></h4>`;
+            html += `<div class="research-metrics"><span><small>主估计数据集</small><strong>${escapeHtml(dataCompilation.dataset || '-')}</strong></span><span><small>目标</small><strong>${escapeHtml(contract.target || '未绑定')}</strong></span><span><small>观测粒度</small><strong>${escapeHtml((contract.observed_grain || []).join(' × ') || '未验证')}</strong><small>${escapeHtml(contract.grain_status || '-')}</small></span><span><small>审计行数</small><strong>${Number(compilationSummary.audited_rows || 0).toLocaleString()} / ${Number(compilationSummary.source_rows || 0).toLocaleString()}</strong></span><span><small>编译耗时</small><strong>${Number((compilationSummary.timing_ms || {}).multi_table_total ?? (compilationSummary.timing_ms || {}).total ?? 0).toFixed(1)} ms</strong></span><span><small>候选通过</small><strong>${compilationSummary.admissible_views || 0} / ${compilationSummary.candidate_views || 0}</strong></span><span><small>跨表阻断</small><strong class="${compilationSummary.blocked_cross_dataset_contracts ? 'research-fail' : 'research-safe'}">${compilationSummary.blocked_cross_dataset_contracts || 0}</strong></span><span><small>方向翻转</small><strong class="${compilationSummary.direction_reversals ? 'research-fail' : 'research-safe'}">${compilationSummary.direction_reversals || 0}</strong></span></div>`;
+            html += `<p class="hint"><strong>估计对象：</strong>${escapeHtml(contract.estimand || '-')}</p>`;
+            const reversedRelationships = ((dataCompilation.conclusion_stress || {}).relationships || [])
+                .filter(item => item.status === 'contradicted');
+            if (reversedRelationships.length) {
+                html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>被反证关系</th><th>全局ρ / 95%区间</th><th>全局FDR q</th><th>翻转视图</th><th>处置</th></tr></thead><tbody>';
+                reversedRelationships.slice(0, 20).forEach(item => {
+                    const global = (item.contexts || []).find(context => context.view === 'global_complete_case');
+                    const interval = (global?.confidence_interval_95 || []).join(', ');
+                    html += `<tr><td>${escapeHtml(item.predictor)} → ${escapeHtml(item.target)}</td><td>${global?.rho ?? '-'}<br><small>[${escapeHtml(interval || '-')} ]</small></td><td>${item.global_fdr_q ?? '-'}</td><td>${escapeHtml((item.direction_flips || []).map(flip => flip.against).join('、') || '-')}</td><td class="research-fail">禁止写成稳定规律</td></tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+            const crossContracts = dataCompilation.cross_dataset_contracts || [];
+            if (crossContracts.length) {
+                html += '<h4>跨表粒度与连接契约</h4><div class="table-wrapper"><table class="data-table"><thead><tr><th>数据表</th><th>复合键</th><th>基数</th><th>膨胀</th><th>时间对齐</th><th>处置</th></tr></thead><tbody>';
+                crossContracts.slice(0, 30).forEach(item => {
+                    const keys = (item.key_pairs || []).map(pair => `${pair.left}↔${pair.right}`).join('、') || '未验证';
+                    const contractClass = item.status === 'blocked' ? 'research-fail'
+                        : (item.status === 'admissible' ? 'research-safe' : 'research-risk');
+                    const reaudit = item.full_cardinality_reaudit_required ? '；需全表复审' : '';
+                    html += `<tr><td>${escapeHtml(item.left_dataset)} ↔ ${escapeHtml(item.right_dataset)}</td><td>${escapeHtml(keys)}</td><td>${escapeHtml(item.relationship || '-')}</td><td>${item.estimated_expansion ?? '-'}</td><td>${item.point_in_time_required ? '必须 point-in-time' : '普通键对齐'}</td><td><span class="${contractClass}">${escapeHtml(item.status || '-')}</span><br><small>${escapeHtml((item.combined_additive_analysis || item.evidence || '-') + reaudit)}</small></td></tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+            (dataCompilation.findings || []).forEach(item => {
+                html += `<p class="${['contradicted', 'blocked'].includes(item.level) ? 'research-warning' : 'hint'}">${escapeHtml(item.message || '')} ${escapeHtml(item.action || '')}</p>`;
+            });
+        }
+        const mechanism = hasMechanism ? mechanismCandidate : null;
+        if (mechanism) {
+            const mathIr = mechanism.mathematical_ir || {};
+            const compiler = mechanism.compiler_plan || {};
+            const modelDraft = mechanism.model_draft || {};
+            const audit = mechanism.credibility_audit || {};
+            const semanticModel = mechanism.semantic_model_compilation || {};
+            const fourLayer = mechanism.four_layer_pipeline || {};
+            const semanticContract = fourLayer.semantic_contract || {};
+            const unifiedIr = fourLayer.mathematical_ir || {};
+            const solverPlan = fourLayer.solver_plan || {};
+            const independentAudit = fourLayer.independent_audit || {};
+            const requirementLabels = {
+                machine_readable_equations_or_algorithms: '可机器读取的方程或算法',
+                verified_symbol_and_unit_bindings: '题面符号、单位与规范方程的最终核验',
+                decision_variables: '决策变量', objective_function: '目标函数',
+                constraints_and_bounds: '约束与变量边界', state_variables: '状态变量',
+                initial_conditions: '初始条件', boundary_conditions: '边界条件',
+                dynamics_or_transition_rule: '动力学或状态转移规则',
+                geometry_definition: '几何对象与距离定义', event_definition: '事件判定定义',
+                testable_hypothesis: '可检验假设', variables_and_sampling_unit: '变量与样本单位'
+            };
+            const stageLabels = {
+                problem_decomposition: '问题分解', quantity_and_entity_extraction: '实体与显式量抽取',
+                operator_composition: '通用算子组合', canonical_equation_draft: '规范方程草案',
+                operator_selection: '算子选择', binding: '角色绑定'
+            };
+            const humanRequirement = value => requirementLabels[value] || stageLabels[value] || researchRequirementText(value);
+            const auditClass = audit.status === 'pass' ? 'research-safe' : (audit.status === 'fail' ? 'research-fail' : 'research-risk');
+            if (semanticModel.status && semanticModel.status !== 'not_configured') {
+                const semanticConfig = semanticModel.configuration || {};
+                const semanticClass = ['accepted', 'partially_accepted'].includes(semanticModel.status)
+                    ? 'research-safe'
+                    : (semanticModel.status === 'failed_safe' ? 'research-risk' : 'research-warning');
+                html += `<h4>受约束语义模型编译 <span class="${semanticClass}">${escapeHtml(researchStatusText(semanticModel.status))}</span></h4>`;
+                html += `<div class="research-metrics"><span><small>模型后端</small><strong>${escapeHtml(semanticConfig.provider || '-')}</strong></span><span><small>模型</small><strong>${escapeHtml(semanticConfig.model_name || '-')}</strong></span><span><small>接受 / 延后</small><strong>${semanticModel.accepted_count || 0} / ${semanticModel.deferred_count || 0}</strong></span><span><small>密钥写入产物</small><strong>否</strong></span></div>`;
+                html += '<p class="hint">模型只提出候选 IR；逐字段题面引文、数值溯源和确定性契约校验全部通过后才能执行。</p>';
+                if (semanticModel.error) {
+                    html += `<p class="research-warning"><strong>已安全降级：</strong>${escapeHtml(semanticModel.error)}</p>`;
+                }
+                (semanticModel.deferred_proposals || []).slice(0, 12).forEach(item => {
+                    html += `<p class="research-warning"><strong>延后 ${escapeHtml(item.id || String(item.index ?? '-'))}：</strong>${escapeHtml((item.errors || []).join('；') || '未通过语义证据门')}</p>`;
+                });
+            }
+            if (fourLayer.schema_version) {
+                const planBudget = solverPlan.budget_summary || {};
+                const auditCoverage = independentAudit.coverage || {};
+                const structureCatalog = unifiedIr.structure_catalog || [];
+                const candidateStructures = semanticContract.candidate_structures || [];
+                const implementedStructures = structureCatalog.filter(item => item.execution_status === 'implemented').length;
+                const layerAuditClass = independentAudit.status === 'pass' ? 'research-safe' : (independentAudit.status === 'fail' ? 'research-fail' : 'research-risk');
+                html += `<h4>四层数学建模流水线 <span class="${layerAuditClass}">${escapeHtml(independentAudit.status || '-')}</span></h4>`;
+                html += `<div class="research-metrics"><span><small>①题意契约</small><strong>${escapeHtml(researchStatusText(semanticContract.status || '-'))}</strong></span><span><small>②统一 IR</small><strong>${escapeHtml(researchStatusText(unifiedIr.status || '-'))}</strong></span><span><small>③结构选解</small><strong>${escapeHtml(researchStatusText(solverPlan.status || '-'))}</strong></span><span><small>④独立审计</small><strong>${escapeHtml(independentAudit.status || '-')}</strong></span><span><small>可运行 / 延后</small><strong>${planBudget.runnable_nodes || 0} / ${planBudget.deferred_nodes || 0}</strong></span><span><small>仅语义候选</small><strong>${((unifiedIr.validation || {}).semantic_candidates) || 0}</strong></span><span><small>审计覆盖</small><strong>${auditCoverage.audited_results || 0} / ${auditCoverage.executed_results || 0}</strong></span><span><small>数学结构目录</small><strong>${structureCatalog.length}</strong></span><span><small>已实现 / 仅识别</small><strong>${implementedStructures} / ${structureCatalog.length - implementedStructures}</strong></span></div>`;
+                html += '<p class="hint">求解器只按数学形式选择；单节点失败会被隔离，数值成功不会自动等同于模型正确。</p>';
+                html += `<p class="hint"><strong>题面结构候选：</strong>${escapeHtml(candidateStructures.map(item => item.key).join('、') || '未可靠识别')}。关键词命中只生成候选，不会直接放行数值执行。</p>`;
+                if ((solverPlan.nodes || []).length) {
+                    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>统一 IR 节点</th><th>数学形式</th><th>求解器族</th><th>状态</th><th>预算</th></tr></thead><tbody>';
+                    solverPlan.nodes.slice(0, 40).forEach(node => {
+                        const budget = node.resource_budget || {};
+                        const budgetText = `变量≤${budget.max_variables ?? '-'}；评估≤${budget.max_evaluations ?? '-'}；软墙钟预算 ${budget.wall_time_budget_seconds ?? '-'}s`;
+                        html += `<tr><td>${escapeHtml(node.ir_node_id || '-')}</td><td>${escapeHtml(node.mathematical_form || '-')}</td><td>${escapeHtml(node.solver_family || '-')}</td><td>${escapeHtml(researchStatusText(node.status || '-'))}</td><td>${escapeHtml(budgetText)}</td></tr>`;
+                    });
+                    html += '</tbody></table></div>';
+                }
+                if ((unifiedIr.deferred_semantic_relations || []).length) {
+                    html += '<details><summary>未进入求解计划的语义候选</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>关系</th><th>类型</th><th>原因</th><th>原文证据</th></tr></thead><tbody>';
+                    unifiedIr.deferred_semantic_relations.slice(0, 30).forEach(item => {
+                        html += `<tr><td>${escapeHtml(item.relation_id || '-')}</td><td>${escapeHtml(item.kind || '-')}</td><td>${escapeHtml(item.reason || '-')}</td><td>${escapeHtml(item.source_text || '-')}</td></tr>`;
+                    });
+                    html += '</tbody></table></div></details>';
+                }
+                if (structureCatalog.length) {
+                    html += '<details><summary>通用数学结构能力矩阵</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>数学结构</th><th>家族</th><th>后端状态</th><th>求解器</th><th>结构化契约必需字段</th></tr></thead><tbody>';
+                    structureCatalog.forEach(item => {
+                        const solver = item.solver || {};
+                        const status = item.execution_status === 'implemented' ? '已实现' : '仅识别';
+                        html += `<tr><td>${escapeHtml(item.key || '-')}</td><td>${escapeHtml(item.family || '-')}</td><td>${escapeHtml(status)}</td><td>${escapeHtml(solver.solver_family || '-')}</td><td>${escapeHtml((item.required_contract_fields || []).join('、') || '-')}</td></tr>`;
+                    });
+                    html += '</tbody></table></div></details>';
+                }
+                if ((independentAudit.execution_failures || []).length) {
+                    html += `<p class="research-warning"><strong>已隔离失败节点：</strong>${escapeHtml(JSON.stringify(independentAudit.execution_failures))}</p>`;
+                }
+            }
+            html += `<h4>纯题面通用数学 IR <span class="${auditClass}">${escapeHtml(audit.label || '-')}</span></h4>`;
+            html += `<div class="research-metrics"><span><small>执行状态</small><strong>${escapeHtml(researchStatusText(mechanism.execution_status || '-'))}</strong></span><span><small>模型草案</small><strong>${escapeHtml(researchStatusText(modelDraft.status || '-'))}</strong></span><span><small>实体</small><strong>${(mathIr.entities || []).length}</strong></span><span><small>显式量</small><strong>${(mathIr.quantities || []).length}</strong></span><span><small>数学关系</small><strong>${(mathIr.relations || []).length}</strong></span><span><small>通用算子</small><strong>${(mechanism.operator_graph || []).length}</strong></span><span><small>规范方程</small><strong>${(modelDraft.equations || []).length}</strong></span></div>`;
+            if ((modelDraft.completed_stages || []).length) {
+                html += `<p class="hint"><strong>已经完成：</strong>${escapeHtml(modelDraft.completed_stages.map(humanRequirement).join(' → '))}</p>`;
+            }
+            if ((mechanism.operator_graph || []).length) {
+                html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>算子</th><th>类别</th><th>状态</th><th>求解路线</th><th>未绑定角色</th></tr></thead><tbody>';
+                mechanism.operator_graph.slice(0, 30).forEach(node => {
+                    html += `<tr><td>${escapeHtml(node.key || '-')}</td><td>${escapeHtml(node.category || '-')}</td><td>${escapeHtml(researchStatusText(node.status || '-'))}</td><td>${escapeHtml(node.solver_route || '-')}</td><td>${escapeHtml((node.missing_bindings || []).map(humanRequirement).join('、') || '-')}</td></tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+            if ((modelDraft.equations || []).length) {
+                html += '<h4>规范方程草案</h4><div class="table-wrapper"><table class="data-table"><thead><tr><th>通用算子</th><th>规范形式</th><th>状态</th><th>仍需绑定</th></tr></thead><tbody>';
+                modelDraft.equations.slice(0, 30).forEach(equation => {
+                    const missing = (equation.missing_bindings || []).map(humanRequirement).join('、') || '无';
+                    html += `<tr><td>${escapeHtml(equation.operator || '-')}</td><td><code>${escapeHtml(equation.expression || '-')}</code></td><td>${escapeHtml(researchStatusText(equation.status || '-'))}</td><td>${escapeHtml(missing)}</td></tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+            if ((modelDraft.assumption_questions || []).length) {
+                html += '<h4>数值求解前必须回答的假设问题</h4><ul>';
+                modelDraft.assumption_questions.forEach(question => { html += `<li>${escapeHtml(question)}</li>`; });
+                html += '</ul>';
+            }
+            const blockers = compiler.blocked_by || mechanism.missing_requirements || [];
+            if (blockers.length) {
+                html += `<p class="research-warning"><strong>数学草案已建立，但数值求解仍待补：</strong>${escapeHtml(blockers.map(humanRequirement).join('；'))}。系统不会把题面散文直接当代码执行。</p>`;
+            }
+            (mechanism.numerical_results || []).slice(0, 6).forEach((numerical, index) => {
+                const convergence = numerical.convergence || {};
+                const convergenceClass = convergence.status === 'pass' ? 'research-safe' : 'research-fail';
+                const resultAudit = numerical.independent_audit || {};
+                const resultAuditClass = resultAudit.status === 'pass' ? 'research-safe' : (resultAudit.status === 'fail' ? 'research-fail' : 'research-risk');
+                html += `<h4>通用数值执行 ${index + 1} · ${escapeHtml(numerical.kind || '-')} <span class="${convergenceClass}">${escapeHtml(convergence.status || '-')}</span> <span class="${resultAuditClass}">独立审计 ${escapeHtml(resultAudit.grade || 'not_assessed')}</span></h4>`;
+                if ((resultAudit.false_confidence_flags || []).length) {
+                    html += `<p class="research-warning"><strong>“似对非对”风险标记：</strong>${escapeHtml(resultAudit.false_confidence_flags.join('、'))}。${escapeHtml(resultAudit.decision || '')}</p>`;
+                }
+                if (numerical.kind === 'kinematic_visibility_event') {
+                    const range = numerical.semantic_duration_range || [];
+                    html += `<div class="research-metrics"><span><small>有效遮蔽时长</small><strong>${formatResearchValue(numerical.duration)} s</strong></span><span><small>有效区间</small><strong>${escapeHtml(JSON.stringify(numerical.effective_intervals || []))}</strong></span><span><small>起爆时刻</small><strong>${formatResearchValue(numerical.activation_time)} s</strong></span><span><small>语义分支范围</small><strong>[${range.map(formatResearchValue).join(', ')}] s</strong></span></div>`;
+                    html += `<p class="hint"><strong>投放点：</strong>${escapeHtml(JSON.stringify(numerical.release_point || []))}<br><strong>起爆点：</strong>${escapeHtml(JSON.stringify(numerical.activation_point || []))}<br><strong>网格加密最大时长差：</strong>${formatResearchValue(convergence.maximum_duration_difference)} s<br><strong>可信度边界：</strong>${escapeHtml((numerical.credibility_audit || {}).decision || '-')}</p>`;
+                } else if (numerical.kind === 'kinematic_visibility_optimization_solution') {
+                    const implementation = numerical.implementation_candidate || {};
+                    const feedback = numerical.feedback_optimization || {};
+                    html += `<div class="research-metrics"><span><small>最佳可行时长</small><strong>${formatResearchValue(numerical.duration)} s</strong></span><span><small>多起点近优差</small><strong>${formatResearchValue((numerical.multistart_relative_spread || 0) * 100)}%</strong></span><span><small>扰动最大下降</small><strong>${formatResearchValue((numerical.maximum_relative_sensitivity_drop || 0) * 100)}%</strong></span><span><small>有限候选</small><strong>${numerical.successful_starts || 0}</strong></span></div>`;
+                    html += `<p class="hint"><strong>决策参数：</strong>${escapeHtml(JSON.stringify(numerical.solution || {}))}<br><strong>投放点：</strong>${escapeHtml(JSON.stringify(numerical.release_point || []))}<br><strong>激活点：</strong>${escapeHtml(JSON.stringify(numerical.activation_point || []))}<br><strong>有效区间：</strong>${escapeHtml(JSON.stringify(numerical.effective_intervals || []))}<br><strong>99%近优范围：</strong>${escapeHtml(JSON.stringify(numerical.one_at_a_time_99pct_ranges || {}))}<br><strong>舍入实施方案：</strong>${escapeHtml(JSON.stringify(implementation.solution || {}))}，时长 ${formatResearchValue(implementation.duration)} s，${implementation.accepted ? '可采用' : '舍入损失较大'}<br><strong>相对基线改善：</strong>${feedback.relative_gain == null ? '-' : formatResearchValue(feedback.relative_gain * 100) + '%'}<br><strong>可信度边界：</strong>${escapeHtml((numerical.credibility_audit || {}).decision || '-')}</p>`;
+                } else {
+                    html += `<p class="hint"><strong>求解器：</strong>${escapeHtml(numerical.solver || '-')}<br><strong>状态摘要：</strong>${escapeHtml(JSON.stringify(numerical.summary || {}))}<br><strong>容差复算相对差：</strong>${formatResearchValue(convergence.relative_tolerance_comparison)}</p>`;
+                }
+            });
+            html += `<p class="hint">${escapeHtml(audit.decision || 'IR 编译完成不等于数值答案；数值收敛也不等于机理真实。')}</p>`;
+        }
+        const hierarchicalSales = specialized.hierarchical_distribution || specialized.hierarchical_sales;
+        if (hierarchicalSales) {
+            const hierarchyAudit = hierarchicalSales.credibility_audit || {};
+            const concentration = hierarchicalSales.concentration || {};
+            const parentDimension = hierarchicalSales.parent_dimension || hierarchicalSales.category_column || '上层维度';
+            const childDimension = hierarchicalSales.child_dimension || hierarchicalSales.item_column || '下层维度';
+            html += `<h4>${escapeHtml(parentDimension)}—${escapeHtml(childDimension)}层级分布与剩余联动 <span class="${hierarchyAudit.status === 'pass' ? 'research-safe' : 'research-risk'}">${escapeHtml(hierarchyAudit.label || '-')}</span></h4>`;
+            html += `<div class="research-metrics"><span><small>聚合源行</small><strong>${Number(hierarchicalSales.source_rows_aggregated || 0).toLocaleString()}</strong></span><span><small>日×上层×下层</small><strong>${Number(hierarchicalSales.daily_item_rows || 0).toLocaleString()}</strong></span><span><small>下层对象数</small><strong>${concentration.child_count || concentration.item_count || 0}</strong></span><span><small>下层 HHI</small><strong>${formatResearchValue(concentration.hhi)}</strong></span><span><small>前20份额</small><strong>${formatResearchValue((concentration.top_20_share || 0) * 100)}%</strong></span></div>`;
+            html += `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(parentDimension)}</th><th>总量</th><th>日均</th><th>日标准差</th><th>变异系数</th><th>P10 / 中位数 / P90</th></tr></thead><tbody>`;
+            (hierarchicalSales.parent_summary || hierarchicalSales.category_summary || []).slice(0, 50).forEach(row => {
+                const category = row[parentDimension] ?? '-';
+                html += `<tr><td>${escapeHtml(category)}</td><td>${formatResearchValue(row.total)}</td><td>${formatResearchValue(row.daily_mean)}</td><td>${formatResearchValue(row.daily_std)}</td><td>${formatResearchValue(row.coefficient_of_variation)}</td><td>${formatResearchValue(row.q10)} / ${formatResearchValue(row.median)} / ${formatResearchValue(row.q90)}</td></tr>`;
+            });
+            html += '</tbody></table></div>';
+            const associationRows = [
+                ...(hierarchicalSales.parent_associations || hierarchicalSales.category_associations || []).map(item => ({...item, level: parentDimension})),
+                ...(hierarchicalSales.child_associations || hierarchicalSales.item_associations || []).map(item => ({...item, level: childDimension}))
+            ].slice(0, 60);
+            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>层级</th><th>对象 A</th><th>对象 B</th><th>残差 ρ</th><th>FDR q</th><th>处置</th></tr></thead><tbody>';
+            associationRows.forEach(row => {
+                html += `<tr><td>${row.level}</td><td>${escapeHtml(row.left)}</td><td>${escapeHtml(row.right)}</td><td>${formatResearchValue(row.residual_spearman)}</td><td>${formatResearchValue(row.q_value)}</td><td>${row.significant ? '<span class="research-safe">FDR显著</span>' : '<span class="research-risk">仅探索</span>'}</td></tr>`;
+            });
+            html += `</tbody></table></div><p class="hint">${escapeHtml(hierarchyAudit.decision || '')} ${escapeHtml(hierarchicalSales.note || '')}</p>`;
+        }
+        const groupedForecasts = (specialized.grouped_forecasts || []).length
+            ? specialized.grouped_forecasts
+            : (specialized.grouped_forecast ? [specialized.grouped_forecast] : []);
+        groupedForecasts.forEach(groupedForecast => {
+            const groupedMetrics = groupedForecast.metrics || {};
+            const groupedAudit = groupedForecast.credibility_audit || {};
+            const groupedClass = groupedAudit.status === 'pass' ? 'research-safe' : 'research-risk';
+            html += `<h4>分组时间粒度预测 · ${escapeHtml(groupedForecast.requested_grain || 'group')} <span class="${groupedClass}">${escapeHtml(groupedAudit.label || '-')}</span></h4>`;
+            html += `<div class="research-metrics"><span><small>编译粒度</small><strong>日 × ${escapeHtml(groupedForecast.group_column || '-')}</strong></span><span><small>聚合源行</small><strong>${Number(groupedForecast.source_rows_aggregated || 0).toLocaleString()}</strong></span><span><small>预测组数</small><strong>${groupedForecast.groups_forecast || 0}</strong></span><span><small>预测天数</small><strong>${groupedForecast.horizon_days || 0}</strong></span><span><small>末段RMSE</small><strong>${formatResearchValue(groupedMetrics.terminal_block_rmse)}</strong></span><span><small>季节基线RMSE</small><strong>${formatResearchValue(groupedMetrics.seasonal_naive_rmse)}</strong></span></div>`;
+            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>组</th><th>日期</th><th>点预测</th><th>90%区间</th><th>模型</th></tr></thead><tbody>';
+            (groupedForecast.forecasts || []).slice(0, 500).forEach(row => {
+                html += `<tr><td>${escapeHtml(row.group || '-')}</td><td>${escapeHtml(row.date || '-')}</td><td>${formatResearchValue(row.forecast)}</td><td>[${formatResearchValue(row.lower_90)}, ${formatResearchValue(row.upper_90)}]</td><td>${escapeHtml(row.selected_model || '-')}</td></tr>`;
+            });
+            html += `</tbody></table></div><p class="hint">${escapeHtml(groupedAudit.decision || '')} ${escapeHtml(groupedForecast.note || '')}</p>`;
+        });
+        const prescriptiveDecisions = (specialized.prescriptive_decisions || []).length
+            ? specialized.prescriptive_decisions
+            : (specialized.prescriptive_decision ? [specialized.prescriptive_decision] : []);
+        prescriptiveDecisions.forEach(prescriptive => {
+            const decisionAudit = prescriptive.credibility_audit || {};
+            html += `<h4>预测—补货—定价组合决策 · ${escapeHtml(prescriptive.requested_grain || 'group')} <span class="research-risk">${escapeHtml(decisionAudit.label || '-')}</span></h4>`;
+            const parentCoverage = prescriptive.aggregate_parent_demand_coverage;
+            html += `<div class="research-metrics"><span><small>数学形式</small><strong>${escapeHtml(prescriptive.mathematical_form || '-')}</strong></span><span><small>决策数</small><strong>${prescriptive.decision_count || 0}</strong></span><span><small>允许调价</small><strong>${prescriptive.price_decision_count || 0}</strong></span><span><small>保持参考价</small><strong>${prescriptive.held_price_count || 0}</strong></span><span><small>数量边界</small><strong>${escapeHtml(JSON.stringify(prescriptive.selection_bounds || '-'))}</strong></span><span><small>最小陈列</small><strong>${formatResearchValue(prescriptive.minimum_display)}</strong></span><span><small>品类需求覆盖</small><strong>${parentCoverage == null ? '-' : `${formatResearchValue(parentCoverage * 100)}%`}</strong></span><span><small>最小缺口验证</small><strong>${prescriptive.hierarchical_lexicographic_verified ? '通过' : '否/不适用'}</strong></span><span><small>成本覆盖</small><strong>${Math.round((prescriptive.cost_coverage || 0) * 100)}%</strong></span><span><small>损耗覆盖</small><strong>${Math.round((prescriptive.loss_coverage || 0) * 100)}%</strong></span></div>`;
+            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>组</th><th>日期</th><th>需求</th><th>建议补货</th><th>补货90%范围</th><th>建议价格</th><th>单位成本</th><th>期望收益</th></tr></thead><tbody>';
+            (prescriptive.decision_rows || []).slice(0, 500).forEach(row => {
+                html += `<tr><td>${escapeHtml(row.group || '-')}</td><td>${escapeHtml(row.date || '-')}</td><td>${formatResearchValue(row.forecast_demand)}</td><td>${formatResearchValue(row.replenishment)}</td><td>[${formatResearchValue(row.lower_replenishment_90)}, ${formatResearchValue(row.upper_replenishment_90)}]</td><td>${formatResearchValue(row.price)}</td><td>${formatResearchValue(row.unit_cost)}</td><td>${formatResearchValue(row.payoff)}</td></tr>`;
+            });
+            html += '</tbody></table></div>';
+            const riskStress = prescriptive.risk_aware_stress_test || null;
+            if (riskStress) {
+                const nominalRisk = riskStress.nominal_selection || {};
+                const robustRisk = riskStress.risk_aware_selection || {};
+                html += `<h5>预测区间情景与下行风险审计</h5><p class="hint">压力权重 ${escapeHtml(JSON.stringify(riskStress.scenario_weights || {}))} 不是经校准的概率；目标为 50% 压力加权期望 + 50% 的 75% 下尾 CVaR。改变决策单元数：${riskStress.changed_decision_unit_count || 0}；${escapeHtml(riskStress.decision || '')}</p>`;
+                html += '<p class="research-warning">压力收益暂按未售出残值为 0、缺货不另计信誉/机会惩罚；存在折价、报废、库存结转或缺货损失时必须重算。</p>';
+                html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>方案</th><th>压力加权期望</th><th>最坏情景</th><th>下尾CVaR</th><th>风险调整收益</th><th>采用</th></tr></thead><tbody>';
+                html += `<tr><td>名义方案</td><td>${formatResearchValue(nominalRisk.stress_weighted_expected_utility)}</td><td>${formatResearchValue(nominalRisk.worst_case_utility)}</td><td>${formatResearchValue(nominalRisk.lower_tail_cvar)}</td><td>${formatResearchValue(nominalRisk.risk_adjusted_utility)}</td><td>${riskStress.adopted ? '否' : '是'}</td></tr>`;
+                html += `<tr><td>风险感知候选</td><td>${formatResearchValue(robustRisk.stress_weighted_expected_utility)}</td><td>${formatResearchValue(robustRisk.worst_case_utility)}</td><td>${formatResearchValue(robustRisk.lower_tail_cvar)}</td><td>${formatResearchValue(robustRisk.risk_adjusted_utility)}</td><td>${riskStress.adopted ? '是' : '仅压力测试'}</td></tr>`;
+                html += '</tbody></table></div>';
+            }
+            const coverageRows = prescriptive.hierarchical_demand_coverage || [];
+            if (coverageRows.length) {
+                html += '<h5>上层品类需求覆盖审计</h5><div class="table-wrapper"><table class="data-table"><thead><tr><th>品类</th><th>日期</th><th>预测需求</th><th>入选单品需求</th><th>缺口</th><th>覆盖率</th></tr></thead><tbody>';
+                coverageRows.slice(0, 200).forEach(row => {
+                    html += `<tr><td>${escapeHtml(row.parent_group || '-')}</td><td>${escapeHtml(row.date || '-')}</td><td>${formatResearchValue(row.target_demand)}</td><td>${formatResearchValue(row.selected_item_demand)}</td><td>${formatResearchValue(row.shortage)}</td><td>${formatResearchValue((row.coverage_ratio || 0) * 100)}%</td></tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+            const costPlusRows = prescriptive.cost_plus_pricing_relationship || [];
+            if (costPlusRows.length) {
+                html += `<h5>成本加成率—销量关系审计（观察性）</h5><p class="hint">售价来自 ${escapeHtml(prescriptive.dataset || '-')}，成本来自 ${escapeHtml(`${prescriptive.cost_dataset || '-'}.${prescriptive.cost_column || '-'}`)}。按日期×品类对齐并去除线性趋势与星期效应；只有 BH-FDR q≤0.05 且前后半段同号才标记为稳定。</p>`;
+                html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>品类</th><th>对齐天数</th><th>中位加成率</th><th>残差相关</th><th>p值</th><th>FDR q值</th><th>前半/后半</th><th>判定</th></tr></thead><tbody>';
+                costPlusRows.forEach(row => {
+                    const first = row.first_half_spearman == null ? '-' : formatResearchValue(row.first_half_spearman);
+                    const second = row.second_half_spearman == null ? '-' : formatResearchValue(row.second_half_spearman);
+                    html += `<tr><td>${escapeHtml(row.group || '-')}</td><td>${row.n_aligned_days || 0}</td><td>${formatResearchValue((row.median_markup_rate || 0) * 100)}%</td><td>${formatResearchValue(row.residual_spearman)}</td><td>${formatResearchValue(row.p_value)}</td><td>${formatResearchValue(row.q_value)}</td><td>${first}/${second}</td><td>${row.significant ? '<span class="research-safe">FDR显著且方向稳定</span>' : '<span class="research-risk">未通过联合门</span>'}</td></tr>`;
+                });
+                html += '</tbody></table></div><p class="research-warning">这是观察性关系，不是调价因果效应；品类成本采用当日单品批发价中位数近似。</p>';
+            }
+            html += `<p class="research-warning">${escapeHtml(decisionAudit.decision || '')}</p><p class="hint">${escapeHtml(prescriptive.note || '')}</p>`;
+        });
+        const dataRequirements = specialized.data_requirements;
+        if (dataRequirements) {
+            html += `<h4>数据需求与可识别性审计 <span class="research-safe">${escapeHtml(researchStatusText(dataRequirements.status || 'executed'))}</span></h4>`;
+            html += `<div class="research-metrics"><span><small>已审计数据集</small><strong>${dataRequirements.observed_dataset_count || 0}</strong></span><span><small>已审计字段</small><strong>${dataRequirements.observed_column_count || 0}</strong></span><span><small>关系证据</small><strong>${dataRequirements.relationship_evidence_count || 0}</strong></span><span><small>建议项</small><strong>${(dataRequirements.recommendations || []).length}</strong></span></div>`;
+            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>优先级</th><th>应补数据角色</th><th>为什么需要</th><th>采集设计</th><th>支持任务</th></tr></thead><tbody>';
+            (dataRequirements.recommendations || []).forEach(item => {
+                html += `<tr><td>${escapeHtml(item.priority || '-')}</td><td>${escapeHtml(item.data_role || '-')}</td><td>${escapeHtml(item.reason || '-')}</td><td>${escapeHtml(item.collection_design || '-')}</td><td>${escapeHtml((item.supports_tasks || []).join('、') || '-')}</td></tr>`;
+            });
+            html += `</tbody></table></div><p class="hint">${escapeHtml(dataRequirements.note || '')}</p>`;
+        }
+        const optimization = specialized.optimization;
+        if (optimization) {
+            const audit = optimization.credibility_audit || {};
+            const auditClass = audit.status === 'pass' ? 'research-safe' : (audit.status === 'fail' ? 'research-fail' : 'research-risk');
+            html += `<h4>显式连续线性优化 · HiGHS <span class="${auditClass}">${escapeHtml(audit.label || '-')}</span></h4>`;
+            if (optimization.solver_success) {
+                html += `<div class="research-metrics"><span><small>目标值</small><strong>${formatResearchValue(optimization.objective_value)}</strong></span><span><small>最大约束违反</small><strong>${formatResearchValue(optimization.maximum_constraint_violation)}</strong></span><span><small>最大KKT残差</small><strong>${formatResearchValue((optimization.optimality_certificate || {}).maximum_kkt_residual)}</strong></span><span><small>扰动成功次数</small><strong>${(optimization.sensitivity || {}).successful_runs || 0}</strong></span><span><small>中位方案变化</small><strong>${formatResearchValue((optimization.sensitivity || {}).median_relative_solution_shift)}</strong></span></div>`;
+                html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>决策变量</th><th>最优值</th><th>近优范围</th></tr></thead><tbody>';
+                Object.entries(optimization.solution || {}).forEach(([name, value]) => {
+                    const range = (optimization.near_optimal_ranges || {})[name] || [null, null];
+                    html += `<tr><td>${escapeHtml(name)}</td><td>${formatResearchValue(value)}</td><td>[${range.map(formatResearchValue).join(', ')}]</td></tr>`;
+                });
+                html += '</tbody></table></div>';
+                const robust = optimization.robust_feedback || {};
+                if (robust.attempted) {
+                    html += `<p class="hint"><strong>结果反馈的稳健候选：</strong>${escapeHtml(JSON.stringify(robust.candidate_solution || {}))}<br>最坏归一化遗憾：${formatResearchValue(robust.nominal_worst_normalized_regret)} → ${formatResearchValue(robust.candidate_worst_normalized_regret)}；改善 ${formatResearchValue((robust.relative_regret_reduction || 0) * 100)}%。由于5%扰动范围尚未由题目确认，系统不会自动替换名义最优解。</p>`;
+                }
+            } else {
+                html += `<p class="research-warning">未得到可行有限最优解：${escapeHtml(optimization.message || '-')}</p>`;
+            }
+            html += `<p><strong>${escapeHtml(audit.decision || '')}</strong></p><p class="hint">${escapeHtml(optimization.note || '')}</p>`;
+        }
+        const graph = specialized.graph_network;
+        if (graph) {
+            html += `<h4>网络结构 · ${escapeHtml(graph.dataset)}</h4><div class="research-metrics"><span><small>节点</small><strong>${graph.n_nodes}</strong></span><span><small>唯一边</small><strong>${graph.n_unique_edges}</strong></span><span><small>连通分量</small><strong>${graph.connected_components}</strong></span><span><small>网络密度</small><strong>${formatResearchValue(graph.density)}</strong></span></div><p class="hint">${escapeHtml(graph.note || '')}</p>`;
+        }
+        const simulation = specialized.simulation;
+        if (simulation) {
+            html += `<h4>Bootstrap 不确定性 · ${escapeHtml(simulation.dataset)}.${escapeHtml(simulation.variable)}</h4><div class="research-metrics"><span><small>观测均值</small><strong>${formatResearchValue(simulation.observed_mean)}</strong></span><span><small>标准差</small><strong>${formatResearchValue(simulation.observed_std)}</strong></span><span><small>均值95%区间</small><strong>[${simulation.mean_confidence_interval_95.map(formatResearchValue).join(', ')}]</strong></span><span><small>仿真次数</small><strong>${simulation.iterations}</strong></span></div><p class="hint">${escapeHtml(simulation.note || '')}</p>`;
+        }
+        const dynamics = specialized.time_dynamics;
+        if (dynamics) {
+            html += `<h4>时序动力特征 · ${escapeHtml(dynamics.dataset)}.${escapeHtml(dynamics.variable)}</h4><div class="research-metrics"><span><small>时间点</small><strong>${dynamics.n_time_points}</strong></span><span><small>日趋势</small><strong>${formatResearchValue(dynamics.linear_trend_per_day)}</strong></span><span><small>残差标准差</small><strong>${formatResearchValue(dynamics.residual_std)}</strong></span><span><small>中位间隔/天</small><strong>${formatResearchValue(dynamics.median_interval_days)}</strong></span></div><p class="hint">${escapeHtml(dynamics.note || '')}</p>`;
+        }
+        const equation = specialized.equation_discovery;
+        if (equation) {
+            const audit = equation.credibility_audit || {};
+            const auditClass = audit.status === 'pass' ? 'research-safe' : (audit.status === 'fail' ? 'research-fail' : 'research-risk');
+            html += `<h4>积分弱形式候选方程 · ${escapeHtml(equation.dataset)}.${escapeHtml(equation.target)} <span class="${auditClass}">${escapeHtml(audit.label || '-')}</span></h4>`;
+            html += `<pre class="code-block">${escapeHtml(equation.equation || '-')}</pre><div class="research-metrics"><span><small>时间点</small><strong>${equation.n_time_points}</strong></span><span><small>训练窗口</small><strong>${equation.training_windows}</strong></span><span><small>验证窗口</small><strong>${equation.validation_windows}</strong></span><span><small>验证 R²</small><strong>${formatResearchValue((equation.metrics || {}).validation_r2)}</strong></span><span><small>项集稳定性</small><strong>${formatResearchValue((equation.metrics || {}).support_jaccard)}</strong></span></div><p><strong>${escapeHtml(audit.decision || '')}</strong></p><p class="hint">${escapeHtml(equation.note || '')}</p>`;
+        }
+        const causal = specialized.causal_effect;
+        if (causal) {
+            const audit = causal.credibility_audit || {};
+            const auditClass = audit.status === 'pass' ? 'research-safe' : (audit.status === 'fail' ? 'research-fail' : 'research-risk');
+            html += `<h4>正交化因果效应 · ${escapeHtml(causal.treatment)} → ${escapeHtml(causal.outcome)} <span class="${auditClass}">${escapeHtml(audit.label || '-')}</span></h4>`;
+            html += `<div class="research-metrics"><span><small>处理效应</small><strong>${formatResearchValue(causal.effect)}</strong></span><span><small>95%区间</small><strong>[${(causal.confidence_interval_95 || []).map(formatResearchValue).join(', ')}]</strong></span><span><small>p值</small><strong>${formatResearchValue(causal.p_value)}</strong></span><span><small>安慰剂p值</small><strong>${formatResearchValue(causal.placebo_p_value)}</strong></span><span><small>重叠/残差变异</small><strong>${formatResearchValue((causal.overlap_share || 0) * 100)}%</strong></span></div><p><strong>${escapeHtml(audit.decision || '')}</strong></p><p class="hint">${escapeHtml(causal.note || '')}</p>`;
+        }
+        const structures = specialized.data_structure || [];
+        structures.forEach(structure => {
+            const audit = structure.credibility_audit || {};
+            const auditClass = audit.status === 'pass' ? 'research-safe' : (audit.status === 'fail' ? 'research-fail' : 'research-risk');
+            html += `<h4>潜在结构与稳健异常 · ${escapeHtml(structure.dataset)} <span class="${auditClass}">${escapeHtml(audit.label || '未审计')}</span></h4>`;
+            html += `<div class="research-metrics"><span><small>原始维数</small><strong>${structure.original_dimensions}</strong></span><span><small>90%解释率维数</small><strong>${structure.dimensions_90}</strong></span><span><small>累计解释率</small><strong>${formatResearchValue(structure.cumulative_explained_variance * 100)}%</strong></span><span><small>结构异常</small><strong>${structure.anomaly_count} / ${structure.analysis_rows}</strong></span><span><small>扰动名单一致率</small><strong>${formatResearchValue(structure.anomaly_perturbation_jaccard * 100)}%</strong></span><span><small>子空间稳定性</small><strong>${formatResearchValue(structure.subspace_stability)}</strong></span></div>`;
+            html += `<p><strong>${escapeHtml(audit.decision || '')}</strong></p><p class="hint">${escapeHtml(structure.note || '')}</p>`;
+            if ((structure.top_anomalies || []).length) {
+                html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>原始行索引</th><th>稳健异常分数</th><th>重构误差</th><th>主要偏离变量</th><th>是否越阈值</th></tr></thead><tbody>';
+                structure.top_anomalies.slice(0, 10).forEach(row => {
+                    const deviations = (row.dominant_deviations || []).map(item => item.feature).join('、') || '-';
+                    html += `<tr><td>${escapeHtml(row.row_index)}</td><td>${formatResearchValue(row.robust_z)}</td><td>${formatResearchValue(row.reconstruction_error)}</td><td>${escapeHtml(deviations)}</td><td>${row.flagged ? '<span class="research-fail">是</span>' : '否'}</td></tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+        });
+        const customResults = specialized.custom || {};
+        Object.entries(customResults).forEach(([taskType, payload]) => {
+            html += `<h4>扩展分析器 · ${escapeHtml(taskType)}</h4><pre class="code-block">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>`;
+        });
+        html += '</details>';
+    }
+
+    const modelResults = (result.model_results || []).length ? result.model_results : (result.model_result ? [result.model_result] : []);
+    modelResults.forEach((model, modelIndex) => {
+        const modelSubject = model.target ? `${model.dataset}.${model.target}` : model.dataset;
+        const modelTitle = model.task_type === 'clustering' ? '自动聚类' : '自动预测模型';
+        const sequence = modelResults.length > 1 ? ` ${modelIndex + 1}/${modelResults.length}` : '';
+        html += `<details class="research-section" open><summary>${modelTitle}${sequence}：${escapeHtml(modelSubject)}</summary>`;
+        html += `<p>任务：${escapeHtml(model.task_type)}　最佳模型：<strong>${escapeHtml(model.best_model || '-')}</strong>${model.best_k ? '　簇数：' + model.best_k : ''}　样本/特征：${model.n_samples}/${model.n_features}</p><div class="research-metrics">`;
+        Object.entries(model.metrics || {}).forEach(([key, value]) => { html += `<span><small>${escapeHtml(key)}</small><strong>${formatResearchValue(value)}</strong></span>`; });
+        html += '</div>';
+        const feedback = model.feedback_optimization || {};
+        if (feedback.enabled !== undefined) {
+            const feedbackStatus = feedback.accepted ? '<span class="research-safe">已采用调优结果</span>' : (feedback.attempted ? '<span class="research-risk">保留基线</span>' : '<span>未执行</span>');
+            html += `<h4 style="margin:12px 0 6px;">验证结果反馈优化 ${feedbackStatus}</h4><p class="hint">${escapeHtml(feedback.reason || '')}</p>`;
+            if (feedback.attempted) {
+                html += `<div class="research-metrics"><span><small>基线 ${escapeHtml(feedback.primary_metric || '')}</small><strong>${formatResearchValue(feedback.baseline_score)}</strong></span><span><small>调优结果</small><strong>${formatResearchValue(feedback.tuned_score)}</strong></span><span><small>相对改善</small><strong>${formatResearchValue((feedback.relative_gain || 0) * 100)}%</strong></span><span><small>改善概率</small><strong>${formatResearchValue((feedback.improvement_probability || 0) * 100)}%</strong></span><span><small>采用阈值</small><strong>${formatResearchValue((feedback.acceptance_threshold || 0) * 100)}%</strong></span><span><small>独立确认样本</small><strong>${feedback.confirmation_samples || 0}</strong></span></div>`;
+                html += `<p class="hint">候选依据：${escapeHtml(feedback.candidate_selection_reason || '-')}<br>确认方式：${escapeHtml(feedback.confirmation || '-')}；参数选择与最终复核使用不同数据。</p>`;
+            }
+            const recommendations = ((feedback.diagnostics || {}).recommendations || []);
+            if (recommendations.length) html += `<p class="hint">诊断：${escapeHtml(recommendations.join('；'))}</p>`;
+        }
+        const credibility = model.credibility_audit || {};
+        if (credibility.enabled !== undefined) {
+            const auditClass = credibility.status === 'pass' ? 'research-safe' : (credibility.status === 'fail' ? 'research-fail' : 'research-risk');
+            html += `<h4 style="margin:12px 0 6px;">结果可信度审计 <span class="${auditClass}">${escapeHtml(credibility.label || '证据不足')}</span></h4>`;
+            html += `<p><strong>${escapeHtml(credibility.decision || '')}</strong></p><p class="hint">${escapeHtml(credibility.summary || '')}</p>`;
+            if ((credibility.checks || []).length) {
+                html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>审计项</th><th>状态</th><th>证据</th><th>建议</th></tr></thead><tbody>';
+                credibility.checks.forEach(check => {
+                    const checkClass = check.status === 'pass' ? 'research-safe' : (check.status === 'fail' ? 'research-fail' : 'research-risk');
+                    const statusText = check.status === 'pass' ? '通过' : (check.status === 'fail' ? '失败' : (check.status === 'warning' ? '警告' : '未评估'));
+                    html += `<tr><td>${escapeHtml(check.name || '-')}</td><td><span class="${checkClass}">${statusText}</span></td><td>${escapeHtml(check.evidence || '-')}</td><td>${escapeHtml(check.recommendation || '-')}</td></tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+            if ((credibility.next_actions || []).length) {
+                html += `<p class="research-warning"><strong>优先处理：</strong>${escapeHtml(credibility.next_actions.join('；'))}</p>`;
+            }
+        }
+        const predictionInterval = model.prediction_interval;
+        if (predictionInterval) {
+            const intervalAudit = predictionInterval.credibility_audit || {};
+            const intervalClass = intervalAudit.status === 'pass' ? 'research-safe' : (intervalAudit.status === 'fail' ? 'research-fail' : 'research-risk');
+            html += `<h4 style="margin:12px 0 6px;">保序预测区间 <span class="${intervalClass}">${escapeHtml(intervalAudit.label || '-')}</span></h4><div class="research-metrics"><span><small>目标覆盖率</small><strong>${formatResearchValue(predictionInterval.target_coverage * 100)}%</strong></span><span><small>经验覆盖率</small><strong>${predictionInterval.empirical_coverage == null ? '-' : formatResearchValue(predictionInterval.empirical_coverage * 100) + '%'}</strong></span><span><small>平均宽度</small><strong>${formatResearchValue(predictionInterval.mean_interval_width)}</strong></span><span><small>归一化宽度</small><strong>${formatResearchValue(predictionInterval.normalized_width)}</strong></span><span><small>校准样本</small><strong>${predictionInterval.calibration_samples}</strong></span></div><p class="hint">${escapeHtml(predictionInterval.note || '')}</p>`;
+        }
+        if ((model.feature_join_audit || []).length) {
+            html += '<h4 style="margin:12px 0 6px;">跨表特征时间审计</h4><div class="table-wrapper"><table class="data-table"><thead><tr><th>来源</th><th>策略</th><th>特征数</th><th>说明</th></tr></thead><tbody>';
+            model.feature_join_audit.forEach(item => { html += `<tr><td>${escapeHtml(item.dataset || '-')}</td><td>${escapeHtml(item.strategy || '-')}</td><td>${item.features_added || 0}</td><td>${escapeHtml(item.reason || '-')}</td></tr>`; });
+            html += '</tbody></table></div>';
+        }
+        if ((model.feature_importance || []).length) {
+            html += '<h4 style="margin:12px 0 6px;">跨表建模重要特征</h4><div class="table-wrapper"><table class="data-table"><thead><tr><th>特征</th><th>重要性</th></tr></thead><tbody>';
+            model.feature_importance.slice(0, 12).forEach(row => {
+                html += `<tr><td>${escapeHtml(row.feature || row.column || '-')}</td><td>${formatResearchValue(row.importance ?? row.score)}</td></tr>`;
+            });
+            html += '</tbody></table></div>';
+        }
+        html += `<p class="hint">${escapeHtml(model.note || '')}</p></details>`;
+    });
+
+    if (result.ranking_result) {
+        const ranking = result.ranking_result;
+        html += '<details class="research-section" open><summary>熵权 TOPSIS 综合评价</summary><div class="research-metrics">';
+        Object.entries(ranking.weights || {}).slice(0, 10).forEach(([key, value]) => { html += `<span><small>${escapeHtml(key)} 权重</small><strong>${formatResearchValue(value)}</strong></span>`; });
+        const rankingAudit = ranking.credibility_audit || {};
+        const sensitivity = ranking.sensitivity || {};
+        if (rankingAudit.status) {
+            const auditClass = rankingAudit.status === 'pass' ? 'research-safe' : (rankingAudit.status === 'fail' ? 'research-fail' : 'research-risk');
+            html += `<span><small>排名可信度</small><strong class="${auditClass}">${escapeHtml(rankingAudit.label || '-')}</strong></span><span><small>扰动秩相关</small><strong>${formatResearchValue(sensitivity.median_rank_spearman)}</strong></span><span><small>首名保持率</small><strong>${formatResearchValue((sensitivity.winner_retention || 0) * 100)}%</strong></span>`;
+        }
+        html += '</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>排名</th><th>对象</th><th>得分</th></tr></thead><tbody>';
+        (ranking.ranking || []).slice(0, 15).forEach(row => { html += `<tr><td>${row.rank}</td><td>${escapeHtml(row.entity)}</td><td>${formatResearchValue(row.score)}</td></tr>`; });
+        html += '</tbody></table></div>';
+        const pareto = ranking.pareto_analysis || {};
+        if (pareto.front_size !== undefined) {
+            html += `<h4>无权重 Pareto 非支配集</h4><div class="research-metrics"><span><small>审计样本</small><strong>${pareto.sample_size}</strong></span><span><small>非支配方案</small><strong>${pareto.front_size}</strong></span><span><small>非支配比例</small><strong>${formatResearchValue((pareto.front_share || 0) * 100)}%</strong></span><span><small>冲突指标对</small><strong>${(pareto.conflicting_indicator_pairs || []).length}</strong></span></div><p class="hint">${escapeHtml(pareto.note || '')}</p>`;
+        }
+        html += `<p class="hint">${escapeHtml(rankingAudit.decision || ranking.note || '')}</p></details>`;
+    }
+
+    if ((result.charts || []).length) {
+        html += '<details class="research-section" open><summary>自动生成图表</summary><div class="research-chart-grid">';
+        result.charts.forEach(chart => {
+            // The visible caption already names the chart. An empty alt marks the
+            // image as decorative and prevents text exports from repeating every title.
+            html += `<figure><img src="${chart.url}" alt="" loading="lazy"><figcaption>${escapeHtml(chart.title)}</figcaption></figure>`;
+        });
+        html += '</div></details>';
+    }
+
+    html += '<details class="research-section" open><summary>结论与限制</summary><ul class="research-findings">';
+    (result.conclusions || []).forEach(text => { html += `<li>${escapeHtml(text)}</li>`; });
+    (result.warnings || []).forEach(text => { html += `<li class="research-warning">${escapeHtml(text)}</li>`; });
+    html += '</ul></details>';
+    html += `<div class="research-actions"><a class="btn btn-primary" href="${result.evidence_url || '/api/research/evidence'}">📥 下载机器可读证据</a><a class="btn btn-secondary" href="${result.report_url}">下载论证摘要</a><a class="btn btn-secondary" href="${result.manifest_url || '/api/research/manifest'}">下载产物清单</a><button class="btn btn-secondary" onclick="clearResearchCache(this)">清理本次缓存</button><button class="btn btn-secondary" onclick="goStep(4)">继续调整模型</button></div>`;
+    box.innerHTML = html;
 }
 
 async function handleUpload(files) {
@@ -127,6 +1060,9 @@ async function handleUpload(files) {
         if (data.success) {
             uploadedData = data.data;
             uploadedFiles = data.files || [];
+            uploadedFiles.forEach((file, index) => {
+                file.is_active = index === Number(data.active_index ?? 0);
+            });
             selectedSheets.clear();
             showUploadResult(data);
             renderMultiTablePanel();
@@ -158,6 +1094,7 @@ async function loadDatasets() {
         const data = await res.json();
         if (data.success && data.datasets.length > 0) {
             uploadedFiles = data.datasets;
+            selectedSheets.clear();
             renderMultiTablePanel();
             const active = data.datasets[data.active_index];
             if (active) {
@@ -210,6 +1147,10 @@ async function deleteDataset(index) {
         const data = await res.json();
         if (data.success) {
             uploadedFiles.splice(index, 1);
+            selectedSheets.clear();
+            uploadedFiles.forEach((file, fileIndex) => {
+                file.is_active = fileIndex === Number(data.active_index);
+            });
             renderMultiTablePanel();
             if (data.datasets_count > 0) {
                 showToast('已删除，剩余 ' + data.datasets_count + ' 个数据集');
@@ -232,70 +1173,96 @@ function renderMultiTablePanel() {
     const panel = document.getElementById('multi-table-panel');
     const listEl = document.getElementById('file-sheet-list');
     panel.classList.remove('hidden');
-    
-    let html = '';
+
+    let rowCount = 0;
+    let rows = '';
     uploadedFiles.forEach((file, fIdx) => {
-        const hasSheets = file.sheets && file.sheets.length > 1;
+        const sheets = file.sheets && file.sheets.length ? file.sheets : [null];
         const icon = file.ext && file.ext.includes('xls') ? '📊' : '📄';
-        const isActive = file.is_active;
-        const activeStyle = isActive ? 'border-color:var(--primary);box-shadow:0 0 0 2px rgba(67,97,238,0.1);' : '';
-        
-        html += `
-            <div class="file-group" style="margin-bottom:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:${isActive ? '#f0f7ff' : '#fafbfc'};${activeStyle}">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <div style="font-weight:600;">${icon} ${escapeHtml(file.filename)} <span style="color:#999;font-size:12px;">${file.shape[0]}×${file.shape[1]}</span></div>
-                    <div style="display:flex;gap:6px;align-items:center;">
-                        ${isActive ? '<span style="font-size:11px;color:var(--primary);font-weight:600;">● 当前</span>' : ''}
-                        <button class="btn btn-sm" style="padding:3px 8px;font-size:11px;color:#999;" onclick="deleteDataset(${fIdx})" title="删除">🗑️</button>
-                    </div>
-                </div>
-        `;
-        
-        if (hasSheets) {
-            html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
-            file.sheets.forEach((sheet, sIdx) => {
-                const sheetActive = isActive && file.active_sheet === sheet;
-                const key = `${fIdx}::${sheet}`;
-                html += `
-                    <label class="sheet-tag ${sheetActive ? 'active' : ''}" data-key="${key}" style="cursor:pointer;padding:4px 10px;border-radius:4px;font-size:12px;border:1px solid var(--border);background:${sheetActive ? 'var(--primary)' : '#fff'};color:${sheetActive ? '#fff' : 'var(--text)'};">
-                        <input type="checkbox" value="${key}" ${sheetActive ? 'checked' : ''} onchange="toggleSheetSelection(this)" style="display:none;">
-                        ${escapeHtml(sheet)}
-                    </label>
-                `;
-            });
-            html += '</div>';
-        } else {
-            html += `<div style="font-size:12px;color:#999;">单表数据 · ${file.columns.length} 列</div>`;
-        }
-        
-        if (!isActive) {
-            html += `
-                <div style="margin-top:8px;">
-                    <button class="btn btn-sm" onclick="selectSheet(${fIdx}, '${escapeHtml(file.active_sheet || '')}')">📋 切换到此表</button>
-                </div>
-            `;
-        }
-        html += '</div>';
+        sheets.forEach((sheet, sIdx) => {
+            const key = sheetSelectionKey(fIdx, sheet);
+            const checked = selectedSheets.has(key);
+            const sheetActive = Boolean(
+                file.is_active && (file.active_sheet || null) === sheet
+            );
+            rowCount += 1;
+            rows += `
+                <tr class="merge-sheet-row ${sheetActive ? 'active' : ''} ${checked ? 'selected' : ''}">
+                    <td class="merge-sheet-check-cell"><input type="checkbox" class="merge-sheet-checkbox" data-file-index="${fIdx}" data-sheet-index="${sIdx}" ${checked ? 'checked' : ''} onchange="toggleSheetSelection(this)" aria-label="选择 ${escapeHtml(file.filename)} ${escapeHtml(sheet || '默认表')}"></td>
+                    <td><strong>${icon} ${escapeHtml(file.filename)}</strong></td>
+                    <td>${escapeHtml(sheet || '默认表')}</td>
+                    <td>${Number(file.shape?.[0] || 0).toLocaleString()} × ${Number(file.shape?.[1] || 0).toLocaleString()}</td>
+                    <td>${sheetActive ? '<span class="merge-current-badge">● 当前</span>' : '-'}</td>
+                    <td class="merge-sheet-actions"><button class="btn btn-sm" onclick="selectSheetByIndex(${fIdx}, ${sIdx})">查看</button>${sIdx === 0 ? `<button class="btn btn-sm merge-delete-btn" onclick="deleteDataset(${fIdx})" title="删除整个文件">🗑️</button>` : ''}</td>
+                </tr>`;
+        });
     });
-    
-    listEl.innerHTML = html;
+
+    listEl.innerHTML = rowCount ? `
+        <div class="merge-selection-toolbar">
+            <span>共 ${rowCount} 个可选表</span>
+            <span id="merge-selection-summary">已选择 0 个</span>
+        </div>
+        <div class="table-wrapper merge-sheet-table-wrapper">
+            <table class="data-table merge-sheet-table">
+                <thead><tr><th><input type="checkbox" id="merge-select-all" onchange="toggleAllMergeSheets(this)" aria-label="全选可合并表"></th><th>文件</th><th>Sheet</th><th>规模</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p class="hint">尚未上传可用数据表。</p>';
+    updateMergeSelectionState();
     updateJoinOptions();
 }
 
+function sheetSelectionKey(fileIndex, sheetName) {
+    return JSON.stringify([Number(fileIndex), sheetName ?? null]);
+}
+
 function toggleSheetSelection(checkbox) {
-    const label = checkbox.closest('.sheet-tag');
-    const key = checkbox.value;
+    const fileIndex = Number(checkbox.dataset.fileIndex);
+    const sheetIndex = Number(checkbox.dataset.sheetIndex);
+    const file = uploadedFiles[fileIndex];
+    const sheets = file && file.sheets && file.sheets.length ? file.sheets : [null];
+    if (!file || !Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= sheets.length) return;
+    const key = sheetSelectionKey(fileIndex, sheets[sheetIndex]);
     if (checkbox.checked) {
         selectedSheets.add(key);
-        label.style.background = 'var(--primary)';
-        label.style.color = '#fff';
-        label.classList.add('active');
     } else {
         selectedSheets.delete(key);
-        label.style.background = '#fff';
-        label.style.color = 'var(--text)';
-        label.classList.remove('active');
     }
+    checkbox.closest('tr')?.classList.toggle('selected', checkbox.checked);
+    updateMergeSelectionState();
+}
+
+function toggleAllMergeSheets(master) {
+    document.querySelectorAll('.merge-sheet-checkbox').forEach(checkbox => {
+        checkbox.checked = master.checked;
+        toggleSheetSelection(checkbox);
+    });
+    updateMergeSelectionState();
+}
+
+function updateMergeSelectionState() {
+    const checkboxes = Array.from(document.querySelectorAll('.merge-sheet-checkbox'));
+    const selectedCount = checkboxes.filter(item => item.checked).length;
+    const selectAll = document.getElementById('merge-select-all');
+    if (selectAll) {
+        selectAll.checked = checkboxes.length > 0 && selectedCount === checkboxes.length;
+        selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+    }
+    const summary = document.getElementById('merge-selection-summary');
+    if (summary) summary.textContent = `已选择 ${selectedCount} 个`;
+    const button = document.getElementById('execute-merge-btn');
+    if (button) {
+        button.disabled = selectedCount < 2;
+        button.textContent = selectedCount >= 2 ? `执行合并（${selectedCount} 个表）` : '执行合并';
+    }
+}
+
+function selectSheetByIndex(fileIndex, sheetIndex) {
+    const file = uploadedFiles[fileIndex];
+    const sheets = file && file.sheets && file.sheets.length ? file.sheets : [null];
+    if (!file || sheetIndex < 0 || sheetIndex >= sheets.length) return;
+    selectSheet(fileIndex, sheets[sheetIndex]);
 }
 
 async function selectSheet(fileIndex, sheetName) {
@@ -309,24 +1276,25 @@ async function selectSheet(fileIndex, sheetName) {
         if (data.success) {
             uploadedData = data.data;
             showUploadResult(data);
-            
             // 更新本地状态
             uploadedFiles.forEach((f, i) => {
                 f.is_active = (i === fileIndex);
                 if (i === fileIndex) f.active_sheet = sheetName;
             });
-            
             document.getElementById('data-status').textContent = `数据集: ${uploadedFiles.length} 个 · 当前 ${uploadedFiles[fileIndex].filename}${sheetName ? ' · ' + sheetName : ''} (${data.data.shape[0]}行×${data.data.shape[1]}列)`;
             populateTargetOptions(data.data.columns, data.target_hint);
             showToast('已切换数据表');
-            
             // 重新渲染面板以更新活跃状态
             renderMultiTablePanel();
+            if (currentStep === 2) await loadEDA();
+            return true;
         } else {
             showToast(data.error || '切换失败', 'error');
+            return false;
         }
     } catch (e) {
         showToast('切换出错: ' + e.message, 'error');
+        return false;
     }
 }
 
@@ -334,6 +1302,9 @@ function onMultiOpChange() {
     const type = document.getElementById('multi-op-type').value;
     document.getElementById('merge-options').classList.toggle('hidden', type !== 'merge');
     document.getElementById('join-options').classList.toggle('hidden', type !== 'join');
+    document.getElementById('transform-options').classList.toggle('hidden', type !== 'transform');
+    if (type === 'merge') updateMergeSelectionState();
+    if (type === 'transform') loadTransformCapabilities();
 }
 
 async function executeMerge() {
@@ -343,9 +1314,19 @@ async function executeMerge() {
     }
     const axis = parseInt(document.getElementById('merge-axis').value);
     const sources = Array.from(selectedSheets).map(key => {
-        const [fIdx, sheet] = key.split('::');
-        return { file_index: parseInt(fIdx), sheet_name: sheet };
+        const [fileIndex, sheetName] = JSON.parse(key);
+        return { file_index: Number(fileIndex), sheet_name: sheetName };
+    }).filter(source => {
+        const file = uploadedFiles[source.file_index];
+        const sheets = file && file.sheets && file.sheets.length ? file.sheets : [null];
+        return Boolean(file && sheets.includes(source.sheet_name));
     });
+    if (sources.length < 2) {
+        selectedSheets.clear();
+        renderMultiTablePanel();
+        showToast('选择状态已过期，请重新勾选至少2个表', 'error');
+        return;
+    }
     
     try {
         const res = await fetch('/api/upload/merge', {
@@ -357,15 +1338,1156 @@ async function executeMerge() {
         if (data.success) {
             uploadedData = data.data;
             showUploadResult(data);
-            document.getElementById('data-status').textContent = `合并结果: ${data.shape[0]}行×${data.shape[1]}列`;
+            const diagnostics = data.merge_diagnostics || {};
+            const schemaWarning = axis === 0 && diagnostics.schemas_identical === false
+                ? `；列结构不同，已按 ${diagnostics.union_columns?.length || data.shape[1]} 列并集对齐，缺失位置留空`
+                : '';
+            document.getElementById('data-status').textContent = `合并结果: ${data.shape[0]}行×${data.shape[1]}列${schemaWarning}`;
             populateTargetOptions(data.data.columns, data.target_hint);
-            showToast(`合并成功！${data.shape[0]}行×${data.shape[1]}列`);
+            showToast(`合并成功！${data.shape[0]}行×${data.shape[1]}列${schemaWarning}`);
             goStep(2);
         } else {
             showToast(data.error || '合并失败', 'error');
         }
     } catch (e) {
         showToast('合并出错: ' + e.message, 'error');
+    }
+}
+
+async function loadTransformCapabilities() {
+    const select = document.getElementById('transform-operation');
+    if (!select) return;
+    try {
+        const response = await fetch('/api/data/transform/capabilities');
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || '操作注册表加载失败');
+        transformCapabilities = data.capabilities || [];
+        const categories = new Map();
+        transformCapabilities.forEach(item => {
+            if (!categories.has(item.category)) categories.set(item.category, []);
+            categories.get(item.category).push(item);
+        });
+        let html = '<option value="">选择一个操作模板...</option>';
+        categories.forEach((items, category) => {
+            html += `<optgroup label="${escapeHtml(category)}">`;
+            items.forEach(item => {
+                const unavailable = item.availability === 'unavailable';
+                const suffix = unavailable ? ' · 当前不可用' : (item.availability === 'review' ? ' · 需核验' : ' · 可直接配置');
+                html += `<option value="${escapeHtml(item.name)}" ${unavailable ? 'disabled' : ''} title="${escapeHtml(item.availability_reason || '')}">${escapeHtml(item.label)}${suffix}</option>`;
+            });
+            html += '</optgroup>';
+        });
+        select.innerHTML = html;
+        const ready = transformCapabilities.filter(item => item.availability === 'ready').length;
+        const review = transformCapabilities.filter(item => item.availability === 'review').length;
+        const unavailable = transformCapabilities.filter(item => item.availability === 'unavailable').length;
+        const summary = document.getElementById('transform-capability-summary');
+        if (summary) {
+            summary.innerHTML = `<span class="is-ready">${ready} 个已绑定</span><span class="is-review">${review} 个需核验</span><span class="is-unavailable">${unavailable} 个不适用</span><small>不可用操作不会再写入伪造字段。</small>`;
+        }
+        renderTransformQuickActions();
+        syncTransformPipelineCards();
+    } catch (error) {
+        select.innerHTML = '<option value="">操作注册表加载失败</option>';
+        console.error('加载表变换注册表失败', error);
+    }
+}
+
+function setTransformGoalExample(text) {
+    const input = document.getElementById('transform-goal');
+    if (!input) return;
+    input.value = text;
+    input.focus();
+}
+
+function renderTransformQuickActions() {
+    const box = document.getElementById('transform-quick-actions');
+    if (!box) return;
+    const preferred = [
+        ['fill_missing', '处理缺失'],
+        ['deduplicate', '删除重复'],
+        ['aggregate', '分组汇总'],
+        ['time_features', '时间特征'],
+        ['window_features', '滚动指标'],
+        ['normalize', '标准化'],
+    ];
+    const actions = preferred.map(([name, simpleLabel]) => ({
+        capability: transformCapabilities.find(item => item.name === name),
+        simpleLabel,
+    })).filter(item => item.capability && item.capability.availability !== 'unavailable');
+    if (!actions.length) {
+        box.innerHTML = '<span class="hint">当前表没有可直接添加的常用动作，请展开“添加其他操作”查看原因。</span>';
+        return;
+    }
+    box.innerHTML = actions.map(({ capability, simpleLabel }) => `
+        <button type="button" onclick="addTransformOperationByName('${escapeHtml(capability.name)}')" title="${escapeHtml(capability.availability_reason || capability.description || '')}">
+            <span>＋</span><strong>${escapeHtml(simpleLabel)}</strong>${capability.availability === 'review' ? '<small>需确认</small>' : ''}
+        </button>`).join('');
+}
+
+function addTransformOperationByName(name) {
+    const select = document.getElementById('transform-operation');
+    if (!select) return;
+    select.value = name;
+    insertTransformTemplate();
+}
+
+function readTransformPipeline() {
+    const editor = document.getElementById('transform-pipeline');
+    let pipeline;
+    try {
+        pipeline = JSON.parse(editor.value.trim());
+    } catch (error) {
+        throw new Error('流水线不是合法 JSON：' + error.message);
+    }
+    if (!Array.isArray(pipeline) || pipeline.length === 0) {
+        throw new Error('流水线必须是至少包含一个步骤的 JSON 数组');
+    }
+    return pipeline;
+}
+
+function insertTransformTemplate() {
+    const select = document.getElementById('transform-operation');
+    const capability = transformCapabilities.find(item => item.name === select.value);
+    if (!capability) return;
+    if (capability.availability === 'unavailable') {
+        const reason = capability.availability_reason || '当前数据结构不满足该操作的输入要求';
+        document.getElementById('transform-status').textContent = `“${capability.label}”当前不可用：${reason}`;
+        showToast(reason, 'error');
+        select.value = '';
+        return;
+    }
+    const editor = document.getElementById('transform-pipeline');
+    let pipeline = [];
+    if (editor.value.trim()) {
+        try {
+            pipeline = JSON.parse(editor.value);
+            if (!Array.isArray(pipeline)) throw new Error('不是数组');
+        } catch (error) {
+            showToast('请先修正当前流水线 JSON，再添加模板', 'error');
+            select.value = '';
+            return;
+        }
+    }
+    pipeline.push({ operation: capability.name, params: capability.template });
+    transformEditingStepIndex = pipeline.length - 1;
+    updateTransformPipeline(pipeline);
+    const review = capability.availability === 'review' ? `；仍需核验：${capability.availability_reason}` : '';
+    document.getElementById('transform-status').textContent = `已添加“${capability.label}”，字段已绑定当前表${review}。`;
+    select.value = '';
+}
+
+function transformParamSummary(params) {
+    const labels = {
+        group_by: '分组', aggregations: '聚合', columns: '字段', column: '字段',
+        expression: '公式', output: '输出', how: '方式', on: '键', left_on: '左键',
+        right_on: '右键', periods: '窗口', date_column: '时间', value_column: '数值',
+    };
+    return Object.entries(params || {}).slice(0, 5).map(([key, value]) => {
+        let rendered;
+        if (Array.isArray(value)) {
+            rendered = value.map(item => {
+                if (item && typeof item === 'object') {
+                    return interactiveVizDisplayField(item.output)
+                        || `${interactiveVizDisplayField(item.column)} ${item.function || ''}`.trim()
+                        || '配置项';
+                }
+                return String(item);
+            }).join('、');
+        } else if (value && typeof value === 'object') {
+            rendered = Object.keys(value).join('、');
+        } else {
+            rendered = String(value ?? '-');
+        }
+        if (rendered.length > 52) rendered = rendered.slice(0, 50) + '…';
+        return `<span><small>${escapeHtml(labels[key] || key)}</small>${escapeHtml(rendered || '-')}</span>`;
+    }).join('');
+}
+
+function transformStepColumns(step = {}) {
+    const columns = [];
+    const add = value => {
+        if (value === undefined || value === null || value === '' || value === '*') return;
+        const name = String(value);
+        if (!columns.includes(name)) columns.push(name);
+    };
+    (uploadedData?.columns || []).forEach(add);
+    const params = step.params || {};
+    ['columns', 'group_by', 'subset', 'by', 'partition_by', 'value_columns', 'index', 'values', 'id_vars', 'value_vars'].forEach(key => {
+        const values = Array.isArray(params[key]) ? params[key] : [];
+        values.forEach(add);
+    });
+    ['column', 'time_column', 'order_by'].forEach(key => add(params[key]));
+    (params.aggregations || []).forEach(item => add(item?.column));
+    (params.conditions || []).forEach(item => add(item?.column));
+    return columns;
+}
+
+function transformNumericColumns(step = {}) {
+    const columns = transformStepColumns(step);
+    const dtypes = uploadedData?.dtypes || {};
+    const types = uploadedData?.column_types || {};
+    const numeric = columns.filter(column => {
+        const dtype = String(dtypes[column] || '').toLowerCase();
+        return types[column] === 'numeric' || /int|float|double|decimal|number/.test(dtype);
+    });
+    const referenced = [
+        ...(step.params?.value_columns || []),
+        ...(step.params?.aggregations || []).map(item => item?.column),
+    ].filter(Boolean).map(String);
+    referenced.forEach(column => {
+        if (columns.includes(column) && !numeric.includes(column)) numeric.push(column);
+    });
+    return numeric.length ? numeric : columns;
+}
+
+function transformOptionTags(columns, selected, attributes = '') {
+    const active = new Set((selected || []).map(String));
+    return columns.map(column => `
+        <label class="transform-option-chip">
+            <input type="checkbox" data-transform-field="${escapeHtml(column)}" ${active.has(String(column)) ? 'checked' : ''} ${attributes}>
+            <span>${escapeHtml(column)}</span>
+        </label>`).join('');
+}
+
+function transformSelectOptions(columns, selected) {
+    return columns.map(column => `<option value="${escapeHtml(column)}" ${String(column) === String(selected) ? 'selected' : ''}>${escapeHtml(column)}</option>`).join('');
+}
+
+function renderAggregateStepEditor(index, step, columns, numeric) {
+    const params = step.params || {};
+    const groupBy = params.group_by || [];
+    const specs = params.aggregations || [];
+    const specByColumn = new Map(specs.filter(item => item?.column && item.column !== '*').map(item => [String(item.column), item]));
+    const metricColumns = Array.from(new Set([...numeric, ...specByColumn.keys()]));
+    const functions = [['sum', '合计'], ['mean', '平均'], ['median', '中位数'], ['min', '最小'], ['max', '最大'], ['count', '非空计数']];
+    return `
+        <div class="transform-editor-section">
+            <strong>按什么分组</strong><small>可多选；不选表示整表汇总</small>
+            <div class="transform-editor-options" data-editor-role="aggregate-groups">${transformOptionTags(columns, groupBy, `onchange="applyAggregateStepEditor(${index})"`)}</div>
+        </div>
+        <div class="transform-editor-section">
+            <strong>汇总哪些指标</strong><small>至少选择一个，右侧选择算法</small>
+            <div class="transform-metric-list" data-editor-role="aggregate-metrics">
+                ${metricColumns.map(column => {
+                    const spec = specByColumn.get(String(column));
+                    const fn = spec?.function || 'sum';
+                    return `<div class="transform-metric-row">
+                        <label><input type="checkbox" data-transform-field="${escapeHtml(column)}" ${spec ? 'checked' : ''} onchange="applyAggregateStepEditor(${index}, this)"><span>${escapeHtml(column)}</span></label>
+                        <select aria-label="${escapeHtml(column)}的汇总方式" onchange="applyAggregateStepEditor(${index})">${functions.map(([value, label]) => `<option value="${value}" ${value === fn ? 'selected' : ''}>${label}</option>`).join('')}</select>
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>`;
+}
+
+function renderFillMissingStepEditor(index, step, columns, numeric) {
+    const params = step.params || {};
+    const strategy = String(params.strategy || 'median');
+    const numericOnly = ['mean', 'median', 'interpolate'].includes(strategy);
+    const eligible = numericOnly ? numeric : columns;
+    const selected = (params.columns || []).filter(column => eligible.includes(String(column)));
+    const strategies = [['median', '中位数（数值）'], ['mean', '平均数（数值）'], ['mode', '众数'], ['forward', '向前填充'], ['backward', '向后填充'], ['interpolate', '线性插值（数值）'], ['constant', '固定值'], ['drop_rows', '删除缺失行']];
+    return `
+        <div class="transform-editor-section">
+            <strong>处理字段</strong><small>${numericOnly ? '当前策略只支持数值字段' : '可多选'}</small>
+            <div class="transform-editor-options" data-editor-role="fill-columns">${transformOptionTags(eligible, selected, `onchange="applyFillMissingStepEditor(${index}, this)"`)}</div>
+        </div>
+        <div class="transform-editor-section transform-editor-inline">
+            <label><span>处理方式</span><select data-editor-role="fill-strategy" onchange="changeFillMissingStrategy(${index}, this.value)">${strategies.map(([value, label]) => `<option value="${value}" ${value === strategy ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+            ${strategy === 'constant' ? `<label><span>填充值</span><input data-editor-role="fill-value" value="${escapeHtml(params.value ?? '')}" onchange="applyFillMissingStepEditor(${index})" placeholder="例如 0 或 未知"></label>` : ''}
+        </div>
+        <div class="transform-editor-section">
+            <strong>组内填补（可选）</strong><small>例如每个地区分别计算中位数</small>
+            <div class="transform-editor-options" data-editor-role="fill-groups">${transformOptionTags(columns, params.group_by || [], `onchange="applyFillMissingStepEditor(${index})"`)}</div>
+        </div>`;
+}
+
+function renderDeduplicateStepEditor(index, step, columns) {
+    const params = step.params || {};
+    const keep = params.keep === false ? 'false' : String(params.keep || 'first');
+    return `
+        <div class="transform-editor-section">
+            <strong>判断重复的字段</strong><small>不选择时按整行判断</small>
+            <div class="transform-editor-options" data-editor-role="deduplicate-columns">${transformOptionTags(columns, params.subset || [], `onchange="applyDeduplicateStepEditor(${index})"`)}</div>
+        </div>
+        <div class="transform-editor-section transform-editor-inline"><label><span>重复时保留</span><select data-editor-role="deduplicate-keep" onchange="applyDeduplicateStepEditor(${index})"><option value="first" ${keep === 'first' ? 'selected' : ''}>第一条</option><option value="last" ${keep === 'last' ? 'selected' : ''}>最后一条</option><option value="false" ${keep === 'false' ? 'selected' : ''}>重复项全部删除</option></select></label></div>`;
+}
+
+function renderSortStepEditor(index, step, columns) {
+    const params = step.params || {};
+    const selected = (params.by || []).map(String);
+    const ascending = Array.isArray(params.ascending) ? params.ascending : selected.map(() => params.ascending !== false);
+    return `<div class="transform-editor-section">
+        <strong>排序字段</strong><small>按选中顺序依次排序；至少选择一个</small>
+        <div class="transform-metric-list" data-editor-role="sort-fields">${columns.map(column => {
+            const position = selected.indexOf(String(column));
+            return `<div class="transform-metric-row">
+                <label><input type="checkbox" data-transform-field="${escapeHtml(column)}" ${position >= 0 ? 'checked' : ''} onchange="applySortStepEditor(${index}, this)"><span>${escapeHtml(column)}</span></label>
+                <select onchange="applySortStepEditor(${index})"><option value="true" ${position < 0 || ascending[position] !== false ? 'selected' : ''}>升序</option><option value="false" ${position >= 0 && ascending[position] === false ? 'selected' : ''}>降序</option></select>
+            </div>`;
+        }).join('')}</div>
+    </div>`;
+}
+
+function renderColumnSelectionStepEditor(index, step, columns) {
+    const params = step.params || {};
+    const isSelect = step.operation === 'select_columns';
+    return `<div class="transform-editor-section">
+        <strong>${isSelect ? '保留这些字段' : '删除这些字段'}</strong><small>${isSelect ? '至少选择一个' : '可多选'}</small>
+        <div class="transform-editor-options" data-editor-role="column-selection">${transformOptionTags(columns, params.columns || [], `onchange="applyColumnSelectionStepEditor(${index}, this)"`)}</div>
+    </div>`;
+}
+
+function renderTimeFeaturesStepEditor(index, step, columns) {
+    const params = step.params || {};
+    const features = [['year', '年'], ['quarter', '季度'], ['month', '月'], ['week', '周'], ['day', '日'], ['dayofweek', '星期'], ['hour', '小时'], ['is_weekend', '是否周末'], ['month_sin', '月份周期正弦'], ['month_cos', '月份周期余弦']];
+    return `
+        <div class="transform-editor-section transform-editor-inline"><label><span>时间字段</span><select data-editor-role="time-column" onchange="applyTimeFeaturesStepEditor(${index})">${transformSelectOptions(columns, params.time_column)}</select></label></div>
+        <div class="transform-editor-section"><strong>生成特征</strong><small>至少选择一个</small><div class="transform-editor-options" data-editor-role="time-features">${features.map(([value, label]) => `<label class="transform-option-chip"><input type="checkbox" data-transform-feature="${value}" ${(params.features || []).includes(value) ? 'checked' : ''} onchange="applyTimeFeaturesStepEditor(${index}, this)"><span>${label}</span></label>`).join('')}</div></div>`;
+}
+
+function renderWindowStepEditor(index, step, columns, numeric) {
+    const params = step.params || {};
+    const specs = params.features || [];
+    const kinds = new Set(specs.map(item => String(item.kind || '')));
+    const periods = Number(specs.find(item => ['lag', 'diff', 'pct_change'].includes(item.kind))?.periods || 1);
+    const windowSize = Number(specs.find(item => String(item.kind || '').startsWith('rolling_'))?.window || 7);
+    return `
+        <div class="transform-editor-section transform-editor-inline"><label><span>排序/时间字段</span><select data-editor-role="window-order" onchange="applyWindowStepEditor(${index})">${transformSelectOptions(columns, params.order_by)}</select></label><label><span>滞后期数</span><input type="number" min="1" value="${periods}" data-editor-role="window-periods" onchange="applyWindowStepEditor(${index})"></label><label><span>滚动窗口</span><input type="number" min="1" value="${windowSize}" data-editor-role="window-size" onchange="applyWindowStepEditor(${index})"></label></div>
+        <div class="transform-editor-section"><strong>分组实体（可选）</strong><small>例如每个地区分别计算</small><div class="transform-editor-options" data-editor-role="window-groups">${transformOptionTags(columns, params.partition_by || [], `onchange="applyWindowStepEditor(${index})"`)}</div></div>
+        <div class="transform-editor-section"><strong>数值指标</strong><small>至少选择一个</small><div class="transform-editor-options" data-editor-role="window-values">${transformOptionTags(numeric, params.value_columns || [], `onchange="applyWindowStepEditor(${index}, this)"`)}</div></div>
+        <div class="transform-editor-section"><strong>计算内容</strong><small>可组合</small><div class="transform-editor-options" data-editor-role="window-kinds">${[['lag', '滞后值'], ['diff', '差分'], ['pct_change', '增长率'], ['rolling_mean', '滚动平均'], ['rolling_sum', '滚动合计']].map(([value, label]) => `<label class="transform-option-chip"><input type="checkbox" data-transform-feature="${value}" ${kinds.has(value) ? 'checked' : ''} onchange="applyWindowStepEditor(${index}, this)"><span>${label}</span></label>`).join('')}</div></div>`;
+}
+
+function renderNormalizeStepEditor(index, step, numeric) {
+    const params = step.params || {};
+    const methods = [['zscore', 'Z-score 标准化'], ['minmax', '缩放到 0–1'], ['robust', '稳健缩放'], ['log1p', 'log(1+x) 变换']];
+    return `
+        <div class="transform-editor-section"><strong>数值字段</strong><small>至少选择一个</small><div class="transform-editor-options" data-editor-role="normalize-columns">${transformOptionTags(numeric, params.columns || [], `onchange="applyNormalizeStepEditor(${index}, this)"`)}</div></div>
+        <div class="transform-editor-section transform-editor-inline"><label><span>变换方式</span><select data-editor-role="normalize-method" onchange="applyNormalizeStepEditor(${index})">${methods.map(([value, label]) => `<option value="${value}" ${params.method === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label><span>新字段后缀</span><input data-editor-role="normalize-suffix" value="${escapeHtml(params.suffix ?? '_z')}" onchange="applyNormalizeStepEditor(${index})"></label></div>`;
+}
+
+function renderFilterStepEditor(index, step, columns) {
+    const params = step.params || {};
+    const condition = (params.conditions || [])[0] || {};
+    const operator = String(condition.operator || 'eq');
+    const value = Array.isArray(condition.value) ? condition.value.join(', ') : (condition.value ?? '');
+    const operators = [['eq', '等于'], ['ne', '不等于'], ['gt', '大于'], ['ge', '大于等于'], ['lt', '小于'], ['le', '小于等于'], ['contains', '包含文本'], ['not_contains', '不包含文本'], ['in', '属于列表'], ['not_in', '不属于列表'], ['between', '位于区间'], ['is_null', '为空'], ['not_null', '不为空']];
+    const noValue = ['is_null', 'not_null'].includes(operator);
+    return `<div class="transform-editor-section transform-filter-row" data-editor-role="filter-condition">
+        <label><span>字段</span><select data-editor-role="filter-column" onchange="applyFilterStepEditor(${index})">${transformSelectOptions(columns, condition.column)}</select></label>
+        <label><span>条件</span><select data-editor-role="filter-operator" onchange="applyFilterStepEditor(${index})">${operators.map(([item, label]) => `<option value="${item}" ${item === operator ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+        <label class="${noValue ? 'is-hidden' : ''}"><span>${['in', 'not_in'].includes(operator) ? '值（逗号分隔）' : operator === 'between' ? '起点, 终点' : '值'}</span><input data-editor-role="filter-value" value="${escapeHtml(value)}" onchange="applyFilterStepEditor(${index})"></label>
+    </div>`;
+}
+
+function renderTransformStepEditor(index, step) {
+    const columns = transformStepColumns(step);
+    const numeric = transformNumericColumns(step);
+    let body = '';
+    if (!columns.length) return '<div class="transform-editor-message">未读取到当前表字段，请重新选择数据集。</div>';
+    switch (step.operation) {
+        case 'aggregate': body = renderAggregateStepEditor(index, step, columns, numeric); break;
+        case 'fill_missing': body = renderFillMissingStepEditor(index, step, columns, numeric); break;
+        case 'deduplicate': body = renderDeduplicateStepEditor(index, step, columns); break;
+        case 'sort_rows': body = renderSortStepEditor(index, step, columns); break;
+        case 'select_columns':
+        case 'drop_columns': body = renderColumnSelectionStepEditor(index, step, columns); break;
+        case 'time_features': body = renderTimeFeaturesStepEditor(index, step, columns); break;
+        case 'window_features': body = renderWindowStepEditor(index, step, columns, numeric); break;
+        case 'normalize': body = renderNormalizeStepEditor(index, step, numeric); break;
+        case 'filter_rows': body = renderFilterStepEditor(index, step, columns); break;
+        default:
+            body = '<div class="transform-editor-message"><strong>这个专业操作暂未提供表单编辑器。</strong><span>可在下方“高级模式”中查看参数；执行前仍会做字段和规模校验。</span></div>';
+    }
+    return `<div class="transform-step-editor" id="transform-step-editor-${index}"><div class="transform-editor-head"><strong>设置这一步</strong><span>修改后立即写入方案，预览结果会自动失效</span></div>${body}</div>`;
+}
+
+function transformEditorRoot(index) {
+    return document.getElementById(`transform-step-editor-${index}`);
+}
+
+function checkedTransformValues(root, selector) {
+    return Array.from(root?.querySelectorAll(`${selector}:checked`) || []).map(item => item.dataset.transformField || item.dataset.transformFeature).filter(Boolean);
+}
+
+function mutateTransformStep(index, callback, message = '') {
+    let pipeline;
+    try { pipeline = readTransformPipeline(); } catch (error) { showToast(error.message, 'error'); return false; }
+    if (!pipeline[index]) return false;
+    callback(pipeline[index].params || (pipeline[index].params = {}), pipeline[index]);
+    transformEditingStepIndex = index;
+    updateTransformPipeline(pipeline, message);
+    return true;
+}
+
+function toggleTransformStepEditor(index) {
+    transformEditingStepIndex = transformEditingStepIndex === index ? null : index;
+    syncTransformPipelineCards();
+}
+
+function requireTransformEditorSelection(values, control, message) {
+    if (values.length) return true;
+    if (control) control.checked = true;
+    showToast(message, 'error');
+    return false;
+}
+
+function applyAggregateStepEditor(index, changedControl = null) {
+    const root = transformEditorRoot(index);
+    const groups = checkedTransformValues(root, '[data-editor-role="aggregate-groups"] input');
+    const rows = Array.from(root?.querySelectorAll('[data-editor-role="aggregate-metrics"] .transform-metric-row') || []);
+    const aggregations = rows.filter(row => row.querySelector('input')?.checked).map(row => {
+        const column = row.querySelector('input').dataset.transformField;
+        const fn = row.querySelector('select').value;
+        return { column, function: fn, output: `${column}_${fn}` };
+    });
+    if (!requireTransformEditorSelection(aggregations, changedControl, '汇总至少需要选择一个指标')) return;
+    mutateTransformStep(index, params => { params.group_by = groups; params.aggregations = aggregations; }, '汇总设置已更新，请预览结果。');
+}
+
+function changeFillMissingStrategy(index, strategy) {
+    let pipeline;
+    try { pipeline = readTransformPipeline(); } catch (error) { showToast(error.message, 'error'); return; }
+    const step = pipeline[index];
+    if (!step) return;
+    const params = step.params || (step.params = {});
+    params.strategy = strategy;
+    if (['mean', 'median', 'interpolate'].includes(strategy)) {
+        const numeric = transformNumericColumns(step);
+        params.columns = (params.columns || []).filter(column => numeric.includes(String(column)));
+        if (!params.columns.length && numeric.length) params.columns = [numeric[0]];
+    }
+    transformEditingStepIndex = index;
+    updateTransformPipeline(pipeline, '缺失值处理方式已更新。');
+}
+
+function applyFillMissingStepEditor(index, changedControl = null) {
+    const root = transformEditorRoot(index);
+    const columns = checkedTransformValues(root, '[data-editor-role="fill-columns"] input');
+    if (!requireTransformEditorSelection(columns, changedControl, '至少选择一个需要处理的字段')) return;
+    const strategy = root.querySelector('[data-editor-role="fill-strategy"]')?.value || 'median';
+    const groups = checkedTransformValues(root, '[data-editor-role="fill-groups"] input');
+    const value = root.querySelector('[data-editor-role="fill-value"]')?.value;
+    mutateTransformStep(index, params => {
+        params.columns = columns; params.strategy = strategy; params.group_by = groups;
+        if (strategy === 'constant') params.value = value ?? '';
+        else delete params.value;
+    }, '缺失值设置已更新，请预览结果。');
+}
+
+function applyDeduplicateStepEditor(index) {
+    const root = transformEditorRoot(index);
+    const subset = checkedTransformValues(root, '[data-editor-role="deduplicate-columns"] input');
+    const keepValue = root.querySelector('[data-editor-role="deduplicate-keep"]')?.value || 'first';
+    mutateTransformStep(index, params => { params.subset = subset; params.keep = keepValue === 'false' ? false : keepValue; }, '去重设置已更新。');
+}
+
+function applySortStepEditor(index, changedControl = null) {
+    const root = transformEditorRoot(index);
+    const rows = Array.from(root?.querySelectorAll('[data-editor-role="sort-fields"] .transform-metric-row') || []);
+    const selected = rows.filter(row => row.querySelector('input')?.checked);
+    if (!requireTransformEditorSelection(selected, changedControl, '排序至少需要选择一个字段')) return;
+    mutateTransformStep(index, params => {
+        params.by = selected.map(row => row.querySelector('input').dataset.transformField);
+        params.ascending = selected.map(row => row.querySelector('select').value === 'true');
+    }, '排序设置已更新。');
+}
+
+function applyColumnSelectionStepEditor(index, changedControl = null) {
+    const root = transformEditorRoot(index);
+    const columns = checkedTransformValues(root, '[data-editor-role="column-selection"] input');
+    let operation = '';
+    try { operation = readTransformPipeline()[index]?.operation || ''; } catch (error) { return; }
+    if (operation === 'select_columns' && !requireTransformEditorSelection(columns, changedControl, '保留字段至少选择一个')) return;
+    mutateTransformStep(index, params => { params.columns = columns; }, '字段选择已更新。');
+}
+
+function applyTimeFeaturesStepEditor(index, changedControl = null) {
+    const root = transformEditorRoot(index);
+    const features = checkedTransformValues(root, '[data-editor-role="time-features"] input');
+    if (!requireTransformEditorSelection(features, changedControl, '至少选择一个时间特征')) return;
+    const timeColumn = root.querySelector('[data-editor-role="time-column"]')?.value || '';
+    mutateTransformStep(index, params => { params.time_column = timeColumn; params.features = features; }, '时间特征设置已更新。');
+}
+
+function applyWindowStepEditor(index, changedControl = null) {
+    const root = transformEditorRoot(index);
+    const values = checkedTransformValues(root, '[data-editor-role="window-values"] input');
+    const kinds = checkedTransformValues(root, '[data-editor-role="window-kinds"] input');
+    if (!requireTransformEditorSelection(values, changedControl, '至少选择一个数值指标')) return;
+    if (!requireTransformEditorSelection(kinds, changedControl, '至少选择一种窗口计算')) return;
+    const periods = Math.max(1, Number(root.querySelector('[data-editor-role="window-periods"]')?.value || 1));
+    const windowSize = Math.max(1, Number(root.querySelector('[data-editor-role="window-size"]')?.value || 7));
+    const features = kinds.map(kind => kind.startsWith('rolling_') ? { kind, window: windowSize, shift: 1 } : { kind, periods });
+    mutateTransformStep(index, params => {
+        params.order_by = root.querySelector('[data-editor-role="window-order"]')?.value || '';
+        params.partition_by = checkedTransformValues(root, '[data-editor-role="window-groups"] input');
+        params.value_columns = values;
+        params.features = features;
+    }, '窗口指标设置已更新。');
+}
+
+function applyNormalizeStepEditor(index, changedControl = null) {
+    const root = transformEditorRoot(index);
+    const columns = checkedTransformValues(root, '[data-editor-role="normalize-columns"] input');
+    if (!requireTransformEditorSelection(columns, changedControl, '标准化至少需要选择一个数值字段')) return;
+    mutateTransformStep(index, params => {
+        params.columns = columns;
+        params.method = root.querySelector('[data-editor-role="normalize-method"]')?.value || 'zscore';
+        params.suffix = root.querySelector('[data-editor-role="normalize-suffix"]')?.value || '_z';
+    }, '标准化设置已更新。');
+}
+
+function applyFilterStepEditor(index) {
+    const root = transformEditorRoot(index);
+    const column = root.querySelector('[data-editor-role="filter-column"]')?.value || '';
+    const operator = root.querySelector('[data-editor-role="filter-operator"]')?.value || 'eq';
+    const rawValue = root.querySelector('[data-editor-role="filter-value"]')?.value || '';
+    let value = rawValue;
+    if (['in', 'not_in', 'between'].includes(operator)) value = rawValue.split(',').map(item => item.trim()).filter(Boolean);
+    mutateTransformStep(index, params => {
+        params.combine = params.combine || 'and';
+        params.conditions = [{ column, operator, ...(['is_null', 'not_null'].includes(operator) ? {} : { value }) }];
+    }, '筛选条件已更新。');
+}
+
+function syncTransformPipelineCards(invalidatePreview = false) {
+    const editor = document.getElementById('transform-pipeline');
+    const cards = document.getElementById('transform-pipeline-cards');
+    const count = document.getElementById('transform-step-count');
+    if (!editor || !cards || !count) return;
+    if (invalidatePreview) {
+        disposeTransformPreviewChart();
+        transformPreviewResult = null;
+        document.getElementById('transform-result').innerHTML = '';
+    }
+    const raw = editor.value.trim();
+    if (!raw) {
+        count.textContent = '0 步';
+        cards.innerHTML = '<div class="transform-pipeline-empty">还没有步骤，请生成方案或点击上方常用动作。</div>';
+        return;
+    }
+    let pipeline;
+    try {
+        pipeline = JSON.parse(raw);
+        if (!Array.isArray(pipeline)) throw new Error('根节点不是数组');
+    } catch (error) {
+        count.textContent = '格式待修正';
+        cards.innerHTML = `<div class="transform-pipeline-empty is-error">高级 JSON 暂时无法解析：${escapeHtml(error.message)}</div>`;
+        return;
+    }
+    count.textContent = `${pipeline.length} 步`;
+    if (!pipeline.length) {
+        cards.innerHTML = '<div class="transform-pipeline-empty">还没有步骤，请生成方案或点击上方常用动作。</div>';
+        return;
+    }
+    cards.innerHTML = pipeline.map((step, index) => {
+        const capability = transformCapabilities.find(item => item.name === step.operation);
+        const label = capability?.label || step.operation || '未知操作';
+        const category = capability?.category || '组合步骤';
+        const status = capability?.availability === 'review' ? '需核验' : '已配置';
+        const editing = transformEditingStepIndex === index;
+        return `<article class="transform-step-card ${editing ? 'is-editing' : ''}">
+            <div class="transform-step-index">${index + 1}</div>
+            <div class="transform-step-main">
+                <div class="transform-step-title"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(category)}</span><em>${status}</em></div>
+                <div class="transform-step-params">${transformParamSummary(step.params || {}) || '<span><small>参数</small>使用默认配置</span>'}</div>
+            </div>
+            <div class="transform-step-actions">
+                <button type="button" class="is-edit" title="${editing ? '收起设置' : '编辑参数'}" onclick="toggleTransformStepEditor(${index})">${editing ? '收起' : '设置'}</button>
+                <button type="button" title="上移" onclick="moveTransformStep(${index}, -1)" ${index === 0 ? 'disabled' : ''}>↑</button>
+                <button type="button" title="下移" onclick="moveTransformStep(${index}, 1)" ${index === pipeline.length - 1 ? 'disabled' : ''}>↓</button>
+                <button type="button" class="is-danger" title="删除" onclick="removeTransformStep(${index})">×</button>
+            </div>
+            ${editing ? renderTransformStepEditor(index, step) : ''}
+        </article>`;
+    }).join('');
+}
+
+function updateTransformPipeline(pipeline, message = '') {
+    const editor = document.getElementById('transform-pipeline');
+    editor.value = pipeline.length ? JSON.stringify(pipeline, null, 2) : '';
+    syncTransformPipelineCards();
+    disposeTransformPreviewChart();
+    transformPreviewResult = null;
+    transformPreviewPresets = [];
+    document.getElementById('transform-result').innerHTML = '';
+    if (message) document.getElementById('transform-status').textContent = message;
+}
+
+function moveTransformStep(index, delta) {
+    let pipeline;
+    try { pipeline = readTransformPipeline(); } catch (error) { showToast(error.message, 'error'); return; }
+    const target = index + delta;
+    if (target < 0 || target >= pipeline.length) return;
+    [pipeline[index], pipeline[target]] = [pipeline[target], pipeline[index]];
+    if (transformEditingStepIndex === index) transformEditingStepIndex = target;
+    else if (transformEditingStepIndex === target) transformEditingStepIndex = index;
+    updateTransformPipeline(pipeline, `已调整步骤顺序：第 ${index + 1} 步移动到第 ${target + 1} 步。`);
+}
+
+function removeTransformStep(index) {
+    let pipeline;
+    try { pipeline = readTransformPipeline(); } catch (error) { showToast(error.message, 'error'); return; }
+    pipeline.splice(index, 1);
+    if (transformEditingStepIndex === index) transformEditingStepIndex = null;
+    else if (transformEditingStepIndex > index) transformEditingStepIndex -= 1;
+    updateTransformPipeline(pipeline, pipeline.length ? `已删除步骤 ${index + 1}，请重新预览。` : '处理方案已清空。');
+}
+
+async function suggestTransformPipeline() {
+    const goalInput = document.getElementById('transform-goal');
+    const status = document.getElementById('transform-status');
+    const recommendationsBox = document.getElementById('transform-recommendations');
+    const problemInput = document.getElementById('problem-description');
+    const problem = goalInput.value.trim() || problemInput?.value.trim() || '';
+    status.textContent = '正在从字段画像与处理目标生成候选流水线…';
+    recommendationsBox.innerHTML = '';
+    try {
+        const response = await fetch('/api/data/transform/suggest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ problem })
+        });
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || '生成失败');
+        transformRecommendations = data.recommendations || [];
+        const profile = data.profile || {};
+        status.textContent = `画像：${Number(profile.rows || 0).toLocaleString()} 行，${profile.columns || 0} 列；数值 ${profile.numeric?.length || 0}，类别 ${profile.categorical?.length || 0}，时间 ${profile.datetime?.length || 0}。`;
+        if (transformRecommendations.length === 0) {
+            recommendationsBox.innerHTML = '<p class="hint">没有足够证据自动生成可靠方案。可从下方操作注册表组合流水线，系统不会猜测字段含义。</p>';
+            return;
+        }
+        recommendationsBox.innerHTML = transformRecommendations.map((item, index) => `
+            <article class="transform-recommendation-card">
+                <div><strong>${escapeHtml(item.name)}</strong><p>${escapeHtml(item.reason)}</p><small>核验点：${escapeHtml(item.risk)}</small></div>
+                <button class="btn btn-sm" onclick="useTransformRecommendation(${index})">载入候选</button>
+            </article>`).join('');
+        if (!document.getElementById('transform-pipeline').value.trim()) useTransformRecommendation(0);
+    } catch (error) {
+        status.textContent = '';
+        showToast('候选方案生成失败: ' + error.message, 'error');
+    }
+}
+
+async function runMathematicalDataCompilation() {
+    const goal = document.getElementById('transform-goal').value.trim()
+        || document.getElementById('problem-description')?.value.trim()
+        || '';
+    let target = document.getElementById('transform-target').value.trim();
+    if (!target) {
+        const researchTarget = document.getElementById('research-target')?.value.trim();
+        if (researchTarget) target = researchTarget.split(/[,，;；]/)[0].trim().split('.').pop();
+    }
+    const status = document.getElementById('transform-status');
+    status.textContent = '正在编译估计对象、数据粒度与多视图反证…';
+    try {
+        const semanticText = document.getElementById('transform-semantic-hints')?.value.trim() || '';
+        let semanticHints = null;
+        if (semanticText) {
+            try {
+                semanticHints = JSON.parse(semanticText);
+            } catch (parseError) {
+                throw new Error('字段语义契约不是有效 JSON：' + parseError.message);
+            }
+            if (!semanticHints || Array.isArray(semanticHints) || typeof semanticHints !== 'object') {
+                throw new Error('字段语义契约必须是 JSON 对象');
+            }
+        }
+        const response = await fetch('/api/data/math-compile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                problem: goal,
+                target: target || null,
+                max_views: 8,
+                semantic_hints: semanticHints
+            })
+        });
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || '数学数据编译失败');
+        mathematicalDataCompilation = data.result;
+        renderMathematicalDataCompilation(data.result);
+        const summary = data.result.summary || {};
+        const scopeText = summary.sampled_execution
+            ? `覆盖样本 ${Number(summary.audited_rows || 0).toLocaleString()}/${Number(summary.source_rows || 0).toLocaleString()} 行`
+            : '完整数据';
+        status.textContent = `多视图审计完成（${scopeText}）：${summary.admissible_views || 0}/${summary.candidate_views || 0} 个候选通过，发现 ${summary.direction_reversals || 0} 个方向翻转。`;
+    } catch (error) {
+        status.textContent = '数学数据编译未完成，当前数据未改变。';
+        showToast('数学多视图审计失败: ' + error.message, 'error');
+    }
+}
+
+function renderMathematicalDataCompilation(result) {
+    const box = document.getElementById('math-data-compilation-result');
+    const contract = result.contract || {};
+    const summary = result.summary || {};
+    const views = result.views || [];
+    const relationships = (result.conclusion_stress || {}).relationships || [];
+    const statusClass = result.status === 'contradicted' ? 'research-fail'
+        : (result.status === 'assessed' ? 'research-safe' : 'research-risk');
+    let html = `<details class="math-data-section" open><summary>数学数据契约与多视图反证 <span class="${statusClass}">${escapeHtml(result.status || '-')}</span></summary>`;
+    html += `<div class="research-metrics"><span><small>目标</small><strong>${escapeHtml(contract.target || '未绑定')}</strong></span><span><small>观测粒度</small><strong>${escapeHtml((contract.observed_grain || []).join(' × ') || '未验证')}</strong><small>${escapeHtml(contract.grain_status || '-')}</small></span><span><small>语义来源</small><strong>${escapeHtml(contract.semantic_contract_source || 'heuristic')}</strong><small>显式 ${Number((contract.semantic_hints_applied || []).length)} 项</small></span><span><small>粒度唯一性</small><strong>${contract.grain_uniqueness == null ? '-' : (contract.grain_uniqueness * 100).toFixed(1) + '%'}</strong></span><span><small>审计行数</small><strong>${Number(summary.audited_rows || contract.profiled_rows || 0).toLocaleString()} / ${Number(summary.source_rows || contract.rows || 0).toLocaleString()}</strong></span><span><small>编译耗时</small><strong>${Number((summary.timing_ms || {}).total || 0).toFixed(1)} ms</strong></span><span><small>候选视图</small><strong>${summary.admissible_views || 0} / ${summary.candidate_views || 0}</strong></span><span><small>方向翻转</small><strong class="${summary.direction_reversals ? 'research-fail' : 'research-safe'}">${summary.direction_reversals || 0}</strong></span></div>`;
+    html += `<p class="hint"><strong>估计对象：</strong>${escapeHtml(contract.estimand || '-')}</p>`;
+    if ((contract.unresolved || []).length) {
+        html += `<p class="research-warning"><strong>未决语义：</strong>${escapeHtml(contract.unresolved.join('；'))}</p>`;
+    }
+    if (views.length) {
+        html += '<h4>候选建模视图</h4><div class="table-wrapper"><table class="data-table math-view-table"><thead><tr><th>视图</th><th>估计对象</th><th>粒度关系</th><th>输出规模</th><th>守恒/泄漏</th><th>处置</th></tr></thead><tbody>';
+        views.forEach((view, index) => {
+            const viewClass = view.admissible ? 'research-safe' : 'research-fail';
+            const conservationFailed = (view.conservation_audit || []).filter(item => item.status === 'fail').length;
+            const auditText = `守恒失败 ${conservationFailed}；泄漏 ${escapeHtml(view.leakage_audit?.status || '-')}`;
+            const action = (view.pipeline || []).length
+                ? `<button class="btn btn-sm" onclick="loadMathematicalDataView(${index})" ${view.admissible ? '' : 'disabled'}>载入流水线</button>`
+                : '<span class="hint">基线</span>';
+            const admissionText = view.admissible
+                ? (summary.sampled_execution ? '样本审计通过' : '完整审计通过')
+                : '阻断';
+            html += `<tr><td><strong>${escapeHtml(view.name)}</strong><br><small>${escapeHtml(view.purpose)}</small></td><td>${escapeHtml(view.estimand || '-')}</td><td>${escapeHtml(view.row_relation || '-')}<br><small>${escapeHtml((view.output_grain || []).join(' × ') || '-')}</small></td><td>${view.output_shape ? view.output_shape.join('×') : '-'}</td><td>${auditText}</td><td><span class="${viewClass}">${admissionText}</span><br>${action}${(view.blocking_reasons || []).length ? `<small>${escapeHtml(view.blocking_reasons.join('；'))}</small>` : ''}</td></tr>`;
+        });
+        html += '</tbody></table></div>';
+    }
+    const stressed = relationships.filter(item => item.status !== 'stable_empirical');
+    if (stressed.length) {
+        html += '<h4>结论可信度与视图敏感性</h4><div class="table-wrapper"><table class="data-table"><thead><tr><th>关系</th><th>状态</th><th>全局ρ / 95%区间</th><th>FDR q</th><th>效应跨度</th><th>审计解释</th></tr></thead><tbody>';
+        stressed.slice(0, 20).forEach(item => {
+            const global = (item.contexts || []).find(context => context.view === 'global_complete_case');
+            const interval = (global?.confidence_interval_95 || []).join(', ');
+            html += `<tr><td>${escapeHtml(item.predictor)} → ${escapeHtml(item.target)}</td><td><span class="${item.status === 'contradicted' ? 'research-fail' : 'research-risk'}">${escapeHtml(item.status)}</span></td><td>${global?.rho ?? '-'}<br><small>[${escapeHtml(interval || '-')} ]</small></td><td>${item.global_fdr_q ?? '-'}</td><td>${item.effect_spread ?? '-'}</td><td>${escapeHtml(item.interpretation || '-')}</td></tr>`;
+        });
+        html += '</tbody></table></div>';
+    }
+    (result.findings || []).forEach(item => {
+        const findingClass = item.level === 'contradicted' || item.level === 'blocked' ? 'research-warning' : 'hint';
+        html += `<p class="${findingClass}"><strong>${escapeHtml(item.message)}</strong><br>${escapeHtml(item.action || '')}</p>`;
+    });
+    html += '</details>';
+    box.innerHTML = html;
+}
+
+function loadMathematicalDataView(index) {
+    const view = mathematicalDataCompilation?.views?.[index];
+    if (!view || !view.admissible || !(view.pipeline || []).length) return;
+    updateTransformPipeline(view.pipeline);
+    document.getElementById('transform-status').textContent = `已载入“${view.name}”。该视图的估计对象是：${view.estimand}。请预览后再应用。`;
+}
+
+function useTransformRecommendation(index) {
+    const recommendation = transformRecommendations[index];
+    if (!recommendation) return;
+    updateTransformPipeline(recommendation.pipeline);
+    document.getElementById('transform-status').textContent = `已载入“${recommendation.name}”。请先预览，并核验：${recommendation.risk}`;
+}
+
+function isTransformCategoricalBar(result) {
+    const encodings = result?.encodings || {};
+    const xKind = result?.field_types?.[encodings.x];
+    const yKind = result?.field_types?.[encodings.y];
+    return result?.chart_type === 'bar'
+        && !['numeric', 'datetime'].includes(xKind) && yKind === 'numeric';
+}
+
+function resetTransformPreviewView(result) {
+    const categoricalBar = isTransformCategoricalBar(result);
+    transformPreviewView = {
+        orientation: categoricalBar ? 'horizontal' : 'vertical',
+        sort: categoricalBar ? 'desc' : 'none',
+        topN: categoricalBar ? 15 : 0,
+        labels: categoricalBar,
+    };
+}
+
+function selectTransformPreviewPreset(index) {
+    const preset = transformPreviewPresets[index];
+    if (!preset?.result) return;
+    transformPreviewResult = preset.result;
+    resetTransformPreviewView(transformPreviewResult);
+    document.querySelectorAll('.transform-preview-preset').forEach((button, buttonIndex) => {
+        button.classList.toggle('active', buttonIndex === index);
+    });
+    const title = document.getElementById('transform-preview-title');
+    const reason = document.getElementById('transform-preview-reason');
+    const categoricalBar = isTransformCategoricalBar(transformPreviewResult);
+    if (title) title.textContent = categoricalBar ? '排名比较' : interactiveVizChartLabel(transformPreviewResult.chart_type);
+    if (reason) reason.textContent = transformPreviewResult.reason || '';
+    document.getElementById('transform-bar-controls')?.classList.toggle('hidden', !categoricalBar);
+    renderTransformPreviewChart(transformPreviewResult);
+    syncTransformPreviewToolbar();
+}
+
+function renderTransformResult(data, committed) {
+    const box = document.getElementById('transform-result');
+    const audit = data.audit || [];
+    const warnings = data.warnings || [];
+    const preview = data.data || {};
+    const inputRows = Number(data.input_shape?.[0] || 0);
+    const inputColumns = Number(data.input_shape?.[1] || 0);
+    const outputRows = Number(data.shape?.[0] || 0);
+    const outputColumns = Number(data.shape?.[1] || 0);
+    const rowDelta = outputRows - inputRows;
+    const columnDelta = outputColumns - inputColumns;
+    disposeTransformPreviewChart();
+    transformPreviewPresets = data.visual_preview?.presets || [];
+    transformPreviewResult = transformPreviewPresets[0]?.result || data.visual_preview || null;
+    const previewEncodings = transformPreviewResult?.encodings || {};
+    const previewXKind = transformPreviewResult?.field_types?.[previewEncodings.x];
+    const categoricalBar = transformPreviewResult?.chart_type === 'bar'
+        && !['numeric', 'datetime'].includes(previewXKind);
+    resetTransformPreviewView(transformPreviewResult);
+    let html = `<div class="transform-result-head"><strong>${committed ? '已提交' : '预览'}：${Number(data.shape?.[0] || 0).toLocaleString()} 行 × ${Number(data.shape?.[1] || 0).toLocaleString()} 列</strong><span>内存 ${(Number(data.memory_bytes || 0) / 1048576).toFixed(2)} MB</span></div>`;
+    html += `
+        <section class="transform-visual-preview">
+            <div class="transform-visual-header">
+                <div>
+                    <span class="transform-visual-kicker">结果洞察</span>
+                    <h4 id="transform-preview-title">${categoricalBar ? '排名比较' : (escapeHtml(interactiveVizChartLabel(transformPreviewResult?.chart_type || '')) || '结果概览')}</h4>
+                    <p id="transform-preview-reason">${escapeHtml(transformPreviewResult?.reason || '正在检查结果是否具备可解释的绘图字段。')}</p>
+                </div>
+                <span class="transform-visual-scope">预览只读 · 最多 1,200 图元</span>
+            </div>
+            <div class="transform-shape-flow" aria-label="变换前后结构对比">
+                <div><small>输入</small><strong>${inputRows.toLocaleString()} 行 · ${inputColumns.toLocaleString()} 列</strong></div>
+                <b aria-hidden="true">→</b>
+                <div><small>输出</small><strong>${outputRows.toLocaleString()} 行 · ${outputColumns.toLocaleString()} 列</strong></div>
+                <div class="transform-shape-delta"><small>变化</small><strong>${rowDelta >= 0 ? '+' : ''}${rowDelta.toLocaleString()} 行 · ${columnDelta >= 0 ? '+' : ''}${columnDelta.toLocaleString()} 列</strong></div>
+            </div>
+            ${transformPreviewPresets.length > 1 ? `<div class="transform-preview-presets" aria-label="结果图形方案">${transformPreviewPresets.map((preset, index) => `<button type="button" class="transform-preview-preset ${index === 0 ? 'active' : ''}" onclick="selectTransformPreviewPreset(${index})">${escapeHtml(preset.label)}</button>`).join('')}</div>` : ''}
+            <div id="transform-bar-controls" class="transform-chart-toolbar ${categoricalBar ? '' : 'hidden'}" aria-label="图形显示选项">
+                <div class="transform-segmented">
+                    <button type="button" data-orientation="horizontal" onclick="setTransformPreviewView('orientation','horizontal')">横向排名</button>
+                    <button type="button" data-orientation="vertical" onclick="setTransformPreviewView('orientation','vertical')">纵向比较</button>
+                </div>
+                <label>排序<select id="transform-preview-sort" onchange="setTransformPreviewView('sort',this.value)"><option value="desc">从高到低</option><option value="asc">从低到高</option><option value="none">原始顺序</option></select></label>
+                <label>显示<select id="transform-preview-topn" onchange="setTransformPreviewView('topN',this.value)"><option value="10">前 10</option><option value="15" selected>前 15</option><option value="30">前 30</option><option value="0">全部</option></select></label>
+                <label class="transform-label-toggle"><input id="transform-preview-labels" type="checkbox" checked onchange="setTransformPreviewView('labels',this.checked)"> 显示数值</label>
+            </div>
+            <div class="transform-chart-stage">
+                <div id="transform-preview-chart" class="transform-preview-chart" role="img" aria-label="变换结果自动图"></div>
+                <aside id="transform-preview-insight" class="transform-preview-insight" aria-live="polite"></aside>
+            </div>
+            <div id="transform-preview-chart-note" class="transform-preview-chart-note"></div>
+        </section>`;
+    if (warnings.length) {
+        html += '<ul class="transform-warning-list">' + warnings.map(item => `<li>${escapeHtml(item)}</li>`).join('') + '</ul>';
+    }
+    if (audit.length) {
+        html += `<details class="transform-result-details"><summary>查看 ${audit.length} 步执行审计</summary><div class="table-wrapper"><table class="data-table transform-audit-table"><thead><tr><th>步骤</th><th>操作</th><th>输入</th><th>输出</th><th>新增字段</th><th>删除字段</th><th>耗时</th></tr></thead><tbody>`;
+        audit.forEach(item => {
+            html += `<tr><td>${item.step}</td><td>${escapeHtml(item.operation)}</td><td>${item.input_shape.join('×')}</td><td>${item.output_shape.join('×')}</td><td>${escapeHtml((item.columns_added || []).join('、') || '-')}</td><td>${escapeHtml((item.columns_removed || []).join('、') || '-')}</td><td>${item.elapsed_ms} ms</td></tr>`;
+        });
+        html += '</tbody></table></div></details>';
+    }
+    if (preview.columns && preview.preview) {
+        html += `<details class="transform-result-details"><summary>查看结果抽样（前 ${Math.min(10, preview.preview.length)} 行）</summary><div class="table-wrapper"><table class="data-table"><thead><tr>`;
+        preview.columns.forEach(column => { html += `<th>${escapeHtml(column)}</th>`; });
+        html += '</tr></thead><tbody>';
+        preview.preview.slice(0, 10).forEach(row => {
+            html += '<tr>';
+            preview.columns.forEach(column => {
+                const value = row[column];
+                html += `<td>${value === null ? '<span class="transform-null">NULL</span>' : escapeHtml(String(value))}</td>`;
+            });
+            html += '</tr>';
+        });
+        html += '</tbody></table></div></details>';
+    }
+    box.innerHTML = html;
+    renderTransformPreviewChart(transformPreviewResult);
+    syncTransformPreviewToolbar();
+}
+
+function disposeTransformPreviewChart() {
+    if (!transformPreviewChart) return;
+    transformPreviewChart.dispose();
+    transformPreviewChart = null;
+}
+
+function setTransformPreviewView(key, value) {
+    if (key === 'topN') value = Math.max(0, Number(value) || 0);
+    if (key === 'labels') value = Boolean(value);
+    transformPreviewView[key] = value;
+    renderTransformPreviewChart(transformPreviewResult);
+    syncTransformPreviewToolbar();
+}
+
+function syncTransformPreviewToolbar() {
+    document.querySelectorAll('.transform-segmented button').forEach(button => {
+        button.classList.toggle('active', button.dataset.orientation === transformPreviewView.orientation);
+    });
+    const sort = document.getElementById('transform-preview-sort');
+    const topN = document.getElementById('transform-preview-topn');
+    const labels = document.getElementById('transform-preview-labels');
+    if (sort) sort.value = transformPreviewView.sort;
+    if (topN) topN.value = String(transformPreviewView.topN);
+    if (labels) labels.checked = Boolean(transformPreviewView.labels);
+}
+
+function formatTransformChartValue(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return String(value ?? '-');
+    return Math.abs(number) >= 1000
+        ? number.toLocaleString(undefined, { maximumFractionDigits: 2 })
+        : Number(number.toPrecision(5)).toString();
+}
+
+function renderTransformPreviewInsight(records, result) {
+    const box = document.getElementById('transform-preview-insight');
+    if (!box) return;
+    const enc = result?.encodings || {};
+    const numericPairs = records.map(record => ({
+        label: String(record[enc.x] ?? '缺失'),
+        value: Number(record[enc.y]),
+    })).filter(item => Number.isFinite(item.value));
+    if (!numericPairs.length) {
+        box.innerHTML = '<span>一眼结论</span><h5>暂无稳定数值摘要</h5><p>请结合下方抽样表核验字段内容。</p>';
+        return;
+    }
+    if (result.chart_type === 'bar') {
+        const ranked = [...numericPairs].sort((left, right) => right.value - left.value);
+        const values = ranked.map(item => item.value).sort((left, right) => left - right);
+        const top = ranked[0];
+        const bottom = ranked[ranked.length - 1];
+        const median = values.length % 2
+            ? values[Math.floor(values.length / 2)]
+            : (values[values.length / 2 - 1] + values[values.length / 2]) / 2;
+        box.innerHTML = `<span>一眼结论</span><h5>${escapeHtml(top.label)} 最高</h5>
+            <strong>${escapeHtml(formatTransformChartValue(top.value))}</strong>
+            <p>中位数 ${escapeHtml(formatTransformChartValue(median))}；最高与最低相差 ${escapeHtml(formatTransformChartValue(top.value - bottom.value))}。</p>
+            <small>这是结果描述，不代表差异显著或具有因果关系。</small>`;
+        return;
+    }
+    if (['line', 'area'].includes(result.chart_type)) {
+        const first = numericPairs[0];
+        const last = numericPairs[numericPairs.length - 1];
+        const delta = last.value - first.value;
+        box.innerHTML = `<span>一眼结论</span><h5>${delta >= 0 ? '期末高于期初' : '期末低于期初'}</h5>
+            <strong>${delta >= 0 ? '+' : ''}${escapeHtml(formatTransformChartValue(delta))}</strong>
+            <p>从 ${escapeHtml(formatTransformChartValue(first.value))} 变化到 ${escapeHtml(formatTransformChartValue(last.value))}，共 ${numericPairs.length} 个可见点。</p>
+            <small>趋势仍需检查季节性、异常点和时间窗口敏感性。</small>`;
+        return;
+    }
+    box.innerHTML = `<span>一眼结论</span><h5>联合分布</h5><strong>${numericPairs.length.toLocaleString()} 点</strong><p>用于寻找方向、分群、非线性与异常点。</p><small>形态只提示关联，不证明因果。</small>`;
+}
+
+function renderTransformPreviewChart(result) {
+    const chartDom = document.getElementById('transform-preview-chart');
+    const note = document.getElementById('transform-preview-chart-note');
+    if (!chartDom || !note) return;
+    let records = [...(result?.records || [])];
+    if (!result?.available || !records.length || typeof echarts === 'undefined') {
+        chartDom.classList.add('is-empty');
+        chartDom.innerHTML = `<div><strong>当前没有可解释的自动图</strong><span>${escapeHtml(result?.reason || '缺少可绘制字段或记录。')}</span></div>`;
+        note.textContent = '表格抽样与步骤审计仍可在下方核验。';
+        return;
+    }
+
+    const enc = result.encodings || {};
+    const xKind = result.field_types?.[enc.x];
+    const yKind = result.field_types?.[enc.y];
+    const categoricalBar = result.chart_type === 'bar'
+        && !['numeric', 'datetime'].includes(xKind) && yKind === 'numeric';
+    if (categoricalBar && transformPreviewView.sort !== 'none') {
+        const direction = transformPreviewView.sort === 'asc' ? 1 : -1;
+        records.sort((left, right) => direction * (Number(left[enc.y]) - Number(right[enc.y])));
+    }
+    if (categoricalBar && transformPreviewView.topN > 0) {
+        records = records.slice(0, transformPreviewView.topN);
+    }
+    const horizontal = categoricalBar && transformPreviewView.orientation === 'horizontal';
+    const numericColor = enc.color && result.field_types?.[enc.color] === 'numeric';
+    const groups = groupInteractiveVizRecords(records, enc.color, numericColor, 10);
+    const chartType = result.chart_type === 'area' ? 'line' : result.chart_type;
+    const tooltipFields = [enc.x, enc.y, enc.color, enc.size, ...(enc.tooltip || [])];
+    const series = Array.from(groups.entries()).map(([name, groupRecords]) => ({
+        name,
+        type: chartType,
+        data: groupRecords.map(record => ({
+            value: horizontal
+                ? [record[enc.y], record[enc.x]]
+                : [record[enc.x], record[enc.y]],
+            raw: record,
+        })),
+        showSymbol: ['line', 'area'].includes(result.chart_type) ? groupRecords.length < 240 : true,
+        symbolSize: result.chart_type === 'scatter' ? 9 : 7,
+        areaStyle: result.chart_type === 'area' ? { opacity: 0.16 } : undefined,
+        lineStyle: { width: 2.4 },
+        itemStyle: result.chart_type === 'bar'
+            ? { borderRadius: horizontal ? [2, 7, 7, 2] : [7, 7, 2, 2], opacity: 0.9 }
+            : { borderColor: '#fff', borderWidth: result.chart_type === 'scatter' ? 1 : 0, opacity: 0.88 },
+        label: result.chart_type === 'bar' ? {
+            show: Boolean(transformPreviewView.labels),
+            position: horizontal ? 'right' : 'top',
+            color: '#345364',
+            fontWeight: 700,
+            fontSize: 10,
+            formatter: params => formatTransformChartValue(params.value[horizontal ? 0 : 1]),
+        } : undefined,
+        barMaxWidth: 44,
+        large: result.chart_type === 'scatter' && groupRecords.length > 800,
+        progressive: 800,
+        emphasis: { focus: 'series' },
+    }));
+    const categoryLevels = new Set(records.map(record => String(record[enc.x]))).size;
+    const showSlider = categoricalBar && categoryLevels > 16;
+    chartDom.style.height = horizontal
+        ? `${Math.min(540, Math.max(280, categoryLevels * 31 + 75))}px`
+        : '350px';
+    transformPreviewChart = echarts.getInstanceByDom(chartDom) || echarts.init(chartDom);
+    transformPreviewChart.clear();
+    transformPreviewChart.setOption({
+        animation: records.length < 600,
+        color: ['#1d6f8a', '#31a28b', '#e7a23b', '#d95d63', '#725cc5', '#4b91ca', '#93a83d', '#c4679b'],
+        textStyle: { fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif" },
+        legend: groups.size > 1 ? { type: 'scroll', top: 4, left: 'center', itemWidth: 14, itemHeight: 8, textStyle: { color: '#516679', fontSize: 10 } } : undefined,
+        toolbox: { right: 8, top: 0, feature: { saveAsImage: { title: '保存图片' }, dataZoom: { title: { zoom: '缩放', back: '还原缩放' } }, restore: { title: '还原' } }, iconStyle: { borderColor: '#71879a' } },
+        tooltip: {
+            trigger: 'item', confine: true, backgroundColor: 'rgba(12,30,49,.95)', borderWidth: 0,
+            textStyle: { color: '#edf6fb', fontSize: 11 },
+            formatter: params => interactiveVizTooltipFormatter(params, tooltipFields),
+        },
+        grid: { left: horizontal ? 30 : 50, right: horizontal && transformPreviewView.labels ? 64 : 25, top: groups.size > 1 ? 48 : 32, bottom: 42, containLabel: true },
+        xAxis: horizontal ? {
+            type: 'value', name: interactiveVizDisplayField(enc.y), nameLocation: 'middle', nameGap: 28,
+            axisLabel: { color: '#718291', fontSize: 9 }, axisLine: { show: false },
+            splitLine: { lineStyle: { color: '#e7edf2', type: 'dashed' } },
+        } : {
+            type: xKind === 'numeric' ? 'value' : (xKind === 'datetime' ? 'time' : 'category'),
+            name: interactiveVizDisplayField(enc.x), nameLocation: 'middle', nameGap: showSlider ? 54 : 32,
+            axisLabel: { hideOverlap: true, rotate: !['numeric', 'datetime'].includes(xKind) ? 20 : 0, color: '#63778a', fontSize: 10 },
+            axisLine: { lineStyle: { color: '#a8b7c4' } }, splitLine: { show: xKind === 'numeric', lineStyle: { color: '#e9eef2', type: 'dashed' } },
+        },
+        yAxis: horizontal ? {
+            type: 'category', inverse: transformPreviewView.sort === 'desc',
+            axisLabel: { width: 130, overflow: 'truncate', color: '#425c6b', fontSize: 10 },
+            axisLine: { show: false }, axisTick: { show: false },
+        } : {
+            type: yKind === 'numeric' ? 'value' : 'category',
+            name: interactiveVizDisplayField(enc.y), nameLocation: 'middle', nameGap: 44,
+            axisLabel: { hideOverlap: true, color: '#63778a', fontSize: 10 },
+            axisLine: { show: false }, splitLine: { lineStyle: { color: '#e7edf2', type: 'dashed' } },
+        },
+        dataZoom: showSlider ? [
+            { type: 'inside', yAxisIndex: 0, filterMode: 'filter' },
+            { type: 'slider', yAxisIndex: 0, right: 2, width: 15, filterMode: 'filter' },
+        ] : [{ type: 'inside', [horizontal ? 'yAxisIndex' : 'xAxisIndex']: 0, filterMode: 'filter' }],
+        series,
+    }, true);
+    const audit = result.audit || {};
+    const aggregation = audit.aggregation || {};
+    const warnings = result.warnings || [];
+    const chartLabel = horizontal ? '横向排名' : interactiveVizChartLabel(result.chart_type);
+    const aggregationLabel = ({ none: '逐行展示', count: '计数', sum: '求和', mean: '均值', median: '中位数', min: '最小值', max: '最大值' })[aggregation.function] || aggregation.function || '逐行展示';
+    note.innerHTML = `<span>${escapeHtml(chartLabel)}</span><span>图元 ${Number(audit.output_rows || records.length).toLocaleString()} / 结果 ${Number(audit.source_rows || 0).toLocaleString()} 行</span><span>口径 ${escapeHtml(aggregationLabel)}</span>${warnings.length ? `<em>⚠ ${escapeHtml(warnings[0])}</em>` : ''}`;
+    renderTransformPreviewInsight(records, result);
+}
+
+async function executeTableTransformation(commit) {
+    const status = document.getElementById('transform-status');
+    let pipeline;
+    try {
+        pipeline = readTransformPipeline();
+    } catch (error) {
+        showToast(error.message, 'error');
+        return;
+    }
+    const actionButton = document.getElementById(commit ? 'transform-apply-btn' : 'transform-preview-btn');
+    if (actionButton) actionButton.disabled = true;
+    status.textContent = commit ? '正在用有界样本预检字段绑定与步骤组合…' : '正在完整数据上执行预览（不会修改当前表）…';
+    try {
+        if (commit) {
+            const validationResponse = await fetch('/api/data/transform/validate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pipeline })
+            });
+            const validation = await validationResponse.json();
+            if (!validation.success) {
+                renderTransformValidationFailure(validation);
+                status.textContent = '应用已阻止：流水线字段或步骤组合与当前表不兼容，数据保持不变。';
+                showToast('应用前校验未通过，请按页面建议修正流水线', 'error');
+                return;
+            }
+            status.textContent = `预检通过（${Number(validation.sampled_rows || 0).toLocaleString()} 行）：正在事务式执行完整流水线…`;
+        }
+        const endpoint = commit ? '/api/data/transform/apply' : '/api/data/transform/preview';
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pipeline })
+        });
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || '流水线执行失败');
+        renderTransformResult(data, commit);
+        status.textContent = commit
+            ? `已提交 ${data.audit?.length || 0} 步变换；后续分析与建模将使用该结果。${data.undo_available ? '可撤销。' : '未保存撤销快照。'}`
+            : `预览完成，共 ${data.audit?.length || 0} 步；确认字段和行数后再应用。`;
+        if (commit) {
+            uploadedData = data.data;
+            showUploadResult(data);
+            document.getElementById('data-status').textContent = `变换结果: ${data.shape[0]}行×${data.shape[1]}列 · ${data.audit.length}步可审计流水线`;
+            document.getElementById('data-status').classList.add('loaded');
+            populateTargetOptions(data.data.columns, null);
+            showToast('数据流水线已应用到后续建模');
+        }
+    } catch (error) {
+        status.textContent = '流水线未提交，当前数据保持不变。';
+        showToast('数据变换失败: ' + error.message, 'error');
+    } finally {
+        if (actionButton) actionButton.disabled = false;
+    }
+}
+
+function renderTransformValidationFailure(validation) {
+    const box = document.getElementById('transform-result');
+    disposeTransformPreviewChart();
+    const columns = validation.current_columns || uploadedData?.columns || [];
+    transformValidationSuggestion = Array.isArray(validation.suggested_pipeline) ? validation.suggested_pipeline : null;
+    const repairButton = transformValidationSuggestion !== null
+        ? `<button class="btn btn-sm transform-repair-btn" onclick="applyTransformValidationSuggestion()">${transformValidationSuggestion.length ? `移除第 ${Number(validation.invalid_step || 0)} 步` : '清空不适用步骤'}</button>`
+        : '';
+    box.innerHTML = `
+        <section class="transform-preflight-failure" role="alert">
+            <div class="transform-preflight-icon">!</div>
+            <div>
+                <span class="transform-preflight-kicker">应用前校验未通过</span>
+                <h4>${escapeHtml(validation.error || '流水线与当前表不兼容')}</h4>
+                <p>${escapeHtml(validation.action || '请重新绑定字段后再执行。')}</p>
+                <div class="transform-current-columns"><strong>当前可用字段</strong>${columns.map(column => `<span>${escapeHtml(String(column))}</span>`).join('')}</div>
+                ${repairButton}
+            </div>
+        </section>`;
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function applyTransformValidationSuggestion() {
+    if (!Array.isArray(transformValidationSuggestion)) return;
+    const message = transformValidationSuggestion.length
+        ? '已移除不兼容步骤；请重新预览或应用。'
+        : '不兼容流水线已清空；请从已绑定当前字段的操作注册表重新选择。';
+    updateTransformPipeline(transformValidationSuggestion, message);
+    transformValidationSuggestion = null;
+}
+
+async function undoTableTransformation() {
+    const status = document.getElementById('transform-status');
+    try {
+        const response = await fetch('/api/data/transform/undo', { method: 'POST' });
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || '撤销失败');
+        uploadedData = data.data;
+        showUploadResult(data);
+        document.getElementById('data-status').textContent = `已撤销数据变换: ${data.shape[0]}行×${data.shape[1]}列`;
+        populateTargetOptions(data.data.columns, null);
+        disposeTransformPreviewChart();
+        document.getElementById('transform-result').innerHTML = '';
+        status.textContent = `已恢复上一版本。${data.undo_available ? '仍可继续撤销。' : ''}`;
+        showToast('已撤销上次数据变换');
+    } catch (error) {
+        showToast(error.message, 'error');
     }
 }
 
@@ -399,42 +2521,60 @@ function updateJoinOptions() {
 async function updateJoinKeyOptions() {
     const leftVal = document.getElementById('join-left').value;
     const rightVal = document.getElementById('join-right').value;
-    const onSel = document.getElementById('join-on');
+    const leftKeySelect = document.getElementById('join-left-on');
+    const rightKeySelect = document.getElementById('join-right-on');
     
     if (!leftVal || !rightVal) {
-        onSel.innerHTML = '<option value="">先选择左右表</option>';
+        leftKeySelect.innerHTML = '<option value="">先选择左右表</option>';
+        rightKeySelect.innerHTML = '<option value="">先选择左右表</option>';
         return;
     }
     
     try {
         const left = JSON.parse(leftVal);
         const right = JSON.parse(rightVal);
-        
-        // 获取两个表的列名（从uploadedFiles中已有）
-        const leftFile = uploadedFiles[left.file_index];
-        const rightFile = uploadedFiles[right.file_index];
-        const leftCols = new Set(leftFile.columns || []);
-        const rightCols = new Set(rightFile.columns || []);
-        const commonCols = [...leftCols].filter(c => rightCols.has(c));
-        
-        if (commonCols.length === 0) {
-            onSel.innerHTML = '<option value="">两表无共同列</option>';
-        } else {
-            onSel.innerHTML = commonCols.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+        const [leftResponse, rightResponse] = await Promise.all([
+            fetch('/api/upload/schema', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: left })
+            }),
+            fetch('/api/upload/schema', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source: right })
+            })
+        ]);
+        const leftSchema = await leftResponse.json();
+        const rightSchema = await rightResponse.json();
+        if (!leftSchema.success || !rightSchema.success) {
+            throw new Error(leftSchema.error || rightSchema.error || '字段读取失败');
+        }
+        const leftColumns = leftSchema.columns || [];
+        const rightColumns = rightSchema.columns || [];
+        const common = leftColumns.filter(column => rightColumns.includes(column));
+        const defaultKey = common[0] || null;
+        leftKeySelect.innerHTML = leftColumns.map(column => `<option value="${escapeHtml(column)}" ${column === defaultKey ? 'selected' : ''}>${escapeHtml(column)}</option>`).join('');
+        rightKeySelect.innerHTML = rightColumns.map(column => `<option value="${escapeHtml(column)}" ${column === defaultKey ? 'selected' : ''}>${escapeHtml(column)}</option>`).join('');
+        if (!defaultKey) {
+            showToast('两表没有同名字段，请分别选择语义对应的左右键');
         }
     } catch (e) {
-        onSel.innerHTML = '<option value="">选择错误</option>';
+        leftKeySelect.innerHTML = '<option value="">字段读取失败</option>';
+        rightKeySelect.innerHTML = '<option value="">字段读取失败</option>';
+        showToast('关联字段读取失败: ' + e.message, 'error');
     }
 }
 
 async function executeJoin() {
     const leftVal = document.getElementById('join-left').value;
     const rightVal = document.getElementById('join-right').value;
-    const on = document.getElementById('join-on').value;
+    const leftOn = Array.from(document.getElementById('join-left-on').selectedOptions).map(option => option.value).filter(Boolean);
+    const rightOn = Array.from(document.getElementById('join-right-on').selectedOptions).map(option => option.value).filter(Boolean);
     const how = document.getElementById('join-how').value;
+    const keyType = document.getElementById('join-key-type').value;
+    const validate = document.getElementById('join-validate').value;
     
-    if (!leftVal || !rightVal || !on) {
-        showToast('请完整选择左表、右表和关联键', 'error');
+    if (!leftVal || !rightVal || leftOn.length === 0 || leftOn.length !== rightOn.length) {
+        showToast('请选择左右表，并确保左右关联键数量一致', 'error');
         return;
     }
     
@@ -445,17 +2585,22 @@ async function executeJoin() {
             body: JSON.stringify({
                 left: JSON.parse(leftVal),
                 right: JSON.parse(rightVal),
-                on: on,
-                how: how
+                left_on: leftOn,
+                right_on: rightOn,
+                how: how,
+                key_type: keyType,
+                validate: validate
             })
         });
         const data = await res.json();
         if (data.success) {
             uploadedData = data.data;
             showUploadResult(data);
-            document.getElementById('data-status').textContent = `关联结果: ${data.shape[0]}行×${data.shape[1]}列`;
+            const diagnostics = data.join_diagnostics || {};
+            const relationLabels = { one_to_one: '一对一', one_to_many: '一对多', many_to_one: '多对一', many_to_many: '多对多' };
+            document.getElementById('data-status').textContent = `关联结果: ${data.shape[0]}行×${data.shape[1]}列 · ${relationLabels[diagnostics.inferred_relation] || '键关系未知'} · 膨胀${Number(diagnostics.expansion_ratio || 0).toFixed(2)}倍`;
             populateTargetOptions(data.data.columns, data.target_hint);
-            showToast(`关联成功！${data.shape[0]}行×${data.shape[1]}列`);
+            showToast(`关联成功！${data.shape[0]}行×${data.shape[1]}列；${relationLabels[diagnostics.inferred_relation] || ''}`);
             goStep(2);
         } else {
             showToast(data.error || '关联失败', 'error');
@@ -470,16 +2615,17 @@ function showUploadResult(data) {
     const df = data.data;
     let html = `<p><strong>形状:</strong> ${df.shape[0]} 行 × ${df.shape[1]} 列 | <strong>内存:</strong> ${df.memory_mb} MB</p>`;
     html += '<div class="table-wrapper"><table class="data-table"><thead><tr>';
-    df.columns.forEach(c => html += `<th>${c}</th>`);
+    df.columns.forEach(c => html += `<th>${escapeHtml(String(c))}</th>`);
     html += '</tr></thead><tbody>';
     df.preview.forEach(row => {
         html += '<tr>';
-        df.columns.forEach(c => html += `<td>${row[c] !== null ? row[c] : '<span style="color:#999">NULL</span>'}</td>`);
+        df.columns.forEach(c => html += `<td>${row[c] !== null ? escapeHtml(String(row[c])) : '<span style="color:#999">NULL</span>'}</td>`);
         html += '</tr>';
     });
     html += '</tbody></table></div>';
     preview.innerHTML = html;
     document.getElementById('upload-result').classList.remove('hidden');
+    loadTransformCapabilities();
 }
 
 // ==================== EDA 加载 ====================
@@ -504,6 +2650,8 @@ async function loadEDA() {
         loadColumnQuality();
         // 自动加载数据质量报告
         loadDataQualityReport();
+        // 独立于模型训练的多维交互图形工作台
+        loadInteractiveVisualizationSchema();
 
         loading.classList.add('hidden');
         content.classList.remove('hidden');
@@ -687,6 +2835,942 @@ function renderEDA(eda) {
             series: [{ name: '相关性', type: 'heatmap', data: data, label: { show: true }, emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.5)' } } }]
         });
     }
+}
+
+// ==================== 多维交互图形工作台 ====================
+
+function interactiveVizField(name) {
+    return (interactiveVizSchema?.fields || []).find(field => field.name === name) || null;
+}
+
+function interactiveVizDisplayField(name) {
+    if (name === '__count__') return '记录数';
+    const value = name || '';
+    const suffixes = {
+        '_sum': '（求和）', '_mean': '（均值）', '_median': '（中位数）',
+        '_min': '（最小值）', '_max': '（最大值）', '_count': '（计数）',
+    };
+    for (const [suffix, label] of Object.entries(suffixes)) {
+        if (value.endsWith(suffix)) return value.slice(0, -suffix.length) + label;
+    }
+    return value;
+}
+
+function interactiveVizChartLabel(chartType) {
+    return ({ scatter: '散点图', line: '折线图', area: '面积图', bar: '柱状图', parallel: '平行坐标' })[chartType]
+        || chartType;
+}
+
+function interactiveVizFieldOptions(fields, includeEmpty = true) {
+    const empty = includeEmpty ? '<option value="">不使用</option>' : '';
+    const labels = {
+        measure: '度量', time: '时间', dimension: '分组维度',
+        label: '文本标签', identifier: '编码（不建议作为轴）',
+    };
+    return empty + fields.map(field =>
+        `<option value="${escapeHtml(field.name)}">${escapeHtml(field.name)} · ${labels[field.semantic_role] || field.kind}</option>`
+    ).join('');
+}
+
+function orderInteractiveVizFields(fields) {
+    const priority = { time: 0, measure: 1, dimension: 2, label: 3, identifier: 4 };
+    return [...fields].sort((left, right) =>
+        (priority[left.semantic_role] ?? 9) - (priority[right.semantic_role] ?? 9)
+        || String(left.name).localeCompare(String(right.name), 'zh-CN')
+    );
+}
+
+function setInteractiveVizValue(id, value) {
+    const element = document.getElementById(id);
+    if (!element) return;
+    const wanted = value == null ? '' : String(value);
+    if (Array.from(element.options || []).some(option => option.value === wanted)) {
+        element.value = wanted;
+    }
+}
+
+function populateInteractiveVizDatasetSources() {
+    const select = document.getElementById('viz-dataset-source');
+    if (!select) return;
+    const options = [];
+    let activeValue = '';
+    uploadedFiles.forEach((file, fileIndex) => {
+        const sheets = file.sheets && file.sheets.length ? file.sheets : [null];
+        sheets.forEach(sheetName => {
+            const value = JSON.stringify([fileIndex, sheetName]);
+            const label = `${file.filename}${sheetName ? ` · ${sheetName}` : ''}`;
+            options.push(`<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`);
+            if (file.is_active && (file.active_sheet || null) === sheetName) activeValue = value;
+        });
+    });
+    select.innerHTML = options.length ? options.join('') : '<option value="">当前数据表</option>';
+    if (activeValue) select.value = activeValue;
+    select.disabled = false;
+}
+
+async function switchInteractiveVisualizationDataset() {
+    const select = document.getElementById('viz-dataset-source');
+    if (!select?.value) return;
+    let source;
+    try {
+        source = JSON.parse(select.value);
+    } catch (_) {
+        setInteractiveVizConfigNote(['数据表选择状态无效，请重新选择'], true);
+        return;
+    }
+    select.disabled = true;
+    const status = document.getElementById('interactive-viz-status');
+    status.textContent = '正在切换数据表并重新分析字段语义…';
+    const switched = await selectSheet(Number(source[0]), source[1]);
+    if (!switched) select.disabled = false;
+}
+
+function setInteractiveVizConfigNote(messages = [], isError = false) {
+    const note = document.getElementById('interactive-viz-config-note');
+    if (!note) return;
+    note.classList.toggle('hidden', messages.length === 0);
+    note.classList.toggle('is-error', isError);
+    note.textContent = messages.join('；');
+}
+
+function configureInteractiveVizCapabilities(fields) {
+    const enabledCharts = new Set(interactiveVizSchema?.capability?.enabled_charts || ['bar']);
+    const chartSelect = document.getElementById('viz-chart-type');
+    Array.from(chartSelect.options).forEach(option => {
+        if (option.value === 'auto') return;
+        option.disabled = !enabledCharts.has(option.value);
+        option.title = option.disabled ? '当前数据缺少该图形所需的数学变量角色' : '';
+    });
+    const roles = role => fields.filter(field => field.semantic_role === role);
+    const intentAvailability = {
+        auto: true,
+        composition: roles('dimension').length > 0,
+        comparison: roles('dimension').length > 0 && roles('measure').length > 0,
+        relationship: roles('measure').length >= 2,
+        trend: roles('time').length > 0 && roles('measure').length > 0,
+        custom: true,
+    };
+    Array.from(document.getElementById('viz-intent').options).forEach(option => {
+        option.disabled = !intentAvailability[option.value];
+    });
+    syncInteractiveVizIntentButtons();
+}
+
+function syncInteractiveVizIntentButtons() {
+    const select = document.getElementById('viz-intent');
+    if (!select) return;
+    document.querySelectorAll('[data-viz-intent]').forEach(button => {
+        const option = Array.from(select.options).find(item => item.value === button.dataset.vizIntent);
+        button.disabled = Boolean(option?.disabled);
+        button.classList.toggle('is-active', button.dataset.vizIntent === select.value);
+        button.setAttribute('aria-pressed', button.dataset.vizIntent === select.value ? 'true' : 'false');
+        button.title = button.disabled ? '当前数据缺少完成这个分析问题所需的变量角色' : '';
+    });
+}
+
+function selectInteractiveVizIntent(intent) {
+    const select = document.getElementById('viz-intent');
+    const option = Array.from(select?.options || []).find(item => item.value === intent);
+    if (!select || option?.disabled) return;
+    select.value = intent;
+    syncInteractiveVizIntentButtons();
+    applyInteractiveVizIntent();
+}
+
+function validateInteractiveVizControls() {
+    const chart = document.getElementById('viz-chart-type')?.value;
+    const aggregation = document.getElementById('viz-aggregation')?.value;
+    const x = interactiveVizField(document.getElementById('viz-x')?.value);
+    const y = interactiveVizField(document.getElementById('viz-y')?.value);
+    const color = document.getElementById('viz-color')?.value;
+    const facet = document.getElementById('viz-facet')?.value;
+    const errors = [];
+    if (!x && chart !== 'parallel') errors.push('请选择X轴');
+    if (x && y && x.name === y.name) errors.push('X轴和Y轴不能使用同一字段');
+    if (facet && [x?.name, y?.name, color].includes(facet)) {
+        errors.push('分面不能重复使用已经绑定到轴或颜色的字段');
+    }
+    if (aggregation === 'count') {
+        if (chart !== 'bar' && chart !== 'auto') errors.push('计数聚合只能使用柱状图');
+        if (y) errors.push('计数模式自动使用“记录数”，不能另选Y轴');
+        if (x && ['label', 'identifier'].includes(x.semantic_role)
+            && Number(x.unique_count_profiled || 0) > 20
+            && Number(x.unique_rate_profiled || 0) > 0.5) {
+            errors.push(`“${x.name}”几乎一行一值，计数后只会得到一排1；请选择分组维度`);
+        }
+    } else {
+        if (['scatter', 'line', 'area', 'bar'].includes(chart) && !y) {
+            errors.push(`${interactiveVizChartLabel(chart)}需要选择数值Y轴`);
+        }
+        if (y && y.semantic_role !== 'measure') errors.push('Y轴必须是真实数值度量');
+        if (['line', 'area'].includes(chart) && x && !['time', 'measure'].includes(x.semantic_role)) {
+            errors.push(`${interactiveVizChartLabel(chart)}的X轴必须是时间或有序数值`);
+        }
+    }
+    return errors;
+}
+
+function synchronizeInteractiveVizControls() {
+    const notes = [];
+    const aggregation = document.getElementById('viz-aggregation');
+    const chart = document.getElementById('viz-chart-type');
+    const x = document.getElementById('viz-x');
+    const y = document.getElementById('viz-y');
+    const color = document.getElementById('viz-color');
+    const facet = document.getElementById('viz-facet');
+    const countMode = aggregation.value === 'count';
+    y.disabled = countMode;
+    document.getElementById('viz-y-label').textContent = countMode ? 'Y · 自动：记录数' : 'Y · 响应/度量';
+    if (countMode) {
+        if (y.value) {
+            y.value = '';
+            notes.push('计数模式已清除Y轴，统一使用记录数');
+        }
+        if (!['bar', 'auto'].includes(chart.value)) {
+            chart.value = 'bar';
+            notes.push('计数模式已切换为柱状图');
+        }
+    }
+    Array.from(y.options).forEach(option => {
+        option.disabled = Boolean(option.value && option.value === x.value);
+    });
+    if (y.value && y.value === x.value) {
+        y.value = '';
+        notes.push('已清除与X轴重复的Y轴');
+    }
+    const facetConflicts = new Set([x.value, y.value, color.value].filter(Boolean));
+    Array.from(facet.options).forEach(option => {
+        option.disabled = Boolean(option.value && facetConflicts.has(option.value));
+    });
+    if (facet.value && facetConflicts.has(facet.value)) {
+        facet.value = '';
+        notes.push('已清除与轴或颜色重复的分面');
+    }
+    const selectedChartOption = chart.selectedOptions[0];
+    if (selectedChartOption?.disabled) {
+        chart.value = 'bar';
+        notes.push('当前数据不满足所选图形的数学条件，已切换为柱状图');
+    }
+    const errors = validateInteractiveVizControls();
+    setInteractiveVizConfigNote(errors.length ? errors : notes, errors.length > 0);
+    syncInteractiveVizIntentButtons();
+    return { notes, errors };
+}
+
+function onInteractiveVizControlChange() {
+    setInteractiveVizValue('viz-intent', 'custom');
+    syncInteractiveVizIntentButtons();
+    const validation = synchronizeInteractiveVizControls();
+    if (!validation.errors.length) scheduleInteractiveVisualization();
+}
+
+function applyInteractiveVizIntent() {
+    if (!interactiveVizSchema) return;
+    const intent = document.getElementById('viz-intent').value;
+    syncInteractiveVizIntentButtons();
+    if (intent === 'auto') {
+        applyInteractiveVizRecommendation(true);
+        return;
+    }
+    if (intent === 'custom') {
+        synchronizeInteractiveVizControls();
+        return;
+    }
+    const fields = interactiveVizSchema.fields || [];
+    const measures = fields.filter(field => field.semantic_role === 'measure');
+    const times = fields.filter(field => field.semantic_role === 'time');
+    const dimensions = fields.filter(field => field.semantic_role === 'dimension');
+    const compactDimension = dimensions.find(field => Number(field.unique_count_profiled || 0) <= 12);
+    ['color', 'size', 'facet', 'animation'].forEach(channel => setInteractiveVizValue(`viz-${channel}`, ''));
+    setInteractiveVizValue('viz-time-unit', 'none');
+    if (intent === 'composition') {
+        setInteractiveVizValue('viz-chart-type', 'bar');
+        setInteractiveVizValue('viz-x', dimensions[0]?.name);
+        setInteractiveVizValue('viz-y', '');
+        setInteractiveVizValue('viz-aggregation', 'count');
+    } else if (intent === 'comparison') {
+        setInteractiveVizValue('viz-chart-type', 'bar');
+        setInteractiveVizValue('viz-x', dimensions[0]?.name);
+        setInteractiveVizValue('viz-y', measures[0]?.name);
+        setInteractiveVizValue('viz-aggregation', 'mean');
+    } else if (intent === 'relationship') {
+        setInteractiveVizValue('viz-chart-type', 'scatter');
+        setInteractiveVizValue('viz-x', measures[0]?.name);
+        setInteractiveVizValue('viz-y', measures[1]?.name);
+        setInteractiveVizValue('viz-color', compactDimension?.name || '');
+        setInteractiveVizValue('viz-aggregation', 'none');
+    } else if (intent === 'trend') {
+        setInteractiveVizValue('viz-chart-type', 'line');
+        setInteractiveVizValue('viz-x', times[0]?.name);
+        setInteractiveVizValue('viz-y', measures[0]?.name);
+        setInteractiveVizValue('viz-color', compactDimension?.name || '');
+        setInteractiveVizValue('viz-aggregation', 'mean');
+        setInteractiveVizValue('viz-time-unit', 'day');
+    }
+    const validation = synchronizeInteractiveVizControls();
+    if (!validation.errors.length) runInteractiveVisualization();
+}
+
+async function loadInteractiveVisualizationSchema() {
+    const card = document.getElementById('interactive-viz-card');
+    if (!card) return;
+    const status = document.getElementById('interactive-viz-status');
+    const previousSignature = (interactiveVizSchema?.fields || []).map(field => field.name).join('\u0001');
+    const previous = interactiveVizSchema ? {
+        intent: document.getElementById('viz-intent')?.value,
+        chart: document.getElementById('viz-chart-type')?.value,
+        x: document.getElementById('viz-x')?.value,
+        y: document.getElementById('viz-y')?.value,
+        color: document.getElementById('viz-color')?.value,
+        size: document.getElementById('viz-size')?.value,
+        facet: document.getElementById('viz-facet')?.value,
+        animation: document.getElementById('viz-animation')?.value,
+        aggregation: document.getElementById('viz-aggregation')?.value,
+        timeUnit: document.getElementById('viz-time-unit')?.value,
+        details: Array.from(document.getElementById('viz-detail-fields')?.selectedOptions || []).map(option => option.value),
+    } : null;
+    status.textContent = '正在读取字段类型、范围与推荐编码…';
+    try {
+        const response = await fetch('/api/visualization/explore/schema');
+        const payload = await response.json();
+        if (!payload.success) throw new Error(payload.error || '字段画像失败');
+        interactiveVizSchema = payload.schema;
+        populateInteractiveVizDatasetSources();
+        const fields = orderInteractiveVizFields(interactiveVizSchema.fields || []);
+        const measures = fields.filter(field => field.semantic_role === 'measure');
+        const colorFields = fields.filter(field => field.channel_suitability?.color)
+            .concat(fields.filter(field => !field.channel_suitability?.color));
+        const facetFields = fields.filter(field => field.channel_suitability?.facet);
+        const animationFields = fields.filter(field => field.channel_suitability?.animation);
+        const categoryFields = fields.filter(field => ['dimension', 'label', 'identifier'].includes(field.semantic_role));
+        document.getElementById('viz-x').innerHTML = interactiveVizFieldOptions(fields, false);
+        document.getElementById('viz-y').innerHTML = interactiveVizFieldOptions(measures, true);
+        document.getElementById('viz-color').innerHTML = interactiveVizFieldOptions(colorFields, true);
+        document.getElementById('viz-size').innerHTML = interactiveVizFieldOptions(measures, true);
+        document.getElementById('viz-facet').innerHTML = interactiveVizFieldOptions(facetFields, true);
+        document.getElementById('viz-animation').innerHTML = interactiveVizFieldOptions(animationFields, true);
+        document.getElementById('viz-detail-fields').innerHTML = interactiveVizFieldOptions(fields, false);
+        document.getElementById('viz-filter-field').innerHTML = interactiveVizFieldOptions(measures, true);
+        document.getElementById('viz-category-filter-field').innerHTML = interactiveVizFieldOptions(categoryFields, true);
+        configureInteractiveVizCapabilities(fields);
+
+        const signature = fields.map(field => field.name).join('\u0001');
+        if (previous && previousSignature === signature) {
+            setInteractiveVizValue('viz-intent', previous.intent || 'custom');
+            setInteractiveVizValue('viz-chart-type', previous.chart);
+            ['x', 'y', 'color', 'size', 'facet', 'animation'].forEach(channel =>
+                setInteractiveVizValue(`viz-${channel}`, previous[channel])
+            );
+            setInteractiveVizValue('viz-aggregation', previous.aggregation);
+            setInteractiveVizValue('viz-time-unit', previous.timeUnit);
+            const selected = new Set(previous.details);
+            Array.from(document.getElementById('viz-detail-fields').options).forEach(option => {
+                option.selected = selected.has(option.value);
+            });
+        } else {
+            applyInteractiveVizRecommendation(false);
+        }
+        let validation = synchronizeInteractiveVizControls();
+        if (validation.errors.length) {
+            applyInteractiveVizRecommendation(false);
+            validation = synchronizeInteractiveVizControls();
+            setInteractiveVizConfigNote(['旧配置与当前字段语义不兼容，已恢复安全推荐'], false);
+        }
+        configureInteractiveVizRange();
+        configureInteractiveVizCategories();
+        const reason = interactiveVizSchema.recommendation?.reason || '已根据字段语义生成安全默认图。';
+        const capability = interactiveVizSchema.capability?.summary || '';
+        document.getElementById('interactive-viz-recommendation').textContent = `数据能力：${capability} 推荐依据：${reason}`;
+        status.textContent = `已画像 ${fields.length} 个字段；${capability}`;
+        await runInteractiveVisualization();
+    } catch (error) {
+        status.textContent = '交互图形工作台不可用：' + error.message;
+    }
+}
+
+function applyInteractiveVizRecommendation(run = true) {
+    if (!interactiveVizSchema) return;
+    const recommendation = interactiveVizSchema.recommendation || {};
+    const encodings = recommendation.encodings || {};
+    setInteractiveVizValue('viz-intent', 'auto');
+    syncInteractiveVizIntentButtons();
+    setInteractiveVizValue('viz-chart-type', recommendation.chart_type || 'auto');
+    ['x', 'y', 'color', 'size', 'facet', 'animation'].forEach(channel =>
+        setInteractiveVizValue(`viz-${channel}`, encodings[channel] || '')
+    );
+    setInteractiveVizValue('viz-aggregation', recommendation.aggregation?.function || 'none');
+    setInteractiveVizValue('viz-time-unit', recommendation.aggregation?.time_unit || 'none');
+    document.getElementById('viz-filter-enabled').checked = false;
+    Array.from(document.getElementById('viz-detail-fields').options).forEach(option => {
+        option.selected = false;
+    });
+    const explanation = document.getElementById('interactive-viz-recommendation');
+    const capability = interactiveVizSchema.capability?.summary || '';
+    if (explanation) explanation.textContent = `数据能力：${capability} 推荐依据：${recommendation.reason || '按字段语义选择安全默认图。'}`;
+    const validation = synchronizeInteractiveVizControls();
+    if (run && !validation.errors.length) runInteractiveVisualization();
+}
+
+function resetInteractiveVisualization() {
+    stopInteractiveVizPlayback();
+    applyInteractiveVizRecommendation(false);
+    configureInteractiveVizRange();
+    configureInteractiveVizCategories();
+    runInteractiveVisualization();
+}
+
+function configureInteractiveVizRange() {
+    const field = interactiveVizField(document.getElementById('viz-filter-field')?.value);
+    const lower = document.getElementById('viz-range-min');
+    const upper = document.getElementById('viz-range-max');
+    if (!field?.range || field.kind !== 'numeric') {
+        lower.disabled = true;
+        upper.disabled = true;
+        document.getElementById('viz-range-min-value').textContent = '-';
+        document.getElementById('viz-range-max-value').textContent = '-';
+        return;
+    }
+    lower.disabled = false;
+    upper.disabled = false;
+    lower.value = 0;
+    upper.value = 1000;
+    syncInteractiveVizRange();
+}
+
+function interactiveVizRangeValue(field, sliderValue) {
+    const minimum = Number(field.range[0]);
+    const maximum = Number(field.range[1]);
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) return null;
+    return minimum + (maximum - minimum) * Number(sliderValue) / 1000;
+}
+
+function formatInteractiveVizNumber(value) {
+    if (!Number.isFinite(Number(value))) return '-';
+    const number = Number(value);
+    const magnitude = Math.abs(number);
+    if ((magnitude > 0 && magnitude < 0.001) || magnitude >= 1e6) return number.toExponential(3);
+    return Number(number.toPrecision(6)).toLocaleString();
+}
+
+function syncInteractiveVizRange(changed = '') {
+    const lower = document.getElementById('viz-range-min');
+    const upper = document.getElementById('viz-range-max');
+    if (Number(lower.value) > Number(upper.value)) {
+        if (changed === 'min') upper.value = lower.value;
+        else lower.value = upper.value;
+    }
+    const field = interactiveVizField(document.getElementById('viz-filter-field')?.value);
+    if (field?.range) {
+        document.getElementById('viz-range-min-value').textContent = formatInteractiveVizNumber(interactiveVizRangeValue(field, lower.value));
+        document.getElementById('viz-range-max-value').textContent = formatInteractiveVizNumber(interactiveVizRangeValue(field, upper.value));
+    }
+    if (document.getElementById('viz-filter-enabled')?.checked) scheduleInteractiveVisualization();
+}
+
+function configureInteractiveVizCategories() {
+    const field = interactiveVizField(document.getElementById('viz-category-filter-field')?.value);
+    const values = document.getElementById('viz-category-filter-values');
+    values.innerHTML = (field?.levels || []).map(level =>
+        `<option value="${escapeHtml(String(level.value))}">${escapeHtml(String(level.value))} · ${Number(level.count_profiled || 0).toLocaleString()}</option>`
+    ).join('');
+    scheduleInteractiveVisualization();
+}
+
+function syncInteractiveVizSliders(requiresData) {
+    document.getElementById('viz-bins-value').textContent = document.getElementById('viz-bins').value;
+    document.getElementById('viz-max-points-value').textContent = Number(document.getElementById('viz-max-points').value).toLocaleString();
+    document.getElementById('viz-opacity-value').textContent = document.getElementById('viz-opacity').value + '%';
+    document.getElementById('viz-symbol-size-value').textContent = document.getElementById('viz-symbol-size').value + '%';
+    if (requiresData) scheduleInteractiveVisualization();
+    else renderInteractiveVisualization();
+}
+
+function scheduleInteractiveVisualization(delay = 350) {
+    if (!interactiveVizSchema) return;
+    const validation = synchronizeInteractiveVizControls();
+    if (validation.errors.length) return;
+    clearTimeout(interactiveVizRefreshTimer);
+    interactiveVizRefreshTimer = setTimeout(() => runInteractiveVisualization(), delay);
+}
+
+function buildInteractiveVisualizationSpecification() {
+    const chartType = document.getElementById('viz-chart-type').value;
+    const detailSelect = document.getElementById('viz-detail-fields');
+    let details = Array.from(detailSelect.selectedOptions).map(option => option.value);
+    if (chartType === 'parallel' && details.length < 2) {
+        const numeric = (interactiveVizSchema.fields || []).filter(field => field.kind === 'numeric').slice(0, 6).map(field => field.name);
+        details = numeric;
+        const selected = new Set(numeric);
+        Array.from(detailSelect.options).forEach(option => { option.selected = selected.has(option.value); });
+    }
+    const encodings = {
+        x: document.getElementById('viz-x').value || null,
+        y: document.getElementById('viz-y').value || null,
+        color: document.getElementById('viz-color').value || null,
+        size: document.getElementById('viz-size').value || null,
+        facet: document.getElementById('viz-facet').value || null,
+        animation: document.getElementById('viz-animation').value || null,
+        tooltip: details,
+        parallel: details,
+    };
+    const filters = [];
+    const rangeField = interactiveVizField(document.getElementById('viz-filter-field').value);
+    if (rangeField?.range && document.getElementById('viz-filter-enabled').checked) {
+        filters.push({
+            field: rangeField.name,
+            kind: 'range',
+            min: interactiveVizRangeValue(rangeField, document.getElementById('viz-range-min').value),
+            max: interactiveVizRangeValue(rangeField, document.getElementById('viz-range-max').value),
+        });
+    }
+    const categoryField = document.getElementById('viz-category-filter-field').value;
+    const categoryValues = Array.from(document.getElementById('viz-category-filter-values').selectedOptions).map(option => option.value);
+    if (categoryField && categoryValues.length) {
+        filters.push({ field: categoryField, kind: 'in', values: categoryValues });
+    }
+    return {
+        chart_type: chartType,
+        encodings,
+        filters,
+        aggregation: {
+            function: document.getElementById('viz-aggregation').value,
+            group_by: [],
+            time_unit: document.getElementById('viz-time-unit').value,
+            bins: Number(document.getElementById('viz-bins').value),
+        },
+        max_points: Number(document.getElementById('viz-max-points').value),
+    };
+}
+
+async function runInteractiveVisualization() {
+    if (!interactiveVizSchema) return;
+    const status = document.getElementById('interactive-viz-status');
+    const validation = synchronizeInteractiveVizControls();
+    if (validation.errors.length) {
+        status.classList.add('is-warning');
+        status.textContent = '图形未生成：' + validation.errors.join('；');
+        return;
+    }
+    const requestId = ++interactiveVizRequestId;
+    status.classList.remove('is-warning');
+    status.textContent = '正在编译筛选、粒度、聚合和有界图元…';
+    try {
+        const response = await fetch('/api/visualization/explore/data', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildInteractiveVisualizationSpecification()),
+        });
+        const payload = await response.json();
+        if (requestId !== interactiveVizRequestId) return;
+        if (!payload.success) throw new Error(payload.error || '交互图编译失败');
+        interactiveVizResult = payload.result;
+        const facetLevels = interactiveVizResult.facet_levels || [];
+        const facetSlider = document.getElementById('viz-facet-slider');
+        facetSlider.max = Math.max(0, facetLevels.length - 4);
+        facetSlider.value = Math.min(Number(facetSlider.value || 0), Number(facetSlider.max));
+        document.getElementById('viz-facet-controls').classList.toggle('hidden', facetLevels.length <= 1);
+        const animationLevels = interactiveVizResult.animation_levels || [];
+        const animationSlider = document.getElementById('viz-animation-slider');
+        animationSlider.max = animationLevels.length;
+        animationSlider.value = Math.min(Number(animationSlider.value || 0), Number(animationSlider.max));
+        document.getElementById('viz-animation-controls').classList.toggle('hidden', animationLevels.length === 0);
+        renderInteractiveVisualization();
+        const audit = interactiveVizResult.audit || {};
+        const warnings = interactiveVizResult.warnings || [];
+        status.classList.toggle('is-warning', warnings.length > 0);
+        status.textContent = `${interactiveVizChartLabel(interactiveVizResult.chart_type)} · 筛选后 ${Number(audit.filtered_rows || 0).toLocaleString()} 行 · 浏览器图元 ${Number(audit.output_rows || 0).toLocaleString()} · ${Number(interactiveVizResult.timing_ms || 0).toFixed(1)} ms${warnings.length ? ` · ⚠ ${warnings[0]}` : ''}`;
+    } catch (error) {
+        status.classList.add('is-warning');
+        status.textContent = '图形未更新：' + error.message;
+    }
+}
+
+function interactiveVizTooltipFormatter(params, fields) {
+    const item = Array.isArray(params) ? params[0] : params;
+    const raw = item?.data?.raw || {};
+    const lines = fields.filter((field, index) => field && fields.indexOf(field) === index).map(field =>
+        `<strong>${escapeHtml(interactiveVizDisplayField(String(field)))}</strong>: ${escapeHtml(String(raw[field] ?? '缺失'))}`
+    );
+    return lines.join('<br>');
+}
+
+function groupInteractiveVizRecords(records, colorField, numericColor, maxGroups = 12) {
+    if (!colorField || numericColor) return new Map([['数据', records]]);
+    const rawGroups = new Map();
+    records.forEach(record => {
+        const key = String(record[colorField] ?? '缺失');
+        if (!rawGroups.has(key)) rawGroups.set(key, []);
+        rawGroups.get(key).push(record);
+    });
+    if (rawGroups.size <= maxGroups) return rawGroups;
+    const ranked = Array.from(rawGroups.entries()).sort((left, right) =>
+        right[1].length - left[1].length || left[0].localeCompare(right[0], 'zh-CN')
+    );
+    const kept = new Set(ranked.slice(0, maxGroups - 1).map(([name]) => name));
+    const compact = new Map();
+    ranked.forEach(([name, groupRecords]) => {
+        const compactName = kept.has(name) ? name : '其他';
+        if (!compact.has(compactName)) compact.set(compactName, []);
+        compact.get(compactName).push(...groupRecords);
+    });
+    return compact;
+}
+
+function renderInteractiveVisualization() {
+    if (!interactiveVizResult || typeof echarts === 'undefined') return;
+    const chartDom = document.getElementById('interactive-viz-chart');
+    if (!chartDom) return;
+    interactiveVizChart = echarts.getInstanceByDom(chartDom) || echarts.init(chartDom);
+    const result = interactiveVizResult;
+    const enc = result.encodings || {};
+    let records = result.records || [];
+    const animationLevels = result.animation_levels || [];
+    const animationIndex = Number(document.getElementById('viz-animation-slider').value || 0);
+    if (enc.animation && animationIndex > 0 && animationLevels[animationIndex - 1] !== undefined) {
+        const active = String(animationLevels[animationIndex - 1]);
+        records = records.filter(record => String(record[enc.animation]) === active);
+        document.getElementById('viz-animation-value').textContent = active;
+    } else {
+        document.getElementById('viz-animation-value').textContent = '全部';
+    }
+    const facetLevels = result.facet_levels || [];
+    const facetStart = Number(document.getElementById('viz-facet-slider').value || 0);
+    const visibleFacets = enc.facet ? facetLevels.slice(facetStart, facetStart + 4) : [null];
+    document.getElementById('viz-facet-value').textContent = enc.facet && facetLevels.length
+        ? `${facetStart + 1}–${Math.min(facetStart + visibleFacets.length, facetLevels.length)} / ${facetLevels.length}` : '-';
+    const opacity = Number(document.getElementById('viz-opacity').value) / 100;
+    const sizeScale = Number(document.getElementById('viz-symbol-size').value) / 100;
+    const tooltipFields = [enc.x, enc.y, enc.color, enc.size, enc.facet, enc.animation, ...(enc.tooltip || [])];
+
+    if (result.chart_type === 'parallel') {
+        const axes = enc.parallel || [];
+        const colorField = enc.color;
+        const parallelNumericColor = colorField && result.field_types?.[colorField] === 'numeric';
+        const rawGroups = groupInteractiveVizRecords(records, colorField, parallelNumericColor);
+        const groups = new Map(Array.from(rawGroups.entries()).map(([name, groupRecords]) => [
+            name, groupRecords.map(record => axes.map(field => record[field])),
+        ]));
+        const parallelAxis = axes.map((field, index) => {
+            const kind = result.field_types?.[field];
+            const axis = { dim: index, name: field };
+            if (kind !== 'numeric') {
+                axis.type = 'category';
+                axis.data = Array.from(new Set(records.map(record => record[field]).filter(value => value != null))).slice(0, 50);
+            }
+            return axis;
+        });
+        chartDom.style.height = '580px';
+        interactiveVizChart.clear();
+        interactiveVizChart.setOption({
+            animation: false,
+            color: ['#2563eb', '#0f9f8f', '#f59e0b', '#e05260', '#7c63d6', '#3196b8', '#84a33d', '#c76aa4'],
+            tooltip: { trigger: 'item', backgroundColor: 'rgba(12,30,49,.94)', borderWidth: 0, textStyle: { color: '#edf6fb', fontSize: 11 } },
+            legend: { type: 'scroll', top: 10, textStyle: { color: '#53697e', fontSize: 10 } },
+            toolbox: { right: 12, top: 8, iconStyle: { borderColor: '#7890a6' }, feature: { saveAsImage: {}, restore: {} } },
+            parallel: { left: 65, right: 55, top: 72, bottom: 35, parallelAxisDefault: { type: 'value', nameLocation: 'end', nameTextStyle: { color: '#405a72', fontWeight: 600 }, axisLine: { lineStyle: { color: '#9cb0c2' } }, axisLabel: { color: '#667d91' }, splitLine: { lineStyle: { color: '#e7edf3' } } } },
+            parallelAxis,
+            series: Array.from(groups.entries()).map(([name, data]) => ({
+                name, type: 'parallel', data, lineStyle: { width: 1.2, opacity }, progressive: 1000,
+            })),
+        }, true);
+        interactiveVizChart.resize();
+        renderInteractiveVizAudit();
+        renderInteractiveVizInsight(records);
+        return;
+    }
+
+    const facets = visibleFacets.length ? visibleFacets : [null];
+    const columns = facets.length > 1 ? 2 : 1;
+    const rows = Math.ceil(facets.length / columns);
+    chartDom.style.height = `${Math.max(440, rows * 300 + 80)}px`;
+    const grids = [];
+    const xAxes = [];
+    const yAxes = [];
+    const titles = [];
+    const series = [];
+    const legendNames = new Set();
+    const colorKind = enc.color ? result.field_types?.[enc.color] : null;
+    const numericColor = colorKind === 'numeric';
+    const xKind = result.field_types?.[enc.x];
+    const yKind = result.field_types?.[enc.y];
+    const sizeRange = result.numeric_ranges?.[enc.size] || [0, 1];
+    const colorRange = result.numeric_ranges?.[enc.color] || [0, 1];
+    const symbolSize = value => {
+        if (!enc.size) return Math.max(3, 8 * sizeScale);
+        const raw = Number(value[3]);
+        const span = Number(sizeRange[1]) - Number(sizeRange[0]);
+        const normalized = Number.isFinite(raw) && span > 0 ? (raw - Number(sizeRange[0])) / span : 0.4;
+        return (5 + 24 * Math.max(0, Math.min(1, normalized))) * sizeScale;
+    };
+
+    facets.forEach((facetValue, facetIndex) => {
+        const row = Math.floor(facetIndex / columns);
+        const column = facetIndex % columns;
+        const subset = enc.facet
+            ? records.filter(record => String(record[enc.facet]) === String(facetValue))
+            : records;
+        grids.push({
+            left: columns === 2 ? (column === 0 ? '7%' : '55%') : '8%',
+            width: columns === 2 ? '38%' : '82%',
+            top: 55 + row * 300,
+            height: 215,
+            containLabel: true,
+        });
+        xAxes.push({
+            gridIndex: facetIndex,
+            type: xKind === 'numeric' ? 'value' : (xKind === 'datetime' ? 'time' : 'category'),
+            name: interactiveVizDisplayField(enc.x), nameLocation: 'middle', nameGap: 30,
+            axisLabel: {
+                hideOverlap: true,
+                rotate: !['numeric', 'datetime'].includes(xKind) ? 25 : 0,
+                color: '#667d91',
+                fontSize: 10,
+                formatter: xKind === 'datetime' ? value => {
+                    const date = new Date(value);
+                    return Number.isNaN(date.getTime()) ? String(value) : `${date.getMonth() + 1}/${date.getDate()}`;
+                } : undefined,
+            },
+            axisLine: { lineStyle: { color: '#a7b8c8' } }, axisTick: { lineStyle: { color: '#a7b8c8' } },
+            splitLine: { show: xKind === 'numeric', lineStyle: { color: '#e9eef4', type: 'dashed' } },
+            nameTextStyle: { color: '#536b82', fontWeight: 600, fontSize: 11 },
+            scale: true,
+        });
+        yAxes.push({
+            gridIndex: facetIndex,
+            type: yKind === 'numeric' ? 'value' : 'category',
+            name: interactiveVizDisplayField(enc.y), nameLocation: 'middle', nameGap: 45,
+            axisLabel: { hideOverlap: true, color: '#667d91', fontSize: 10 },
+            axisLine: { lineStyle: { color: '#a7b8c8' } }, axisTick: { lineStyle: { color: '#a7b8c8' } },
+            splitLine: { show: true, lineStyle: { color: '#e9eef4', type: 'dashed' } },
+            nameTextStyle: { color: '#536b82', fontWeight: 600, fontSize: 11 }, scale: true,
+        });
+        if (enc.facet) {
+            titles.push({
+                text: `${enc.facet}: ${String(facetValue)}`,
+                left: columns === 2 ? (column === 0 ? '7%' : '55%') : '8%',
+                top: 28 + row * 300,
+                textStyle: { fontSize: 13, fontWeight: 600 },
+            });
+        }
+        const groups = groupInteractiveVizRecords(subset, enc.color, numericColor);
+        Array.from(groups.entries()).forEach(([groupName, groupRecords]) => {
+            legendNames.add(groupName);
+            const data = groupRecords.map(record => ({
+                value: [record[enc.x], record[enc.y], numericColor ? record[enc.color] : null, enc.size ? record[enc.size] : null],
+                raw: record,
+            }));
+            series.push({
+                name: groupName,
+                type: result.chart_type === 'area' ? 'line' : result.chart_type,
+                xAxisIndex: facetIndex,
+                yAxisIndex: facetIndex,
+                data,
+                symbolSize,
+                showSymbol: result.chart_type === 'line' || result.chart_type === 'area' ? data.length < 500 : true,
+                areaStyle: result.chart_type === 'area' ? { opacity: Math.min(opacity, 0.45) } : undefined,
+                lineStyle: { width: 2.1, opacity },
+                itemStyle: result.chart_type === 'bar'
+                    ? { opacity, borderRadius: [5, 5, 1, 1] }
+                    : { opacity, borderColor: '#ffffff', borderWidth: result.chart_type === 'scatter' ? 1 : 0 },
+                barMaxWidth: 46,
+                large: result.chart_type === 'scatter' && data.length > 2000,
+                largeThreshold: 2000,
+                progressive: 2000,
+                emphasis: { focus: 'series' },
+            });
+        });
+    });
+    const xAxisIndices = xAxes.map((_, index) => index);
+    const yAxisIndices = yAxes.map((_, index) => index);
+    const xLevelCount = enc.x ? new Set(records.map(record => String(record[enc.x]))).size : 0;
+    const yLevelCount = enc.y ? new Set(records.map(record => String(record[enc.y]))).size : 0;
+    const showXSlider = !['numeric', 'datetime'].includes(xKind)
+        ? xLevelCount > 18 : records.length > 800;
+    const showYSlider = yKind !== 'numeric'
+        ? yLevelCount > 18 : records.length > 1200;
+    const dataZoom = [
+        { type: 'inside', xAxisIndex: xAxisIndices, filterMode: 'filter' },
+        { type: 'inside', yAxisIndex: yAxisIndices, filterMode: 'empty' },
+    ];
+    if (showXSlider) {
+        dataZoom.push({ type: 'slider', xAxisIndex: xAxisIndices, bottom: 8, height: 18, filterMode: 'filter' });
+    }
+    if (showYSlider) {
+        dataZoom.push({ type: 'slider', yAxisIndex: yAxisIndices, right: 3, width: 16, filterMode: 'empty' });
+    }
+    const option = {
+        animation: records.length < 2500,
+        animationDuration: 420,
+        color: ['#2563eb', '#0f9f8f', '#f59e0b', '#e05260', '#7c63d6', '#3196b8', '#84a33d', '#c76aa4'],
+        textStyle: { fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif" },
+        title: titles,
+        legend: legendNames.size > 1 ? { type: 'scroll', top: 8, left: 'center', data: Array.from(legendNames), textStyle: { color: '#53697e', fontSize: 10 }, itemWidth: 14, itemHeight: 8 } : undefined,
+        toolbox: { right: 12, top: 6, iconStyle: { borderColor: '#7890a6' }, emphasis: { iconStyle: { borderColor: '#2563eb' } }, feature: { saveAsImage: {}, dataZoom: {}, restore: {} } },
+        tooltip: { trigger: 'item', confine: true, backgroundColor: 'rgba(12,30,49,.94)', borderWidth: 0, padding: [9, 11], textStyle: { color: '#edf6fb', fontSize: 11 }, extraCssText: 'box-shadow:0 10px 28px rgba(7,23,39,.22);border-radius:8px;', formatter: params => interactiveVizTooltipFormatter(params, tooltipFields) },
+        grid: grids,
+        xAxis: xAxes,
+        yAxis: yAxes,
+        dataZoom,
+        series,
+    };
+    if (numericColor && Number.isFinite(Number(colorRange[0])) && Number.isFinite(Number(colorRange[1]))) {
+        option.visualMap = {
+            type: 'continuous', dimension: 2, min: Number(colorRange[0]), max: Number(colorRange[1]),
+            calculable: true, orient: 'horizontal', left: 'center', bottom: 32,
+            inRange: { color: ['#2563eb', '#22c55e', '#f59e0b', '#dc2626'] },
+            seriesIndex: series.map((_, index) => index),
+        };
+    }
+    interactiveVizChart.clear();
+    interactiveVizChart.setOption(option, true);
+    interactiveVizChart.resize();
+    renderInteractiveVizAudit();
+    renderInteractiveVizInsight(records);
+}
+
+function renderInteractiveVizInsight(visibleRecords = null) {
+    const title = document.getElementById('interactive-viz-insight-title');
+    const body = document.getElementById('interactive-viz-insight-body');
+    const boundary = document.getElementById('interactive-viz-insight-boundary');
+    if (!title || !body || !boundary || !interactiveVizResult) return;
+
+    const result = interactiveVizResult;
+    const records = visibleRecords || result.records || [];
+    const enc = result.encodings || {};
+    const audit = result.audit || {};
+    const warnings = result.warnings || [];
+    const aggregation = (audit.aggregation || {}).function || 'none';
+    const xLabel = interactiveVizDisplayField(enc.x);
+    const yLabel = interactiveVizDisplayField(enc.y);
+    const countMode = enc.y === '__count__' || aggregation === 'count';
+
+    if (result.chart_type === 'bar' && countMode) {
+        const totals = new Map();
+        records.forEach(record => {
+            const key = String(record[enc.x] ?? '缺失');
+            totals.set(key, (totals.get(key) || 0) + Number(record.__count__ || 0));
+        });
+        const ranked = Array.from(totals.entries()).sort((left, right) => right[1] - left[1]);
+        const total = ranked.reduce((sum, item) => sum + item[1], 0);
+        const top = ranked[0];
+        title.textContent = `${xLabel}的数量构成`;
+        body.textContent = top && total > 0
+            ? `当前视图中“${top[0]}”数量最多，为 ${top[1].toLocaleString()} 条，占可见记录的 ${(top[1] / total * 100).toFixed(1)}%。`
+            : '当前筛选范围内没有足够记录用于比较类别构成。';
+        boundary.textContent = '数量差异只描述记录分布；若采样单位、缺失机制或收集频率不同，不能直接解释为真实规模差异。';
+    } else if (result.chart_type === 'bar') {
+        title.textContent = `${xLabel}之间的${yLabel}比较`;
+        body.textContent = `当前按“${xLabel}”比较“${yLabel}”，使用${({ mean: '均值', sum: '总量', median: '中位数', min: '最小值', max: '最大值' })[aggregation] || '逐行'}口径，共显示 ${records.length.toLocaleString()} 个图元。`;
+        boundary.textContent = '组间高低不等于统计显著；还需检查组内波动、样本量不平衡与异常值敏感性。';
+    } else if (result.chart_type === 'scatter') {
+        title.textContent = `${xLabel}与${yLabel}的联合分布`;
+        body.textContent = `当前展示 ${records.length.toLocaleString()} 个可见观测，用于检查方向、非线性、分群与异常点；颜色分层${enc.color ? `使用“${enc.color}”` : '未启用'}。`;
+        boundary.textContent = '散点形态只能提示关联，不证明因果；确认结论前应补做效应量、置信区间、混杂控制与样本外验证。';
+    } else if (['line', 'area'].includes(result.chart_type)) {
+        title.textContent = `${yLabel}随${xLabel}的变化轨迹`;
+        body.textContent = `当前以“${xLabel}”排序观察“${yLabel}”，共显示 ${records.length.toLocaleString()} 个时间/有序位置${enc.color ? `，并按“${enc.color}”分层` : ''}。`;
+        boundary.textContent = '趋势可能由季节性、结构突变或聚合粒度造成；预测前需检查时序连续性、滞后关系和末段外推稳定性。';
+    } else if (result.chart_type === 'parallel') {
+        title.textContent = '多变量轮廓与群体差异';
+        body.textContent = `当前并行比较 ${(enc.parallel || []).length} 个字段、${records.length.toLocaleString()} 条可见轮廓，适合发现共同变化与异常组合。`;
+        boundary.textContent = '轴的量纲与排列会明显影响视觉判断；应配合标准化、稳健距离和扰动稳定性验证。';
+    } else {
+        title.textContent = '当前探索视图';
+        body.textContent = `已生成 ${interactiveVizChartLabel(result.chart_type)}，包含 ${records.length.toLocaleString()} 个可见图元。`;
+        boundary.textContent = '图形用于提出和筛选假设，正式结论仍需可执行检验、反证与样本外验证。';
+    }
+    if (warnings.length) {
+        body.textContent += ` 注意：${warnings[0]}`;
+    }
+}
+
+function renderInteractiveVizAudit() {
+    const box = document.getElementById('interactive-viz-audit');
+    if (!box || !interactiveVizResult) return;
+    const audit = interactiveVizResult.audit || {};
+    const warnings = interactiveVizResult.warnings || [];
+    const scopeLabels = { full_filtered_data: '完整筛选数据', coverage_sample: '覆盖样本' };
+    const aggregationLabels = { none: '逐行', count: '计数', sum: '求和', mean: '均值', median: '中位数', min: '最小值', max: '最大值' };
+    const aggregation = (audit.aggregation || {}).function || 'none';
+    box.innerHTML = [
+        `源数据 ${Number(audit.source_rows || 0).toLocaleString()} 行`,
+        `筛选后 ${Number(audit.filtered_rows || 0).toLocaleString()} 行`,
+        `扫描 ${Number(audit.scanned_rows || 0).toLocaleString()} 行`,
+        `输出 ${Number(audit.output_rows || 0).toLocaleString()} 图元`,
+        `范围 ${scopeLabels[audit.scan_scope] || audit.scan_scope || '-'}`,
+        `聚合 ${aggregationLabels[aggregation] || aggregation}`,
+        ...warnings,
+    ].map(text => `<span>${escapeHtml(String(text))}</span>`).join('');
+}
+
+async function sendInteractiveVizToReport() {
+    if (!interactiveVizResult) {
+        showToast('请先生成一张可验证的探索图', 'error');
+        return;
+    }
+    const result = interactiveVizResult;
+    if (result.chart_type === 'parallel') {
+        showToast('平行坐标是探索视图，静态报表暂不支持等价编排；请先固化为比较图或关系图', 'error');
+        return;
+    }
+    const enc = result.encodings || {};
+    if (!enc.x || !enc.y) {
+        showToast('当前发现缺少可交付的轴字段', 'error');
+        return;
+    }
+    const specification = buildInteractiveVisualizationSpecification();
+    const aggregation = (result.audit?.aggregation || {}).function || specification.aggregation.function || 'none';
+    const groupField = enc.color && interactiveVizField(enc.color)?.semantic_role !== 'measure' ? enc.color : '';
+    const title = document.getElementById('interactive-viz-insight-title')?.textContent
+        || `${interactiveVizDisplayField(enc.y)} / ${interactiveVizDisplayField(enc.x)}`;
+    const chart = {
+        id: nextChartId++,
+        chart_type: result.chart_type,
+        x_field: enc.x,
+        y_field: enc.y,
+        group_field: groupField,
+        agg: aggregation,
+        title,
+        color_scheme: 'default',
+        show_values: result.chart_type === 'bar',
+        top_n: 0,
+        filters: specification.filters || [],
+        time_unit: specification.aggregation.time_unit || 'none',
+        bins: specification.aggregation.bins || 20,
+        discovery_note: document.getElementById('interactive-viz-insight-boundary')?.textContent || '',
+    };
+
+    chartConfigs.push(chart);
+    goStep(3);
+    await loadReportFields();
+    renderChartList();
+    const target = document.getElementById(`chart-config-${chart.id}`);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    showToast('已加入报表编排台，并保留筛选、粒度和聚合口径');
+}
+
+function toggleInteractiveVizPlayback() {
+    if (interactiveVizPlaybackTimer) {
+        stopInteractiveVizPlayback();
+        return;
+    }
+    const slider = document.getElementById('viz-animation-slider');
+    if (Number(slider.max) < 1) return;
+    document.getElementById('viz-animation-play').textContent = '⏸ 暂停';
+    if (Number(slider.value) === 0) slider.value = 1;
+    interactiveVizPlaybackTimer = setInterval(() => {
+        let next = Number(slider.value) + 1;
+        if (next > Number(slider.max)) next = 1;
+        slider.value = next;
+        renderInteractiveVisualization();
+    }, 900);
+}
+
+function stopInteractiveVizPlayback() {
+    if (interactiveVizPlaybackTimer) clearInterval(interactiveVizPlaybackTimer);
+    interactiveVizPlaybackTimer = null;
+    const button = document.getElementById('viz-animation-play');
+    if (button) button.textContent = '▶ 播放';
 }
 
 // ==================== 高级统计分析 ====================
@@ -2709,6 +5793,8 @@ function resetAll() {
         currentStep = 1;
         selectedOverrideModel = null;
         selectedAnalysisType = null;
+        llmImageAttachments = [];
+        researchImageAttachments = [];
         location.reload();
     }
 }
@@ -2720,6 +5806,102 @@ function initLLMStep() {
     checkLLMAnalysisAvailability();
     // 加载默认配置
     loadLLMDefaults();
+    initLLMImageUpload();
+}
+
+const LLM_IMAGE_MAX_COUNT = 5;
+const LLM_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
+const LLM_IMAGE_TOTAL_MAX_BYTES = 20 * 1024 * 1024;
+
+function initLLMImageUpload() {
+    const input = document.getElementById('llm-image-input');
+    if (!input || input.dataset.bound === '1') return;
+    input.dataset.bound = '1';
+    input.addEventListener('change', async event => {
+        const files = Array.from(event.target.files || []);
+        event.target.value = '';
+        if (!files.length) return;
+        const remaining = LLM_IMAGE_MAX_COUNT - llmImageAttachments.length;
+        if (remaining <= 0) {
+            showToast(`最多上传 ${LLM_IMAGE_MAX_COUNT} 张图片`, 'error');
+            return;
+        }
+        const accepted = files.slice(0, remaining);
+        if (files.length > remaining) showToast(`仅添加前 ${remaining} 张图片`, 'info');
+        for (const file of accepted) {
+            if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
+                showToast(`${file.name} 不是支持的图片格式`, 'error');
+                continue;
+            }
+            if (file.size <= 0 || file.size > LLM_IMAGE_MAX_BYTES) {
+                showToast(`${file.name} 超过 6 MB 限制`, 'error');
+                continue;
+            }
+            const currentTotal = llmImageAttachments.reduce((sum, image) => sum + image.size, 0);
+            if (currentTotal + file.size > LLM_IMAGE_TOTAL_MAX_BYTES) {
+                showToast('图片总大小不能超过 20 MB', 'error');
+                break;
+            }
+            try {
+                const dataUrl = await readFileAsDataUrl(file);
+                llmImageAttachments.push({ name: file.name, mime_type: file.type.toLowerCase(), size: file.size, data_url: dataUrl });
+            } catch (error) {
+                showToast(`读取 ${file.name} 失败`, 'error');
+            }
+        }
+        renderLLMImagePreview();
+    });
+    renderLLMImagePreview();
+}
+
+function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+        reader.readAsDataURL(file);
+    });
+}
+
+function removeLLMImage(index) {
+    llmImageAttachments.splice(index, 1);
+    renderLLMImagePreview();
+}
+
+function renderLLMImagePreview() {
+    const container = document.getElementById('llm-image-preview');
+    const status = document.getElementById('llm-image-status');
+    if (!container || !status) return;
+    container.innerHTML = '';
+    if (!llmImageAttachments.length) {
+        status.textContent = '未选择图片（最多 5 张，每张不超过 6 MB）';
+        return;
+    }
+    const total = llmImageAttachments.reduce((sum, image) => sum + image.size, 0);
+    status.textContent = `已选择 ${llmImageAttachments.length}/${LLM_IMAGE_MAX_COUNT} 张 · ${(total / 1024 / 1024).toFixed(1)} MB`;
+    llmImageAttachments.forEach((image, index) => {
+        const card = document.createElement('div');
+        card.className = 'llm-image-card';
+        const preview = document.createElement('img');
+        preview.className = 'llm-image-thumb';
+        preview.src = image.data_url;
+        preview.alt = image.name;
+        const meta = document.createElement('div');
+        meta.className = 'llm-image-meta';
+        const name = document.createElement('span');
+        name.textContent = image.name;
+        const size = document.createElement('small');
+        size.textContent = `${(image.size / 1024).toFixed(0)} KB`;
+        meta.append(name, size);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'llm-image-remove';
+        remove.title = '移除图片';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => removeLLMImage(index));
+        card.append(preview, meta, remove);
+        container.appendChild(card);
+    });
 }
 
 async function loadLLMDefaults() {
@@ -2728,6 +5910,7 @@ async function loadLLMDefaults() {
         const data = await res.json();
         if (data.success && data.providers) {
             window.llmProviders = data.providers;
+            onLLMProviderChange();
         }
     } catch (e) {
         console.error('加载 LLM 配置失败', e);
@@ -2737,7 +5920,10 @@ async function loadLLMDefaults() {
 function onLLMProviderChange() {
     const provider = document.getElementById('llm-provider').value;
     const providers = window.llmProviders || {};
-    const cfg = providers[provider];
+    const fallback = provider === 'deepseek'
+        ? { base_url: 'https://api.deepseek.com', model_name: 'deepseek-v4-pro', needs_api_key: true }
+        : null;
+    const cfg = providers[provider] || fallback;
     if (cfg) {
         document.getElementById('llm-base-url').value = cfg.base_url;
         document.getElementById('llm-model-name').value = cfg.model_name;
@@ -2757,6 +5943,24 @@ function onLLMProviderChange() {
             browseBtn.classList.add('hidden');
         }
     }
+    populateModelPresetSelect('llm-model-preset', provider, document.getElementById('llm-model-name').value);
+    const status = document.getElementById('llm-test-status');
+    if (status) status.textContent = '';
+}
+
+function useLLMModelPreset(value) {
+    if (!value) return;
+    const input = document.getElementById('llm-model-name');
+    if (input) input.value = value;
+}
+
+function testLLMConnection() {
+    return requestLLMConnectionTest({
+        provider: document.getElementById('llm-provider').value,
+        base_url: document.getElementById('llm-base-url').value.trim(),
+        model_name: document.getElementById('llm-model-name').value.trim(),
+        api_key: document.getElementById('llm-api-key').value,
+    }, document.getElementById('llm-test-btn'), document.getElementById('llm-test-status'));
 }
 
 /* ==================== 本地模型浏览器 ==================== */
@@ -2921,6 +6125,11 @@ async function startLLMAnalysis() {
     const apiKey = document.getElementById('llm-api-key').value;
     const modelName = document.getElementById('llm-model-name').value;
 
+    if (provider === 'ollama' && llmImageAttachments.length) {
+        showToast('图片分析请切换到 DeepSeek Vision 或其他支持 image_url 的模型', 'error');
+        return;
+    }
+
     document.getElementById('llm-analyze-btn').disabled = true;
     document.getElementById('llm-status-text').textContent = '分析中...';
     document.getElementById('llm-result-card').classList.add('hidden');
@@ -2935,6 +6144,11 @@ async function startLLMAnalysis() {
                 base_url: baseUrl,
                 api_key: apiKey,
                 model_name: modelName,
+                images: llmImageAttachments.map(image => ({
+                    name: image.name,
+                    mime_type: image.mime_type,
+                    data_url: image.data_url,
+                })),
             })
         });
         const data = await res.json();
@@ -3266,6 +6480,10 @@ function addChart() {
         color_scheme: 'default',
         show_values: true,
         top_n: 0,
+        filters: [],
+        time_unit: 'none',
+        bins: 20,
+        discovery_note: '',
     };
     chartConfigs.push(chart);
     renderChartList();
@@ -3305,11 +6523,13 @@ function renderChartList() {
         {value: 'scatter', label: '散点图'},
     ];
     const aggOptions = [
+        {value: 'none', label: '不聚合（散点）'},
         {value: 'sum', label: '求和'},
         {value: 'mean', label: '平均'},
         {value: 'count', label: '计数'},
         {value: 'max', label: '最大'},
         {value: 'min', label: '最小'},
+        {value: 'median', label: '中位数'},
     ];
     const colorOptions = [
         {value: 'default', label: '默认'},
@@ -3318,17 +6538,19 @@ function renderChartList() {
         {value: 'bright', label: '明亮'},
     ];
     
-    const fieldOptions = reportFields.map(f => `<option value="${f.name}">${f.name}</option>`).join('');
+    const fieldOptions = reportFields.map(f => `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)}</option>`).join('');
+    const valueFieldOptions = `<option value="__count__">记录数（探索口径）</option>${fieldOptions}`;
     
     container.innerHTML = chartConfigs.map(chart => `
         <div class="chart-config-item" id="chart-config-${chart.id}">
             <div class="chart-config-header">
-                <span class="chart-config-title">${chart.title}</span>
+                <span class="chart-config-title">${escapeHtml(chart.title)}</span>
                 <div style="display:flex;gap:6px;">
                     <button class="btn btn-sm" onclick="previewSingleChart(${chart.id})">👁 预览</button>
                     <button class="btn btn-sm" style="color:var(--danger);" onclick="removeChart(${chart.id})">🗑️ 删除</button>
                 </div>
             </div>
+            ${chart.discovery_note ? `<div class="chart-discovery-origin"><span>来自探索</span>${escapeHtml(chart.discovery_note)}</div>` : ''}
             <div class="chart-config-body">
                 <div class="form-group">
                     <label>图表类型</label>
@@ -3338,7 +6560,7 @@ function renderChartList() {
                 </div>
                 <div class="form-group">
                     <label>标题</label>
-                    <input type="text" value="${chart.title}" onchange="updateChart(${chart.id}, 'title', this.value)">
+                    <input type="text" value="${escapeHtml(chart.title)}" onchange="updateChart(${chart.id}, 'title', this.value)">
                 </div>
                 <div class="form-group">
                     <label>X轴/分类字段</label>
@@ -3351,7 +6573,7 @@ function renderChartList() {
                     <label>Y轴/数值字段</label>
                     <select onchange="updateChart(${chart.id}, 'y_field', this.value)">
                         <option value="">请选择</option>
-                        ${fieldOptions}
+                        ${valueFieldOptions}
                     </select>
                 </div>
                 <div class="form-group">
@@ -3491,6 +6713,10 @@ function buildReportConfig() {
         color_scheme: c.color_scheme,
         show_values: c.show_values,
         top_n: c.top_n,
+        filters: c.filters || [],
+        time_unit: c.time_unit || 'none',
+        bins: c.bins || 20,
+        discovery_note: c.discovery_note || '',
     }));
     
     if (reportMode === 'pivot') {

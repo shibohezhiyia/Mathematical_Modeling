@@ -4,6 +4,9 @@
 import requests
 import time
 import sys
+import os
+
+import pytest
 
 BASE = "http://localhost:5000"
 CSV_PATH = r"I:\exercise_data\Apple_stock.csv"
@@ -31,6 +34,14 @@ def call(method, endpoint, **kwargs):
         return None, str(e)
 
 def test_transparency():
+    # 依赖本地数据文件和运行中的 web 服务，缺失时跳过
+    if not os.path.exists(CSV_PATH):
+        pytest.skip(f"测试数据不存在: {CSV_PATH}")
+    try:
+        SESSION.get(BASE, timeout=3)
+    except Exception:
+        pytest.skip(f"web 服务未启动: {BASE}")
+
     # 1. Upload
     log("=== 1. Upload ===")
     with open(CSV_PATH, 'rb') as f:

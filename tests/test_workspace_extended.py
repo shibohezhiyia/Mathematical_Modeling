@@ -192,6 +192,13 @@ class TestWorkspaceManager(unittest.TestCase):
         cache_dir = wm.create_cache_dir(name="")
         self.assertEqual(cache_dir, wm.cache_dir)
 
+    def test_cache_and_relative_paths_cannot_escape_category(self):
+        wm = WorkspaceManager(root_dir=self.temp_root)
+        with self.assertRaises(ValueError):
+            wm.create_cache_dir(name="../raw")
+        with self.assertRaises(ValueError):
+            wm.safe_path("../../outside.txt", subdir="cache")
+
     def test_create_cache_dir_denied(self):
         """Test create_cache_dir when disk write is disabled"""
         wm = WorkspaceManager(root_dir=self.temp_root, allow_disk_write=False)

@@ -61,8 +61,9 @@ class BayesianOptimizer(BaseOptimizer):
                  random_state: int = 42,
                  direction: str = 'maximize',
                  verbose: bool = True,
-                 trial_timeout: Optional[int] = 120) -> None:
-        super().__init__(n_trials=n_trials, cv_folds=cv_folds, random_state=random_state, verbose=verbose, trial_timeout=trial_timeout)
+                 trial_timeout: Optional[int] = 120,
+                 fold_type: str = 'default') -> None:
+        super().__init__(n_trials=n_trials, cv_folds=cv_folds, random_state=random_state, verbose=verbose, trial_timeout=trial_timeout, fold_type=fold_type)
         self.sampler_type = sampler
         self.pruner_type = pruner
         self.timeout = timeout
@@ -151,7 +152,9 @@ class BayesianOptimizer(BaseOptimizer):
                          metric: Optional[str]) -> OptimizationResult:
         """使用 Optuna 进行贝叶斯优化（支持 Pruner + 两阶段搜索）"""
         if self.sampler_type == SamplerType.TPE:
-            sampler = TPESampler(seed=self.random_state, multivariate=True)
+            # Use Optuna's stable TPE interface; ``multivariate`` remains
+            # experimental and has changed behavior between Optuna releases.
+            sampler = TPESampler(seed=self.random_state)
         elif self.sampler_type == SamplerType.CMAES:
             sampler = CmaEsSampler(seed=self.random_state)
         else:
@@ -193,6 +196,7 @@ class BayesianOptimizer(BaseOptimizer):
             sampler=sampler,
             pruner=pruner
         )
+        timeout_state = {'hit': False}
         
         # 粗筛阶段：少 fold（2折），DL 模型限制 epoch=10
         coarse_cv_folds = min(2, self.cv_folds)
@@ -229,7 +233,11 @@ class BayesianOptimizer(BaseOptimizer):
                 return score
             except optuna.TrialPruned:
                 raise
-            except TimeoutError:
+            except TimeoutError as exc:
+                timeout_state['hit'] = True
+                trial.set_user_attr('hard_timeout', True)
+                study.stop()
+                log_warning(f"[BayesianOptimizer] {model_key} 单次评估超时，停止后续尝试: {exc}")
                 return float('-inf') if self.direction == 'maximize' else float('inf')
             except Exception:
                 return float('-inf') if self.direction == 'maximize' else float('inf')
@@ -250,8 +258,12 @@ class BayesianOptimizer(BaseOptimizer):
             )
         
         # 阶段 2: 精筛（只对 top 配置用完整资源验证）
-        if n_fine > 0 and len(study.trials) > 0:
-            completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        if n_fine > 0 and len(study.trials) > 0 and not timeout_state['hit']:
+            completed = [
+                t for t in study.trials
+                if t.state == optuna.trial.TrialState.COMPLETE
+                and not t.user_attrs.get('hard_timeout')
+            ]
             if completed:
                 top_trials = sorted(completed, key=lambda t: t.value, reverse=(self.direction == 'maximize'))[:5]
                 top_params = [t.params for t in top_trials]
@@ -271,7 +283,10 @@ class BayesianOptimizer(BaseOptimizer):
         
         history = []
         for trial in study.trials:
-            if trial.state == optuna.trial.TrialState.COMPLETE:
+            if (
+                trial.state == optuna.trial.TrialState.COMPLETE
+                and not trial.user_attrs.get('hard_timeout')
+            ):
                 history.append({
                     'number': trial.number,
                     'params': trial.params,
@@ -342,6 +357,9 @@ class BayesianOptimizer(BaseOptimizer):
                     best_score = score
                     best_params = params
                     
+            except TimeoutError as e:
+                log_warning(f"[HyperparameterOptimizer] {model_key} 单次评估超时，停止后续尝试: {e}")
+                break
             except Exception as e:
                 continue
         

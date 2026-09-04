@@ -331,7 +331,7 @@ class IntegratedPipeline:
         enc = EncodingType.ONEHOT if self.encoding == 'onehot' else \
               EncodingType.LABEL if self.encoding == 'label' else \
               EncodingType.TARGET if self.encoding == 'target' else \
-              EncodingType.NONE if self.encoding == 'none' else EncodingType.ONEHOT
+              EncodingType.NONE if self.encoding == 'none' else EncodingType.AUTO
         
         fs = FeatureSelectionStrategy.VARIANCE if self.feature_selection == 'variance' else \
              FeatureSelectionStrategy.RFE if self.feature_selection == 'rfe' else \
@@ -391,6 +391,15 @@ class IntegratedPipeline:
                     effective_model_keys = all_fast[:plan.max_models]
                     log_info(f"[Performance] Fast模式精简模型 ({detected_task.value}): {effective_model_keys}")
         
+        effective_max_samples = self.max_samples
+        if self.auto_sample and plan.sample_size is not None:
+            effective_max_samples = min(self.max_samples, plan.sample_size)
+            if effective_max_samples != self.max_samples:
+                log_info(
+                    f"[Performance] 按 {plan.strategy.value} 资源预算限制建模样本: "
+                    f"{self.max_samples:,} → {effective_max_samples:,}"
+                )
+
         engine = ModelingEngine(
             task_type=self.user_task_type,
             model_keys=effective_model_keys,
@@ -408,7 +417,7 @@ class IntegratedPipeline:
             auto_decision_mode=self.auto_decision_mode,
             user_override_model=self.user_override_model,
             auto_sample=self.auto_sample,
-            max_samples=self.max_samples,
+            max_samples=effective_max_samples,
             deep_learning=effective_dl,
             optimizer=effective_optimizer,
             dim_reduction=self.dim_reduction,

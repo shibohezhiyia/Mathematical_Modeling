@@ -8,10 +8,11 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import hashlib
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
+from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold, TimeSeriesSplit
 from sklearn.base import clone
 from sklearn.metrics import get_scorer
 
@@ -51,7 +52,8 @@ class BaseOptimizer(ABC):
                  adaptive_config: Optional[AdaptationConfig] = None,
                  use_early_stop: bool = False,
                  early_stop_config: Optional[SmartEarlyStopConfig] = None,
-                 trial_timeout: Optional[int] = 120) -> None:
+                 trial_timeout: Optional[int] = 120,
+                 fold_type: str = 'default') -> None:
         self.n_trials = n_trials
         self.cv_folds = cv_folds
         self.random_state = random_state
@@ -61,6 +63,7 @@ class BaseOptimizer(ABC):
         self.use_early_stop = use_early_stop
         self.early_stop_config = early_stop_config or SmartEarlyStopConfig(direction='maximize')
         self.trial_timeout = trial_timeout
+        self.fold_type = str(fold_type or 'default')
         self._early_stopper: Optional[SmartEarlyStopper] = None
         if self.use_early_stop:
             self._early_stopper = SmartEarlyStopper(self.early_stop_config)
@@ -114,6 +117,37 @@ class BaseOptimizer(ABC):
         """检测是否为深度学习模型（需要特殊处理）"""
         name = model.__class__.__name__
         return name in ('TorchMLP', 'TorchCNN1D', 'TorchLSTM', 'TorchGRU', 'TorchNAS', 'TorchResMLP', 'TabNetWrapper')
+
+    @staticmethod
+    def _data_fingerprint(X: pd.DataFrame, y: pd.Series, max_rows: int = 128) -> str:
+        """Build a bounded content fingerprint for safe CV-result caching.
+
+        Shape and the first target values are not enough: unrelated datasets can
+        otherwise reuse a stale score.  Evenly spaced rows cover the full data
+        range while keeping hashing cost independent of dataset size.
+        """
+        n_rows = len(X)
+        if n_rows:
+            positions = np.unique(np.linspace(0, n_rows - 1, min(max_rows, n_rows), dtype=np.int64))
+            X_sample = X.iloc[positions]
+            y_sample = pd.Series(y).iloc[positions]
+        else:
+            X_sample = X.iloc[:0]
+            y_sample = pd.Series(y).iloc[:0]
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(repr(tuple(map(str, X.columns))).encode("utf-8", errors="replace"))
+        digest.update(repr(tuple(map(str, X.dtypes))).encode("utf-8", errors="replace"))
+        try:
+            X_hash = pd.util.hash_pandas_object(X_sample, index=True).to_numpy(dtype=np.uint64)
+        except (TypeError, ValueError):
+            X_hash = pd.util.hash_pandas_object(X_sample.astype(str), index=True).to_numpy(dtype=np.uint64)
+        try:
+            y_hash = pd.util.hash_pandas_object(y_sample, index=True).to_numpy(dtype=np.uint64)
+        except (TypeError, ValueError):
+            y_hash = pd.util.hash_pandas_object(y_sample.astype(str), index=True).to_numpy(dtype=np.uint64)
+        digest.update(X_hash.tobytes())
+        digest.update(y_hash.tobytes())
+        return digest.hexdigest()
     
     def _limit_dl_epochs(self, model: Any, max_epochs: int = 15) -> Any:
         """限制深度学习模型的 epochs（超参搜索专用）"""
@@ -142,7 +176,17 @@ class BaseOptimizer(ABC):
             'mae': 'neg_mean_absolute_error',
             'mape': 'neg_mean_absolute_percentage_error',
         }
-        if task_type == TaskType.CLASSIFICATION:
+        if self.fold_type == 'time':
+            cv = TimeSeriesSplit(n_splits=self.cv_folds)
+            scoring = _METRIC_MAP.get(metric, metric)
+            if scoring is None:
+                scoring = (
+                    'roc_auc_ovr_weighted'
+                    if task_type == TaskType.CLASSIFICATION and len(np.unique(y)) > 2
+                    else 'roc_auc' if task_type == TaskType.CLASSIFICATION
+                    else 'neg_mean_squared_error'
+                )
+        elif task_type == TaskType.CLASSIFICATION:
             cv = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
             scoring = _METRIC_MAP.get(metric, metric)
             if scoring is None:
@@ -170,48 +214,64 @@ class BaseOptimizer(ABC):
         def _run_cv_with_timeout():
             if not self.trial_timeout or self.trial_timeout <= 0:
                 return _run_cv()
-            # max_workers=2 避免单个慢 trial 阻塞整个超参搜索流水线
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future = executor.submit(_run_cv)
-                try:
-                    return future.result(timeout=self.trial_timeout)
-                except FutureTimeoutError:
-                    model_name = model.__class__.__name__
-                    log_warning(f"[BaseOptimizer] Model evaluation timeout ({self.trial_timeout}s): {model_name}")
-                    raise TimeoutError(f"Model evaluation timeout ({self.trial_timeout}s): {model_name}")
+            # A ``with ThreadPoolExecutor`` block calls shutdown(wait=True), which
+            # used to make the timeout illusory: after raising, it still waited for
+            # the slow CV job.  On timeout, detach the worker and let the optimizer
+            # abort further trials for this model instead of stacking more jobs.
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_run_cv)
+            try:
+                result = future.result(timeout=self.trial_timeout)
+            except FutureTimeoutError:
+                future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                model_name = model.__class__.__name__
+                log_warning(f"[BaseOptimizer] Model evaluation timeout ({self.trial_timeout}s): {model_name}")
+                raise TimeoutError(f"Model evaluation timeout ({self.trial_timeout}s): {model_name}")
+            except BaseException:
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            executor.shutdown(wait=True)
+            return result
         
-        # 尝试使用结果缓存
+        # 尝试使用结果缓存。缓存故障可以降级，但模型评估/剪枝异常必须
+        # 原样传播；过去两者位于同一个 try 中，评估失败会把整次 CV 重跑。
+        cache = None
+        cache_key = None
         try:
             from core.result_cache import get_result_cache
             cache = get_result_cache()
             
-            # 构建缓存键：模型类名 + 排序后的参数 + 数据形状 + 数据指纹 + 任务类型 + metric
+            # 构建缓存键：模型、参数、数据内容指纹、任务和验证配置。
             model_params = getattr(model, 'get_params', lambda: {})()
-            # 使用 numpy 数组切片作为数据指纹，避免 list() 转换开销
-            y_fingerprint = tuple(y.values[:100]) if len(y) >= 100 else tuple(y.values)
+            data_fingerprint = self._data_fingerprint(X, y)
             cache_key = cache._make_key(
+                'optimizer_cv_v2',
                 model.__class__.__name__,
                 tuple(sorted(model_params.items())),
                 X.shape,
-                y_fingerprint,
+                data_fingerprint,
                 task_type.value,
                 scoring,
                 self.cv_folds,
-                self.random_state
+                self.random_state,
+                self.fold_type,
             )
             
             cached = cache.get(cache_key)
             if cached is not None:
                 return float(cached)
-            
-            result = _run_cv_with_timeout()
-            cache.set(cache_key, result)
-            return result
-        except TimeoutError:
-            raise
         except Exception:
-            # 缓存失败时不影响正常评估
-            return _run_cv_with_timeout()
+            cache = None
+            cache_key = None
+
+        result = _run_cv_with_timeout()
+        if cache is not None and cache_key is not None:
+            try:
+                cache.set(cache_key, result)
+            except Exception:
+                pass
+        return result
     
     def _evaluate_model_fold_by_fold(self, model: Any, X: pd.DataFrame, y: pd.Series,
                                        cv, scoring: str, step_callback: callable) -> float:

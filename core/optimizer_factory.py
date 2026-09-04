@@ -15,7 +15,7 @@ import pandas as pd
 
 from core.modeling_engine import ModelLibrary, TaskType
 from core.optimizer_base import BaseOptimizer, OptimizationResult
-from utils.helpers import log_info
+from utils.helpers import log_info, log_warning
 from core.search_space import SearchSpace
 from core.adaptive_search_space import AdaptiveSearchSpace
 from core.progress_bar import progress_range
@@ -31,7 +31,8 @@ class RandomSearchOptimizer(BaseOptimizer):
     def __init__(self, n_trials: int = 30, cv_folds: int = 3, random_state: int = 42, **kwargs: Any) -> None:
         super().__init__(n_trials=n_trials, cv_folds=cv_folds, random_state=random_state,
                          verbose=kwargs.get('verbose', True),
-                         trial_timeout=kwargs.get('trial_timeout', 120))
+                         trial_timeout=kwargs.get('trial_timeout', 120),
+                         fold_type=kwargs.get('fold_type', 'default'))
         self.rng = np.random.RandomState(random_state)
     
     def optimize(self,
@@ -95,6 +96,9 @@ class RandomSearchOptimizer(BaseOptimizer):
                 if self._check_trial_early_stop(score):
                     break
                     
+            except TimeoutError:
+                log_warning(f"[RandomSearch] {model_key} 单次评估超时，停止该模型的后续尝试")
+                break
             except Exception:
                 continue
         
@@ -131,7 +135,8 @@ class HyperbandOptimizer(BaseOptimizer):
                  eta: int = 3, max_resource: int = 27, **kwargs: Any) -> None:
         super().__init__(n_trials=n_trials, cv_folds=cv_folds, random_state=random_state,
                          verbose=kwargs.get('verbose', True),
-                         trial_timeout=kwargs.get('trial_timeout', 120))
+                         trial_timeout=kwargs.get('trial_timeout', 120),
+                         fold_type=kwargs.get('fold_type', 'default'))
         self.eta = eta
         self.max_resource = max_resource
         self.rng = np.random.RandomState(random_state)
@@ -166,6 +171,7 @@ class HyperbandOptimizer(BaseOptimizer):
         
         # Hyperband 算法
         max_iter = int(np.log(self.max_resource) / np.log(self.eta))
+        timed_out = False
         
         for s in reversed(range(max_iter + 1)):
             n = int(np.ceil((max_iter + 1) / (s + 1)) * self.eta ** s)
@@ -193,8 +199,15 @@ class HyperbandOptimizer(BaseOptimizer):
                         score = self._evaluate_model(model, X, y, task_type, metric)
                         scores.append((score, params))
                         history.append({'trial': len(history) + 1, 'params': params, 'score': score, 'resource': r_i})
+                    except TimeoutError:
+                        timed_out = True
+                        log_warning(f"[Hyperband] {model_key} 单次评估超时，停止该模型的后续尝试")
+                        break
                     except Exception:
                         scores.append((float('-inf'), params))
+
+                if timed_out or not scores:
+                    break
                 
                 scores.sort(key=lambda x: x[0], reverse=True)
                 candidates = [p for _, p in scores]
@@ -202,6 +215,8 @@ class HyperbandOptimizer(BaseOptimizer):
                 if scores[0][0] > best_score:
                     best_score = scores[0][0]
                     best_params = scores[0][1].copy()
+            if timed_out:
+                break
         
         # 优化：使用 dict.copy() 替代 deepcopy
         final_params = spec.default_params.copy()
@@ -256,7 +271,8 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
                  mutation_rate: float = 0.2, elitism: int = 2, **kwargs: Any) -> None:
         super().__init__(n_trials=n_trials, cv_folds=cv_folds, random_state=random_state,
                          verbose=kwargs.get('verbose', True),
-                         trial_timeout=kwargs.get('trial_timeout', 120))
+                         trial_timeout=kwargs.get('trial_timeout', 120),
+                         fold_type=kwargs.get('fold_type', 'default'))
         self.population_size = population_size
         self.crossover_rate = crossover_rate
         self.mutation_rate = mutation_rate
@@ -300,6 +316,7 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
         param_candidates = search_space.build_candidates(n=16) if hasattr(search_space, 'build_candidates') else search_space
         
         generations = self.n_trials // self.population_size
+        timed_out = False
         
         for gen in progress_range(generations, desc=f"遗传算法 {model_key}", disable=not self.verbose):
             # 评估种群
@@ -317,8 +334,15 @@ class GeneticAlgorithmOptimizer(BaseOptimizer):
                     if score > best_score:
                         best_score = score
                         best_params = params.copy()
+                except TimeoutError:
+                    timed_out = True
+                    log_warning(f"[Genetic] {model_key} 单次评估超时，停止该模型的后续尝试")
+                    break
                 except Exception:
                     fitness.append(float('-inf'))
+
+            if timed_out:
+                break
             
             # 精英保留
             sorted_idx = np.argsort(fitness)[::-1]

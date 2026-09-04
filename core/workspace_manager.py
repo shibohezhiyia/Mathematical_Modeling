@@ -136,7 +136,11 @@ class WorkspaceManager:
                 'cache': self.cache_dir,
                 'data': self.data_dir,
             }.get(subdir, self.report_dir)
-            safe = os.path.normpath(os.path.join(target_base, path))
+            safe = os.path.abspath(os.path.join(target_base, path))
+            try:
+                Path(safe).relative_to(Path(target_base).resolve())
+            except ValueError as exc:
+                raise ValueError("相对路径不能越出指定工作区类别") from exc
             return safe
         
         abs_path = os.path.abspath(path)
@@ -200,7 +204,11 @@ class WorkspaceManager:
                 "请设置 allow_disk_write=True 或手动管理内存数据"
             )
         
-        name = f"{prefix}_{uuid.uuid4().hex[:8]}"
+        safe_prefix = ''.join(
+            char if char.isalnum() or char in {'_', '-'} else '_'
+            for char in str(prefix)
+        ).strip('._-')[:48] or 'tmp'
+        name = f"{safe_prefix}_{uuid.uuid4().hex[:8]}"
         d = os.path.join(self.temp_dir, name)
         os.makedirs(d, exist_ok=True)
         log_info(f"[Workspace] 创建临时目录: {d}")
@@ -211,7 +219,17 @@ class WorkspaceManager:
         if not self.check_permission("创建缓存目录"):
             raise PermissionError("磁盘写入已禁用")
         
-        d = os.path.join(self.cache_dir, name) if name else self.cache_dir
+        if name:
+            relative = Path(str(name))
+            if relative.is_absolute() or '..' in relative.parts:
+                raise ValueError("缓存目录名必须是无上级跳转的相对路径")
+            d = os.path.abspath(os.path.join(self.cache_dir, str(relative)))
+            try:
+                Path(d).relative_to(Path(self.cache_dir).resolve())
+            except ValueError as exc:
+                raise ValueError("缓存目录不能越出 workspace/cache") from exc
+        else:
+            d = self.cache_dir
         os.makedirs(d, exist_ok=True)
         return d
     
@@ -283,6 +301,7 @@ class WorkspaceManager:
     
     def clear_temp(self) -> None:
         """清空临时目录"""
+        self._assert_cleanup_target(self.temp_dir, 'temp')
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
             os.makedirs(self.temp_dir, exist_ok=True)
@@ -290,10 +309,28 @@ class WorkspaceManager:
     
     def clear_cache(self) -> None:
         """清空缓存目录"""
+        self._assert_cleanup_target(self.cache_dir, 'cache')
         if os.path.exists(self.cache_dir):
             shutil.rmtree(self.cache_dir, ignore_errors=True)
             os.makedirs(self.cache_dir, exist_ok=True)
             log_info("[Workspace] 缓存目录已清空")
+
+    def _assert_cleanup_target(self, target: str, category: str) -> None:
+        """Require cleanup to target the exact configured temp/cache child."""
+        expected = {
+            'temp': self.temp_dir,
+            'cache': self.cache_dir,
+        }.get(category)
+        resolved_target = Path(target).resolve()
+        resolved_workspace = Path(self.workspace_dir).resolve()
+        if expected is None or resolved_target != Path(expected).resolve():
+            raise ValueError("清理目标与工作区配置不一致")
+        try:
+            resolved_target.relative_to(resolved_workspace)
+        except ValueError as exc:
+            raise ValueError("清理目标越出工作区") from exc
+        if resolved_target == resolved_workspace:
+            raise ValueError("禁止把工作区根目录作为缓存清理目标")
     
     def clear_all(self) -> None:
         """清空整个工作空间"""

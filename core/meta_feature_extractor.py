@@ -125,8 +125,8 @@ class MetaFeatureExtractor:
         meta.numeric_ratio = meta.n_numeric / max(meta.n_features, 1)
         meta.categorical_ratio = meta.n_categorical / max(meta.n_features, 1)
 
-        # 缺失值：使用 numpy 一次性计算，避免 sum().sum() 双重遍历
-        meta.missing_ratio = np.isnan(X.values).sum() / max(X.size, 1) if X.size > 0 else 0.0
+        # 缺失值：混合类型时 numpy isnan 不支持 object dtype，统一用 pandas isna
+        meta.missing_ratio = X.isna().values.sum() / max(X.size, 1) if X.size > 0 else 0.0
 
         # 稀疏度（数值列零值比例）
         if meta.n_numeric > 0:
@@ -141,8 +141,10 @@ class MetaFeatureExtractor:
                 triu_idx = np.triu_indices_from(corr_matrix, k=1)
                 if len(triu_idx[0]) > 0:
                     corrs = corr_matrix[triu_idx]
-                    meta.feature_correlation_mean = float(np.nanmean(corrs))
-                    meta.feature_correlation_max = float(np.nanmax(corrs))
+                    finite_corrs = corrs[np.isfinite(corrs)]
+                    if len(finite_corrs):
+                        meta.feature_correlation_mean = float(np.mean(finite_corrs))
+                        meta.feature_correlation_max = float(np.max(finite_corrs))
             except Exception:
                 pass
         
@@ -151,12 +153,14 @@ class MetaFeatureExtractor:
             if task_type == TaskType.CLASSIFICATION:
                 class_counts = pd.Series(y).value_counts()
                 meta.n_classes = len(class_counts)
-                meta.class_imbalance_ratio = class_counts.max() / class_counts.min() if len(class_counts) > 1 else 1.0
-                # 目标熵
-                probs = class_counts / class_counts.sum()
-                meta.target_entropy = float(entropy(probs))
+                if len(class_counts):
+                    meta.class_imbalance_ratio = class_counts.max() / class_counts.min() if len(class_counts) > 1 else 1.0
+                    # 目标熵
+                    probs = class_counts / class_counts.sum()
+                    meta.target_entropy = float(entropy(probs))
             else:
-                meta.target_std = float(np.std(y))
+                target_values = pd.to_numeric(pd.Series(y), errors='coerce').dropna()
+                meta.target_std = float(np.std(target_values)) if len(target_values) else 0.0
         
         # 综合复杂度评分
         meta.complexity_score = self._compute_complexity(meta)

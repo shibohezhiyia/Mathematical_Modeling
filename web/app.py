@@ -22,6 +22,9 @@ import logging
 import traceback
 import time
 import re
+import hashlib
+import hmac
+from urllib.parse import quote
 from functools import wraps
 from typing import Dict, Any
 from dataclasses import asdict
@@ -45,11 +48,21 @@ from core.visualization import (
     DataVisualizer, ModelVisualizer, EvaluationVisualizer,
 )
 from core.workspace_manager import set_workspace_config
+from core.table_transformer import (
+    TableTransformError,
+    TableTransformationEngine,
+    TableTransformationPlanner,
+)
+from core.mathematical_data_compiler import MathematicalDataCompiler
+from core.interactive_visualization import (
+    InteractiveVisualizationCompiler,
+    InteractiveVisualizationError,
+)
 
 # 确保工作空间根目录始终指向项目根目录（避免 IDE/脚本启动时 cwd 不一致导致临时文件写到C盘）
 set_workspace_config(root_dir=str(PROJECT_ROOT))
 
-from extensions.llm_analyzer import LLMAnalyzer, LLMConfig, get_default_configs
+from extensions.llm_analyzer import LLMAnalyzer, LLMClient, LLMConfig, get_default_configs
 from extensions.advanced_analytics import AdvancedAnalytics
 from utils.helpers import log_info, log_warning, log_error, get_log_store
 from core.dependency_manager import (
@@ -117,8 +130,62 @@ sys.stderr = StreamInterceptor(sys.__stderr__)
 app = Flask(__name__,
             template_folder='templates',
             static_folder='static')
-app.secret_key = 'intelligent_charts_secret_key_2024'
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
+_public_mode = os.getenv('PUBLIC_MODE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+_secret_key = os.getenv('FLASK_SECRET_KEY', '').strip()
+if _public_mode and not _secret_key:
+    raise RuntimeError('PUBLIC_MODE=1 requires FLASK_SECRET_KEY')
+if not _secret_key:
+    # 本地开发可临时生成；多进程/生产环境必须显式配置，避免会话失效或被伪造。
+    _secret_key = base64.urlsafe_b64encode(os.urandom(32)).decode('ascii')
+app.secret_key = _secret_key
+try:
+    _upload_limit_mb = int(os.getenv('MAX_UPLOAD_MB', '100' if _public_mode else '500'))
+except (TypeError, ValueError):
+    _upload_limit_mb = 100 if _public_mode else 500
+_upload_limit_mb = max(16, min(_upload_limit_mb, 2_000))
+app.config['MAX_CONTENT_LENGTH'] = _upload_limit_mb * 1024 * 1024
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=os.getenv('FLASK_HTTPS', '').strip().lower() in {'1', 'true', 'yes', 'on'},
+)
+
+# 公网模式下，管理类接口必须使用独立令牌；普通本地开发不受影响。
+_admin_token = os.getenv('ADMIN_TOKEN', '').strip()
+_protected_public_endpoints = {
+    'api_settings_get', 'api_settings_post', 'api_settings_backup', 'api_settings_restore',
+    'api_settings_api_key_get', 'api_settings_api_key_regenerate',
+    'api_dependencies_install', 'api_scan_local_models', 'api_logs_clear',
+}
+_rate_limited_public_endpoints = {
+    'api_upload', 'api_model_train', 'api_research_run', 'api_llm_analyze',
+    'api_data_generate', 'api_dependencies_install',
+}
+_public_rate_windows: Dict[tuple, list] = {}
+
+
+@app.before_request
+def _public_security_guard():
+    """Apply opt-in production protections before any state-changing endpoint."""
+    if not _public_mode or not request.path.startswith('/api/'):
+        return None
+    endpoint = request.endpoint or ''
+    if endpoint in _protected_public_endpoints:
+        if not _admin_token:
+            return jsonify({'success': False, 'error': '服务器未配置 ADMIN_TOKEN，管理接口已禁用'}), 503
+        supplied = request.headers.get('X-Admin-Token', '')
+        if not supplied or not hmac.compare_digest(supplied, _admin_token):
+            return jsonify({'success': False, 'error': '需要管理员令牌'}), 401
+    if endpoint in _rate_limited_public_endpoints:
+        now = time.monotonic()
+        key = (request.remote_addr or 'unknown', endpoint)
+        recent = [stamp for stamp in _public_rate_windows.get(key, []) if now - stamp < 60]
+        if len(recent) >= 20:
+            _public_rate_windows[key] = recent
+            return jsonify({'success': False, 'error': '请求过于频繁，请稍后再试'}), 429
+        recent.append(now)
+        _public_rate_windows[key] = recent
+    return None
 
 # ------------------------------------------------------------------------------
 # 日志配置：同时输出到控制台和文件
@@ -228,8 +295,12 @@ def api_error_response(error: str, detail: str = None, status_code: int = 500):
     full_detail = detail or traceback.format_exc()
     app.logger.error(f"{msg}\n{full_detail}")
     log_error(msg, category="API")
-    payload = {'success': False, 'error': error, 'endpoint': endpoint}
-    if detail:
+    payload = {
+        'success': False,
+        'error': '服务器内部错误' if _public_mode and status_code >= 500 else error,
+        'endpoint': endpoint,
+    }
+    if detail and not _public_mode:
         payload['detail'] = detail
     return jsonify(payload), status_code
 
@@ -297,6 +368,7 @@ def api_upload():
     existing = sdata.get('uploaded_files', [])
     
     uploaded_files = list(existing)
+    loaded_new_first = None
     try:
         for file in files:
             ext = os.path.splitext(file.filename)[1].lower()
@@ -305,6 +377,8 @@ def api_upload():
             file.save(save_path)
             
             df, sheets = _read_file_with_sheets(save_path, ext)
+            if loaded_new_first is None:
+                loaded_new_first = df
             
             file_info = {
                 'save_name': save_name,
@@ -316,6 +390,15 @@ def api_upload():
                 'active_sheet': sheets[0] if sheets else None,
                 'columns': list(df.columns),
             }
+            if len(df) > 100_000:
+                prepared = _prepare_research_frame(df, max_rows=100_000)
+                cache_path = _research_cache_path(
+                    file_info, sheets[0] if sheets else None
+                )
+                prepared.to_pickle(cache_path)
+                file_info['research_cache_paths'] = {
+                    str((sheets[0] if sheets else None) or ''): str(cache_path)
+                }
             uploaded_files.append(file_info)
         
         # 存储多文件信息
@@ -323,11 +406,14 @@ def api_upload():
         
         # 加载新上传的第一个文件作为当前数据集
         new_first = uploaded_files[len(existing)] if existing else uploaded_files[0]
-        df_first, _ = _read_file_with_sheets(new_first['path'], new_first['ext'])
+        df_first = loaded_new_first
+        if df_first is None:
+            df_first, _ = _read_file_with_sheets(new_first['path'], new_first['ext'])
         sdata['df'] = df_first
         sdata['active_file_index'] = len(existing) if existing else 0
         sdata['active_sheet'] = new_first.get('active_sheet')
         sdata['df_info'] = df_to_dict(df_first)
+        _clear_transform_history(sdata)
         
         # 自动推断目标列
         target_hint = None
@@ -341,6 +427,7 @@ def api_upload():
             'success': True,
             'data': df_to_dict(df_first),
             'files': uploaded_files,
+            'active_index': sdata['active_file_index'],
             'target_hint': target_hint,
             'appended': len(existing) > 0,
         }))
@@ -354,9 +441,17 @@ def _clear_analysis_results(sdata):
         'eda_data', 'model_result', 'train_error', 'train_error_stack',
         'train_config', 'best_model', 'llm_analysis_result',
         'llm_analysis_status', 'llm_analysis_error',
+        'mathematical_data_compilation',
     ]
     for k in keys_to_clear:
         sdata.pop(k, None)
+
+
+def _clear_transform_history(sdata):
+    """源表发生切换时清除不能再安全撤销的变换快照。"""
+    sdata.pop('transform_history', None)
+    sdata.pop('transform_lineage', None)
+    sdata.pop('use_transformed_for_research', None)
 
 
 @app.route('/api/data/quality', methods=['POST'])
@@ -391,6 +486,461 @@ def api_problem_analyze():
         return jsonify({'success': True, 'result': result})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def _prepare_research_frame(frame: pd.DataFrame, max_rows: int = 50_000) -> pd.DataFrame:
+    """Create a memory-bounded but total-preserving research representation.
+
+    Time-indexed additive facts are aggregated exactly over every source row.
+    This prevents a head sample from silently changing the time range or daily
+    totals. Other large tables use a deterministic coverage sample and are
+    explicitly marked as incomplete for total-based conclusions.
+    """
+    source_rows = int(frame.attrs.get('source_rows', len(frame)))
+    if len(frame) <= max_rows and source_rows <= len(frame):
+        output = frame.copy(deep=False)
+        output.attrs.update(frame.attrs)
+        output.attrs.update({
+            'research_representation_schema': 'mathmodel.research-frame/v2',
+            'source_rows': source_rows,
+            'research_representation': 'complete_rows',
+            'aggregation_complete': True,
+        })
+        return output
+
+    def normalized(name):
+        return re.sub(r'[^0-9a-zA-Z\u4e00-\u9fff]+', '', str(name)).lower()
+
+    time_candidates = []
+    for column in frame.columns:
+        name = normalized(column)
+        sample = frame[column].dropna().head(200)
+        semantic = any(token in name for token in ('日期', '时间', 'date', 'time', 'day'))
+        datetime_dtype = pd.api.types.is_datetime64_any_dtype(frame[column])
+        if not (semantic or datetime_dtype) or sample.empty:
+            continue
+        converted = pd.to_datetime(sample, errors='coerce')
+        if float(converted.notna().mean()) < 0.9:
+            continue
+        priority = (
+            0 if any(token in name for token in ('销售日期', '交易日期', '观测日期'))
+            else (1 if '日期' in name or 'date' in name else 2)
+        )
+        time_candidates.append((priority, len(str(column)), str(column)))
+
+    identifier_tokens = ('编码', '代码', '编号', '标识', 'identifier', 'code', 'id')
+    dimension_tokens = (
+        '分类', '品类', '类别', '区域', '站点', '部门', '产品族', '单品名称',
+        'category', 'region', 'station', 'department', 'segment',
+    )
+    additive_tokens = (
+        '销量', '销售量', '需求量', '需求', '数量', '产量', '流量', '用量',
+        'salesvolume', 'salevolume', 'demand', 'quantity', 'volume', 'count',
+    )
+    non_additive_tokens = (
+        '价格', '单价', '成本', '费率', '比率', '比例', '损耗率', '利润率',
+        'price', 'cost', 'rate', 'ratio',
+    )
+    numeric_columns = [
+        str(column) for column in frame.select_dtypes(include=[np.number]).columns
+        if not any(token in normalized(column) for token in identifier_tokens)
+    ]
+    additive_columns = [
+        column for column in numeric_columns
+        if any(token in normalized(column) for token in additive_tokens)
+        and not any(token in normalized(column) for token in non_additive_tokens)
+    ]
+    if time_candidates and additive_columns and source_rows <= len(frame):
+        time_column = min(time_candidates)[2]
+        dimension_columns = [
+            str(column) for column in frame.columns
+            if str(column) != time_column and (
+                any(token in normalized(column) for token in identifier_tokens)
+                or any(token in normalized(column) for token in dimension_tokens)
+            )
+        ][:8]
+        working_columns = list(dict.fromkeys(
+            [time_column, *dimension_columns, *numeric_columns]
+        ))
+        working = frame[working_columns].copy()
+        working[time_column] = pd.to_datetime(
+            working[time_column], errors='coerce'
+        ).dt.floor('D')
+        working = working.dropna(subset=[time_column])
+        group_columns = [time_column, *dimension_columns]
+        grouped = working.groupby(group_columns, observed=True, sort=True, dropna=False)
+        output = grouped[additive_columns].sum(min_count=1).reset_index()
+        weight_column = additive_columns[0]
+        weights = pd.to_numeric(working[weight_column], errors='coerce').clip(lower=0)
+        for column in numeric_columns:
+            if column in additive_columns:
+                continue
+            values = pd.to_numeric(working[column], errors='coerce')
+            valid_weight = weights.where(values.notna(), 0.0)
+            numerator_name = f'__weighted_{len(output.columns)}'
+            denominator_name = f'__weight_{len(output.columns)}'
+            temporary = working[group_columns].copy()
+            temporary[numerator_name] = values.fillna(0.0) * valid_weight
+            temporary[denominator_name] = valid_weight
+            moments = temporary.groupby(
+                group_columns, observed=True, sort=True, dropna=False
+            )[[numerator_name, denominator_name]].sum().reset_index()
+            moments[column] = (
+                moments[numerator_name]
+                / moments[denominator_name].replace(0.0, np.nan)
+            )
+            output = output.merge(
+                moments[group_columns + [column]], on=group_columns,
+                how='left', validate='one_to_one',
+            )
+        output.attrs.update({
+            'research_representation_schema': 'mathmodel.research-frame/v2',
+            'source_rows': source_rows,
+            'research_representation': 'exact_daily_dimension_aggregation',
+            'aggregation_complete': True,
+            'aggregation_source_rows': len(frame),
+            'aggregation_time_column': time_column,
+            'aggregation_group_columns': dimension_columns,
+            'aggregation_additive_columns': additive_columns,
+            'source_time_range': [
+                str(working[time_column].min()), str(working[time_column].max())
+            ],
+        })
+        return output
+
+    positions = np.linspace(0, len(frame) - 1, num=max_rows, dtype=np.int64)
+    output = frame.iloc[np.unique(positions)].copy()
+    output.attrs.update({
+        'research_representation_schema': 'mathmodel.research-frame/v2',
+        'source_rows': source_rows,
+        'research_representation': 'deterministic_coverage_sample',
+        'aggregation_complete': False,
+        'sampled_source_positions': True,
+    })
+    return output
+
+
+def _research_cache_path(file_info: Dict[str, Any], sheet_name=None) -> Path:
+    source = Path(str(file_info['path']))
+    sheet_key = hashlib.sha256(str(sheet_name or '').encode('utf-8')).hexdigest()[:10]
+    return source.with_name(f"{source.name}.research.{sheet_key}.pkl")
+
+
+def _load_research_source(file_info: Dict[str, Any], sheet_name=None, max_rows: int = 50_000):
+    """Load a reusable research representation without truncating time totals."""
+    path = file_info.get('path')
+    ext = file_info.get('ext', '').lower()
+    if not path:
+        return None
+    cache_path = _research_cache_path(file_info, sheet_name)
+    if cache_path.is_file():
+        cached = pd.read_pickle(cache_path)
+        if cached.attrs.get('research_representation_schema') == 'mathmodel.research-frame/v2':
+            return cached
+    source_shape = file_info.get('shape') or []
+    source_rows = int(source_shape[0]) if source_shape else 0
+    if ext in ('.xls', '.xlsx'):
+        frame = pd.read_excel(
+            path, sheet_name=sheet_name,
+            nrows=None if source_rows > max_rows else max_rows,
+        )
+    elif ext == '.csv':
+        frame = pd.read_csv(path, nrows=None if source_rows > max_rows else max_rows)
+    elif ext == '.json':
+        try:
+            frame = pd.read_json(path, lines=True, nrows=max_rows)
+        except (TypeError, ValueError):
+            frame = pd.read_json(path).head(max_rows)
+    elif ext == '.parquet':
+        try:
+            import pyarrow.parquet as pq
+            parquet = pq.ParquetFile(path)
+            batches = list(parquet.iter_batches(batch_size=max_rows))[:1]
+            frame = batches[0].to_pandas() if batches else pd.DataFrame()
+            frame.attrs['source_rows'] = int(parquet.metadata.num_rows)
+        except (ImportError, AttributeError, ValueError):
+            frame = pd.read_parquet(path).head(max_rows)
+    else:
+        return None
+    if 'source_rows' not in frame.attrs and source_shape:
+        frame.attrs['source_rows'] = int(source_shape[0])
+    prepared = _prepare_research_frame(frame, max_rows=max_rows)
+    if source_rows > max_rows:
+        prepared.to_pickle(cache_path)
+        file_info.setdefault('research_cache_paths', {})[
+            str(sheet_name or '')
+        ] = str(cache_path)
+    return prepared
+
+
+def _session_research_datasets(sdata: Dict[str, Any], max_rows: int = 50_000):
+    """Load every uploaded file/sheet as a named, memory-bounded dataset."""
+    sources = []
+    for file_info in sdata.get('uploaded_files', [])[:20]:
+        for sheet in (file_info.get('sheets') or [None])[:20]:
+            sources.append((file_info, sheet))
+            if len(sources) >= 50:
+                break
+        if len(sources) >= 50:
+            break
+    has_transformed = bool(
+        sdata.get('use_transformed_for_research')
+        and isinstance(sdata.get('df'), pd.DataFrame)
+    )
+    per_source_rows = min(
+        max_rows,
+        max(1_000, 500_000 // max(len(sources) + int(has_transformed), 1)),
+    )
+    datasets: Dict[str, pd.DataFrame] = {}
+    if has_transformed:
+        transformed = _prepare_research_frame(sdata['df'], max_rows=per_source_rows)
+        transformed.attrs.update({
+            'preferred_modeling_dataset': True,
+            'transformation_lineage_steps': sum(
+                len(item.get('audit', []))
+                for item in sdata.get('transform_lineage', [])
+            ),
+            'transformation_lineage_depth': len(sdata.get('transform_lineage', [])),
+        })
+        datasets['当前处理结果（优先）'] = transformed
+    for file_info, sheet in sources:
+        frame = _load_research_source(file_info, sheet_name=sheet, max_rows=per_source_rows)
+        if frame is None:
+            continue
+        base_name = file_info.get('filename', 'dataset')
+        name = f"{base_name}::{sheet}" if sheet else base_name
+        if name in datasets:
+            name = f"{name}#{len(datasets) + 1}"
+        datasets[name] = frame
+    if not datasets and isinstance(sdata.get('df'), pd.DataFrame):
+        datasets['current_dataset'] = sdata['df'].head(max_rows)
+        datasets['current_dataset'].attrs['source_rows'] = len(sdata['df'])
+    return datasets
+
+
+@app.route('/api/research/run', methods=['POST'])
+def api_research_run():
+    """Execute a problem-driven study across all uploaded datasets."""
+    sdata = get_session()
+    data = request.get_json(silent=True) or {}
+    try:
+        problem_images = _normalize_llm_images(data.get('images', []))
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    description = str(data.get('description', '')).strip()
+    if not description:
+        return jsonify({'success': False, 'error': '请输入完整的题目描述'}), 400
+    try:
+        max_rows = max(1_000, min(int(data.get('max_rows', 50_000)), 100_000))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'max_rows 必须是整数'}), 400
+    try:
+        feedback_trials = max(2, min(int(data.get('feedback_trials', 6)), 20))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'feedback_trials 必须是整数'}), 400
+
+    def request_bool(name, default):
+        value = data.get(name, default)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                return True
+            if normalized in {'false', '0', 'no', 'off', ''}:
+                return False
+        return bool(value)
+
+    def execute_research():
+        datasets = _session_research_datasets(sdata, max_rows=max_rows)
+        from core.modeling_assistant import MathModelingAssistant
+        from core.artifact_manager import create_run_id
+        semantic_compiler = None
+        if request_bool('semantic_model_compiler', False):
+            from core.semantic_model_compiler import (
+                SemanticCompilerConfig,
+                SemanticModelCompiler,
+            )
+            semantic_config = SemanticCompilerConfig(
+                provider=str(data.get('semantic_provider', 'ollama')),
+                base_url=str(data.get('semantic_base_url', 'http://localhost:11434')),
+                model_name=str(data.get('semantic_model_name', 'qwen2.5:3b')),
+                api_key=str(data.get('semantic_api_key', '')),
+                timeout_seconds=max(5, min(int(data.get('semantic_timeout_seconds', 90)), 300)),
+            )
+            semantic_compiler = SemanticModelCompiler(semantic_config)
+        run_id = create_run_id()
+        output_dir = PROJECT_ROOT / 'data' / 'reports' / 'research' / run_id
+        assistant = MathModelingAssistant(
+            output_dir=str(output_dir),
+            max_analysis_rows=max_rows,
+            feedback_optimization=request_bool('feedback_optimization', True),
+            feedback_trials=feedback_trials,
+            credibility_audit=request_bool('credibility_audit', True),
+            semantic_compiler=semantic_compiler,
+        )
+        result = assistant.run(
+            problem=description,
+            datasets=datasets,
+            target=data.get('targets') or data.get('target') or None,
+            run_modeling=request_bool('run_modeling', True),
+            generate_plots=request_bool('generate_plots', True),
+            mechanistic_ir=data.get('mechanistic_ir'),
+            problem_images=problem_images,
+        ).to_dict()
+        for chart in result.get('charts', []):
+            try:
+                relative_path = Path(chart['path']).resolve().relative_to(
+                    output_dir.resolve()
+                ).as_posix()
+            except (KeyError, ValueError):
+                continue
+            chart['filename'] = Path(relative_path).name
+            chart['relative_path'] = relative_path
+            chart['url'] = f"/api/research/chart/{quote(relative_path, safe='/')}"
+            chart.pop('path', None)
+        result['report_url'] = '/api/research/report'
+        result['evidence_url'] = '/api/research/evidence'
+        result['manifest_url'] = '/api/research/manifest'
+        result['cache_cleanup_url'] = '/api/research/cache'
+        result['run_id'] = run_id
+        result['image_count'] = len(problem_images)
+        result.pop('report_path', None)
+        result.pop('output_dir', None)
+        sdata['research_output_dir'] = str(output_dir)
+        sdata['research_result'] = result
+        return result
+
+    if request_bool('async', False):
+        if sdata.get('research_status') == 'running':
+            return jsonify({'success': False, 'error': '已有研究任务正在运行'}), 409
+        sdata['research_status'] = 'running'
+        sdata['research_error'] = None
+        sdata['research_result'] = None
+
+        def research_task():
+            try:
+                execute_research()
+                sdata['research_status'] = 'done'
+            except Exception as exc:
+                sdata['research_status'] = 'error'
+                sdata['research_error'] = str(exc)
+                log_error(f'[ResearchAssistant] {exc}')
+
+        thread = threading.Thread(target=research_task, daemon=True)
+        thread.start()
+        return jsonify({'success': True, 'status': 'running'})
+
+    try:
+        result = execute_research()
+        return jsonify(clean_for_json({'success': True, 'result': result}))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        log_error(f'[ResearchAssistant] {e}')
+        return api_error_response(str(e), traceback.format_exc())
+
+
+@app.route('/api/research/status', methods=['GET'])
+def api_research_status():
+    """Return the asynchronous research state without blocking a web worker."""
+    sdata = get_session()
+    status = sdata.get('research_status', 'idle')
+    payload = {
+        'success': status != 'error',
+        'status': status,
+        'error': sdata.get('research_error'),
+    }
+    if status == 'done':
+        payload['result'] = sdata.get('research_result')
+    return jsonify(clean_for_json(payload)), 200 if status != 'error' else 500
+
+
+@app.route('/api/research/chart/<path:filename>', methods=['GET'])
+def api_research_chart(filename):
+    sdata = get_session()
+    output_dir = sdata.get('research_output_dir')
+    if not output_dir:
+        return jsonify({'success': False, 'error': '图表不存在'}), 404
+    target = _resolve_research_artifact(output_dir, filename, 'charts', suffix='.png')
+    if target is None:
+        return jsonify({'success': False, 'error': '图表不存在'}), 404
+    return send_file(target, mimetype='image/png')
+
+
+def _resolve_research_artifact(output_dir, relative_path, category, suffix=None):
+    """Resolve a session-owned artifact while enforcing its declared category."""
+    relative = Path(str(relative_path))
+    if relative.is_absolute() or not relative.parts or '..' in relative.parts:
+        return None
+    root = Path(output_dir).resolve()
+    category_root = (root / category).resolve()
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(category_root)
+    except ValueError:
+        return None
+    if suffix and target.suffix.lower() != suffix:
+        return None
+    return target if target.is_file() else None
+
+
+@app.route('/api/research/report', methods=['GET'])
+def api_research_report():
+    output_dir = get_session().get('research_output_dir')
+    if not output_dir:
+        return jsonify({'success': False, 'error': '尚未生成研究报告'}), 404
+    target = _resolve_research_artifact(
+        output_dir, 'reports/mathematical_argument.md', 'reports', suffix='.md'
+    )
+    if target is None:
+        return jsonify({'success': False, 'error': '研究报告不存在'}), 404
+    return send_file(target, as_attachment=True, download_name=target.name)
+
+
+@app.route('/api/research/evidence', methods=['GET'])
+def api_research_evidence():
+    """Download the machine-checkable evidence bundle, not generated prose."""
+    output_dir = get_session().get('research_output_dir')
+    if not output_dir:
+        return jsonify({'success': False, 'error': '尚未生成数学论证证据'}), 404
+    target = _resolve_research_artifact(
+        output_dir, 'evidence/evidence_bundle.json', 'evidence', suffix='.json'
+    )
+    if target is None:
+        return jsonify({'success': False, 'error': '数学论证证据不存在'}), 404
+    return send_file(target, as_attachment=True, download_name=target.name)
+
+
+@app.route('/api/research/manifest', methods=['GET'])
+def api_research_manifest():
+    """Download the authoritative, versioned index of the current run."""
+    output_dir = get_session().get('research_output_dir')
+    if not output_dir:
+        return jsonify({'success': False, 'error': '尚未生成运行产物清单'}), 404
+    target = _resolve_research_artifact(
+        output_dir, 'artifact_manifest.json', '.', suffix='.json'
+    )
+    if target is None or target.parent != Path(output_dir).resolve():
+        return jsonify({'success': False, 'error': '运行产物清单不存在'}), 404
+    # Read this small control file eagerly so a concurrent cache cleanup can
+    # atomically replace the manifest on Windows without sharing violations.
+    return send_file(
+        io.BytesIO(target.read_bytes()), mimetype='application/json',
+        as_attachment=True, download_name=target.name,
+    )
+
+
+@app.route('/api/research/cache', methods=['DELETE'])
+def api_research_cache_delete():
+    """Delete only the disposable cache of the current research run."""
+    output_dir = get_session().get('research_output_dir')
+    if not output_dir:
+        return jsonify({'success': False, 'error': '尚无可清理的研究缓存'}), 404
+    try:
+        from core.artifact_manager import RunArtifactManager
+        summary = RunArtifactManager.open_existing(output_dir).clear_cache()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return jsonify({'success': False, 'error': f'缓存清理被安全边界拒绝：{exc}'}), 400
+    return jsonify(clean_for_json({'success': True, 'cleanup': summary}))
 
 
 @app.route('/api/data/generate', methods=['POST'])
@@ -463,18 +1013,25 @@ def api_upload_select():
     sheet_name = data.get('sheet_name')
     
     files = sdata.get('uploaded_files', [])
-    if not files or file_index >= len(files):
+    if (
+        isinstance(file_index, bool) or not isinstance(file_index, int)
+        or not files or file_index < 0 or file_index >= len(files)
+    ):
         return jsonify({'success': False, 'error': '文件不存在'}), 400
     
     file_info = files[file_index]
     try:
         if file_info['ext'] in ('.xls', '.xlsx'):
+            available_sheets = list(file_info.get('sheets') or [])
+            if sheet_name not in available_sheets:
+                return jsonify({'success': False, 'error': 'Sheet不存在'}), 400
             df = pd.read_excel(file_info['path'], sheet_name=sheet_name)
         else:
             df, _ = _read_file_with_sheets(file_info['path'], file_info['ext'])
         
         # 切换数据集时清除旧分析结果
         _clear_analysis_results(sdata)
+        _clear_transform_history(sdata)
         
         sdata['df'] = df
         sdata['active_file_index'] = file_index
@@ -541,6 +1098,9 @@ def api_delete_dataset(index):
     try:
         if os.path.exists(removed['path']):
             os.remove(removed['path'])
+        for cache_path in removed.get('research_cache_paths', {}).values():
+            if os.path.isfile(cache_path):
+                os.remove(cache_path)
     except Exception:
         # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
         pass
@@ -555,6 +1115,7 @@ def api_delete_dataset(index):
         sdata['df_info'] = df_to_dict(df)
         sdata['active_sheet'] = first.get('active_sheet')
         _clear_analysis_results(sdata)
+        _clear_transform_history(sdata)
     elif not files:
         # 全部删除了，清空相关数据
         sdata['df'] = None
@@ -562,11 +1123,16 @@ def api_delete_dataset(index):
         sdata['active_file_index'] = None
         sdata['active_sheet'] = None
         _clear_analysis_results(sdata)
+        _clear_transform_history(sdata)
     elif active_idx > index:
         sdata['active_file_index'] = active_idx - 1
     
     sdata['uploaded_files'] = files
-    return jsonify({'success': True, 'datasets_count': len(files)})
+    return jsonify({
+        'success': True,
+        'datasets_count': len(files),
+        'active_index': sdata.get('active_file_index'),
+    })
 
 
 @app.route('/api/upload/merge', methods=['POST'])
@@ -577,23 +1143,52 @@ def api_upload_merge():
     sources = data.get('sources', [])  # [{file_index, sheet_name}]
     axis = data.get('axis', 0)  # 0=纵向(行), 1=横向(列)
     
-    if len(sources) < 2:
-        return jsonify({'success': False, 'error': '至少需要选择2个表进行合并'}), 400
+    if not isinstance(sources, list) or not 2 <= len(sources) <= 20:
+        return jsonify({'success': False, 'error': '请选择2到20个表进行合并'}), 400
+    if isinstance(axis, bool) or not isinstance(axis, int) or axis not in (0, 1):
+        return jsonify({'success': False, 'error': '合并方向只能是0或1'}), 400
     
     files = sdata.get('uploaded_files', [])
     dfs = []
+    normalized_sources = []
+    source_keys = set()
     try:
         for src in sources:
-            idx = src.get('file_index', 0)
+            if not isinstance(src, dict):
+                return jsonify({'success': False, 'error': '表选择格式无效'}), 400
+            idx = src.get('file_index')
             sheet = src.get('sheet_name')
-            if idx >= len(files):
-                continue
+            if (
+                isinstance(idx, bool) or not isinstance(idx, int)
+                or idx < 0 or idx >= len(files)
+            ):
+                return jsonify({'success': False, 'error': '选择的文件不存在'}), 400
             fi = files[idx]
-            if fi['ext'] in ('.xls', '.xlsx') and sheet:
+            if fi['ext'] in ('.xls', '.xlsx'):
+                available_sheets = list(fi.get('sheets') or [])
+                if sheet not in available_sheets:
+                    return jsonify({'success': False, 'error': '选择的Sheet不存在'}), 400
+                source_key = (idx, str(sheet))
+            else:
+                if sheet not in (None, ''):
+                    return jsonify({'success': False, 'error': '非Excel文件不能指定Sheet'}), 400
+                sheet = None
+                source_key = (idx, None)
+            if source_key in source_keys:
+                return jsonify({'success': False, 'error': '不能重复选择同一个表'}), 400
+            source_keys.add(source_key)
+            if fi['ext'] in ('.xls', '.xlsx'):
                 df = pd.read_excel(fi['path'], sheet_name=sheet)
             else:
                 df, _ = _read_file_with_sheets(fi['path'], fi['ext'])
             dfs.append(df)
+            normalized_sources.append({'file_index': idx, 'sheet_name': sheet})
+
+        if len(dfs) < 2:
+            return jsonify({'success': False, 'error': '至少需要两个有效表'}), 400
+        column_sets = [set(map(str, frame.columns)) for frame in dfs]
+        common_columns = sorted(set.intersection(*column_sets)) if column_sets else []
+        union_columns = sorted(set.union(*column_sets)) if column_sets else []
         
         if axis == 0:
             merged = pd.concat(dfs, axis=0, ignore_index=True)
@@ -602,79 +1197,613 @@ def api_upload_merge():
         
         sdata['df'] = merged
         sdata['df_info'] = df_to_dict(merged)
-        sdata['merged_from'] = sources
+        sdata['merged_from'] = normalized_sources
+        _clear_analysis_results(sdata)
+        _clear_transform_history(sdata)
         
         target_hint = None
-        for col in reversed(merged.columns):
-            missing_rate = merged[col].isnull().sum() / len(merged)
-            if 0.05 < missing_rate < 0.95:
-                target_hint = col
-                break
+        if len(merged):
+            for col in reversed(merged.columns):
+                missing_rate = merged[col].isnull().sum() / len(merged)
+                if 0.05 < missing_rate < 0.95:
+                    target_hint = col
+                    break
         
         return jsonify({
             'success': True,
             'data': df_to_dict(merged),
             'shape': [merged.shape[0], merged.shape[1]],
             'target_hint': target_hint,
+            'merge_diagnostics': {
+                'axis': axis,
+                'source_count': len(dfs),
+                'common_columns': common_columns,
+                'union_columns': union_columns,
+                'schemas_identical': all(
+                    list(map(str, frame.columns)) == list(map(str, dfs[0].columns))
+                    for frame in dfs[1:]
+                ),
+            },
         })
     except Exception as e:
         return api_error_response(str(e))
+
+
+def _resolve_uploaded_source(files, source):
+    if not isinstance(source, dict):
+        raise TableTransformError('数据表选择格式无效')
+    index = source.get('file_index')
+    sheet = source.get('sheet_name')
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(files):
+        raise TableTransformError('选择的数据文件不存在')
+    file_info = files[index]
+    if file_info.get('ext') in ('.xls', '.xlsx'):
+        available = list(file_info.get('sheets') or [])
+        if sheet not in available:
+            raise TableTransformError('选择的Sheet不存在')
+        frame = pd.read_excel(file_info['path'], sheet_name=sheet)
+    else:
+        if sheet not in (None, ''):
+            raise TableTransformError('非Excel文件不能指定Sheet')
+        sheet = None
+        frame, _ = _read_file_with_sheets(file_info['path'], file_info['ext'])
+    labels = list(map(str, frame.columns))
+    if len(labels) != len(set(labels)):
+        raise TableTransformError('所选表包含重复字段名，请先重命名后再关联')
+    if list(frame.columns) != labels:
+        frame = frame.copy(deep=False)
+        frame.columns = labels
+    return frame, {'file_index': index, 'sheet_name': sheet}, file_info
+
+
+@app.route('/api/upload/schema', methods=['POST'])
+def api_upload_schema():
+    """读取所选文件/Sheet的真实字段，避免用Excel首个Sheet的列名猜测。"""
+    sdata = get_session()
+    files = sdata.get('uploaded_files', [])
+    source = (request.get_json() or {}).get('source')
+    try:
+        if not isinstance(source, dict):
+            raise TableTransformError('数据表选择格式无效')
+        index = source.get('file_index')
+        sheet = source.get('sheet_name')
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(files):
+            raise TableTransformError('选择的数据文件不存在')
+        file_info = files[index]
+        if file_info.get('ext') in ('.xls', '.xlsx'):
+            if sheet not in list(file_info.get('sheets') or []):
+                raise TableTransformError('选择的Sheet不存在')
+            header = pd.read_excel(file_info['path'], sheet_name=sheet, nrows=100)
+            columns = list(map(str, header.columns))
+            dtypes = {str(column): str(dtype) for column, dtype in header.dtypes.items()}
+        else:
+            if sheet not in (None, ''):
+                raise TableTransformError('非Excel文件不能指定Sheet')
+            columns = list(map(str, file_info.get('columns') or []))
+            dtypes = {}
+        return jsonify(clean_for_json({
+            'success': True,
+            'columns': columns,
+            'dtypes': dtypes,
+            'source': {'file_index': index, 'sheet_name': sheet},
+        }))
+    except TableTransformError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return api_error_response(str(exc))
+
+
+def _estimate_join_rows(left, right, left_on, right_on, how):
+    key_names = [f'__key_{index}' for index in range(len(left_on))]
+    left_keys = left[left_on].copy()
+    right_keys = right[right_on].copy()
+    left_keys.columns = key_names
+    right_keys.columns = key_names
+    left_counts = left_keys.groupby(key_names, dropna=False, observed=True).size().rename('__left_count').reset_index()
+    right_counts = right_keys.groupby(key_names, dropna=False, observed=True).size().rename('__right_count').reset_index()
+    matches = left_counts.merge(right_counts, on=key_names, how='outer')
+    left_count = matches['__left_count'].fillna(0)
+    right_count = matches['__right_count'].fillna(0)
+    inner = int((left_count * right_count).sum())
+    left_unmatched = int(left_count[right_count.eq(0)].sum())
+    right_unmatched = int(right_count[left_count.eq(0)].sum())
+    estimates = {
+        'inner': inner,
+        'left': inner + left_unmatched,
+        'right': inner + right_unmatched,
+        'outer': inner + left_unmatched + right_unmatched,
+    }
+    return estimates[how]
 
 
 @app.route('/api/upload/join', methods=['POST'])
 def api_upload_join():
-    """多表关联（SQL风格 join）"""
+    """支持异名多键、键类型对齐、基数验证与膨胀保护的通用等值关联。"""
     sdata = get_session()
     data = request.get_json() or {}
-    left = data.get('left', {})
-    right = data.get('right', {})
-    on = data.get('on', '')
-    how = data.get('how', 'inner')  # inner, left, right, outer
-    
-    if not on:
-        return jsonify({'success': False, 'error': '请指定关联键'}), 400
-    
+    left_source = data.get('left', {})
+    right_source = data.get('right', {})
+    legacy_on = data.get('on')
+    left_on = data.get('left_on', legacy_on)
+    right_on = data.get('right_on', legacy_on)
+    left_on = [left_on] if isinstance(left_on, str) else list(left_on or [])
+    right_on = [right_on] if isinstance(right_on, str) else list(right_on or [])
+    how = str(data.get('how', 'inner')).lower()
+    key_type = str(data.get('key_type', 'none')).lower()
+    validation = str(data.get('validate', '') or '')
+
+    if not left_on or len(left_on) != len(right_on) or len(left_on) > 8:
+        return jsonify({'success': False, 'error': '左右关联键必须一一对应，数量为1到8个'}), 400
+    if any(not isinstance(column, str) or not column for column in left_on + right_on):
+        return jsonify({'success': False, 'error': '关联键必须是非空字段名字符串'}), 400
+    if len(set(left_on)) != len(left_on) or len(set(right_on)) != len(right_on):
+        return jsonify({'success': False, 'error': '同一侧关联键不能重复选择'}), 400
+    if how not in {'inner', 'left', 'right', 'outer'}:
+        return jsonify({'success': False, 'error': '关联方式无效'}), 400
+    if key_type not in {'none', 'string', 'numeric', 'datetime'}:
+        return jsonify({'success': False, 'error': '键类型对齐方式无效'}), 400
+    valid_relations = {'', 'one_to_one', 'one_to_many', 'many_to_one', 'many_to_many'}
+    if validation not in valid_relations:
+        return jsonify({'success': False, 'error': '预期键关系无效'}), 400
+
     files = sdata.get('uploaded_files', [])
     try:
-        li = left.get('file_index', 0)
-        ls = left.get('sheet_name')
-        ri = right.get('file_index', 0)
-        rs = right.get('sheet_name')
-        
-        # 读取左表
-        lf = files[li]
-        if lf['ext'] in ('.xls', '.xlsx') and ls:
-            df_left = pd.read_excel(lf['path'], sheet_name=ls)
-        else:
-            df_left, _ = _read_file_with_sheets(lf['path'], lf['ext'])
-        
-        # 读取右表
-        rf = files[ri]
-        if rf['ext'] in ('.xls', '.xlsx') and rs:
-            df_right = pd.read_excel(rf['path'], sheet_name=rs)
-        else:
-            df_right, _ = _read_file_with_sheets(rf['path'], rf['ext'])
-        
-        joined = df_left.merge(df_right, on=on, how=how, suffixes=('', '_right'))
-        
+        df_left, normalized_left, _ = _resolve_uploaded_source(files, left_source)
+        df_right, normalized_right, _ = _resolve_uploaded_source(files, right_source)
+        left_on = [str(column) for column in left_on]
+        right_on = [str(column) for column in right_on]
+        missing_left = [column for column in left_on if column not in df_left.columns]
+        missing_right = [column for column in right_on if column not in df_right.columns]
+        if missing_left or missing_right:
+            raise TableTransformError(f'关联键不存在：左表{missing_left or "无"}，右表{missing_right or "无"}')
+
+        left_work = df_left.copy(deep=False)
+        right_work = df_right.copy(deep=False)
+        if key_type != 'none':
+            converters = {
+                'string': lambda series: series.astype('string').str.strip(),
+                'numeric': lambda series: pd.to_numeric(series, errors='coerce'),
+                'datetime': lambda series: pd.to_datetime(series, errors='coerce'),
+            }
+            for column in left_on:
+                left_work[column] = converters[key_type](left_work[column])
+            for column in right_on:
+                right_work[column] = converters[key_type](right_work[column])
+
+        left_unique = not left_work.duplicated(left_on, keep=False).any()
+        right_unique = not right_work.duplicated(right_on, keep=False).any()
+        inferred_relation = (
+            'one_to_one' if left_unique and right_unique else
+            'one_to_many' if left_unique else
+            'many_to_one' if right_unique else
+            'many_to_many'
+        )
+        estimated_rows = _estimate_join_rows(left_work, right_work, left_on, right_on, how)
+        output_columns = len(df_left.columns) + len(df_right.columns) - len(set(left_on) & set(right_on))
+        estimated_cells = estimated_rows * max(output_columns, 1)
+        baseline_rows = max(len(df_left), len(df_right), 1)
+        if estimated_cells > TableTransformationEngine.MAX_RESULT_CELLS:
+            raise TableTransformError(
+                f'关联预计产生{estimated_rows:,}行、约{estimated_cells:,}个单元格，超过安全预算；请先按键聚合或去重'
+            )
+        if estimated_rows > baseline_rows * TableTransformationEngine.MAX_EXPANSION_RATIO:
+            raise TableTransformError(
+                f'关联预计膨胀{estimated_rows / baseline_rows:.1f}倍，疑似多对多笛卡尔放大；请补充复合键或先聚合'
+            )
+
+        joined = left_work.merge(
+            right_work,
+            how=how,
+            left_on=left_on,
+            right_on=right_on,
+            suffixes=('', '_right'),
+            validate=validation or None,
+        )
+        _clear_analysis_results(sdata)
+        _clear_transform_history(sdata)
         sdata['df'] = joined
         sdata['df_info'] = df_to_dict(joined)
-        
+        sdata['joined_from'] = {'left': normalized_left, 'right': normalized_right}
+
         target_hint = None
-        for col in reversed(joined.columns):
-            missing_rate = joined[col].isnull().sum() / len(joined)
-            if 0.05 < missing_rate < 0.95:
-                target_hint = col
-                break
-        
-        return jsonify({
+        if len(joined):
+            for col in reversed(joined.columns):
+                missing_rate = joined[col].isnull().sum() / len(joined)
+                if 0.05 < missing_rate < 0.95:
+                    target_hint = col
+                    break
+        return jsonify(clean_for_json({
             'success': True,
             'data': df_to_dict(joined),
             'shape': [joined.shape[0], joined.shape[1]],
             'target_hint': target_hint,
+            'join_diagnostics': {
+                'left_keys': left_on,
+                'right_keys': right_on,
+                'how': how,
+                'key_type': key_type,
+                'inferred_relation': inferred_relation,
+                'validated_relation': validation or None,
+                'estimated_rows': estimated_rows,
+                'actual_rows': len(joined),
+                'expansion_ratio': round(len(joined) / baseline_rows, 6),
+                'left_duplicate_key_rows': int(df_left.duplicated(left_on, keep=False).sum()),
+                'right_duplicate_key_rows': int(df_right.duplicated(right_on, keep=False).sum()),
+            },
+        }))
+    except TableTransformError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except pd.errors.MergeError as exc:
+        return jsonify({'success': False, 'error': f'关联键关系不符合预期: {exc}'}), 400
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': f'关联失败: {exc}'}), 400
+    except Exception as exc:
+        return api_error_response(str(exc))
+
+
+def _compile_transform_visual_preview(frame: pd.DataFrame) -> Dict[str, Any]:
+    """Compile a small, semantic chart for a transformation result.
+
+    Transformation preview must stay read-only and bounded.  Chart failure is
+    intentionally isolated from transformation success: an unusual schema may
+    make a chart unavailable, but it must never make a valid pipeline fail.
+    """
+    if frame.empty:
+        return {
+            'available': False,
+            'reason': '变换结果为空，没有可绘制记录。',
+            'records': [],
+        }
+    try:
+        compiler = InteractiveVisualizationCompiler(
+            max_profile_rows=10_000,
+            max_scan_rows=100_000,
+            max_points=1_200,
+        )
+        schema = compiler.describe(frame)
+        recommendation = schema['recommendation']
+        fields = schema.get('fields') or []
+        measures = [item['name'] for item in fields if item.get('semantic_role') == 'measure']
+        times = [item['name'] for item in fields if item.get('semantic_role') == 'time']
+        dimensions = [item['name'] for item in fields if item.get('semantic_role') == 'dimension']
+        labels = [item['name'] for item in fields if item.get('semantic_role') == 'label']
+        candidates = []
+
+        def display_field(field):
+            suffix_labels = {
+                '_sum': '（求和）', '_mean': '（均值）', '_median': '（中位数）',
+                '_min': '（最小值）', '_max': '（最大值）', '_count': '（计数）',
+            }
+            for suffix, suffix_label in suffix_labels.items():
+                if str(field).endswith(suffix):
+                    return str(field)[:-len(suffix)] + suffix_label
+            return str(field)
+
+        def add_candidate(label, reason, chart_type, encodings, aggregation):
+            specification = {
+                'chart_type': chart_type,
+                'encodings': encodings,
+                'filters': [],
+                'aggregation': {
+                    'function': aggregation.get('function', 'none'),
+                    'group_by': aggregation.get('group_by') or [],
+                    'time_unit': aggregation.get('time_unit', 'none'),
+                    'bins': int(aggregation.get('bins', 20)),
+                },
+                'max_points': 1_200,
+            }
+            signature = json.dumps(specification, ensure_ascii=False, sort_keys=True)
+            if not any(item['signature'] == signature for item in candidates):
+                candidates.append({
+                    'label': label,
+                    'reason': reason,
+                    'specification': specification,
+                    'signature': signature,
+                })
+
+        group_field = dimensions[0] if dimensions else (labels[0] if labels else None)
+        if group_field and measures:
+            aggregation_function = 'mean' if group_field in dimensions else 'none'
+            for measure in measures[:2]:
+                add_candidate(
+                    f'排名 · {display_field(measure)}',
+                    f'按“{display_field(group_field)}”比较“{display_field(measure)}”，默认显示高低排序。',
+                    'bar', {'x': group_field, 'y': measure},
+                    {'function': aggregation_function},
+                )
+        if times and measures:
+            add_candidate(
+                f'趋势 · {display_field(measures[0])}',
+                f'检查“{display_field(measures[0])}”随“{display_field(times[0])}”的变化。',
+                'line', {'x': times[0], 'y': measures[0]},
+                {'function': 'mean', 'time_unit': 'day'},
+            )
+        if len(measures) >= 2:
+            add_candidate(
+                f'关系 · {display_field(measures[0])} × {display_field(measures[1])}',
+                f'检查“{display_field(measures[0])}”与“{display_field(measures[1])}”的联合分布。',
+                'scatter', {'x': measures[0], 'y': measures[1]},
+                {'function': 'none'},
+            )
+        recommendation_aggregation = recommendation.get('aggregation') or {}
+        add_candidate(
+            '智能推荐',
+            recommendation.get('reason', '已按结果字段语义自动选图。'),
+            recommendation.get('chart_type', 'auto'),
+            recommendation.get('encodings') or {},
+            recommendation_aggregation,
+        )
+
+        presets = []
+        for index, candidate in enumerate(candidates[:4]):
+            try:
+                compiled = compiler.compile(frame, candidate['specification'])
+            except InteractiveVisualizationError:
+                continue
+            if not compiled.get('records'):
+                continue
+            compiled.update({
+                'available': True,
+                'reason': candidate['reason'],
+                'capability_summary': schema.get('capability', {}).get('summary', ''),
+                'profile_scope': schema.get('profile_scope'),
+            })
+            presets.append({
+                'id': f'view_{index + 1}',
+                'label': candidate['label'],
+                'result': compiled,
+            })
+        if not presets:
+            return {
+                'available': False,
+                'reason': '变换结果没有可绘制图元。',
+                'records': [],
+                'presets': [],
+            }
+        primary = dict(presets[0]['result'])
+        primary['presets'] = presets
+        return primary
+    except (InteractiveVisualizationError, KeyError, TypeError, ValueError) as exc:
+        return {
+            'available': False,
+            'reason': f'当前结果无法生成有意义的自动图：{exc}',
+            'records': [],
+        }
+
+
+def _table_transform_payload(result):
+    return clean_for_json({
+        'success': True,
+        'data': df_to_dict(result.data),
+        'input_shape': list(result.input_shape),
+        'shape': list(result.output_shape),
+        'audit': result.audit,
+        'warnings': result.warnings,
+        'memory_bytes': int(result.data.memory_usage(index=True, deep=True).sum()),
+        'visual_preview': _compile_transform_visual_preview(result.data),
+    })
+
+
+def _remember_transform_state(sdata, frame, lineage):
+    """为中小结果保留最多3步可撤销快照，大表只保留审计避免内存翻倍。"""
+    memory_bytes = int(frame.memory_usage(index=True, deep=True).sum())
+    if memory_bytes > 64 * 1024 * 1024:
+        return False
+    history = sdata.setdefault('transform_history', [])
+    history.append({
+        'df': frame,
+        'df_info': sdata.get('df_info'),
+        'lineage': list(lineage),
+        'memory_bytes': memory_bytes,
+    })
+    while len(history) > 3 or sum(int(item.get('memory_bytes', 0)) for item in history) > 128 * 1024 * 1024:
+        history.pop(0)
+    return True
+
+
+@app.route('/api/data/transform/capabilities', methods=['GET'])
+def api_data_transform_capabilities():
+    """返回声明式表变换注册表，供界面、小模型或外部API组合。"""
+    frame = get_session().get('df')
+    if frame is None:
+        capabilities = [
+            {**item, 'availability': 'unavailable', 'availability_reason': '请先上传或选择数据表'}
+            for item in TableTransformationEngine.capabilities()
+        ]
+    else:
+        capabilities = TableTransformationEngine.capabilities(frame)
+    return jsonify(clean_for_json({
+        'success': True,
+        'capabilities': capabilities,
+        'limits': {
+            'max_steps': TableTransformationEngine.MAX_STEPS,
+            'max_result_cells': TableTransformationEngine.MAX_RESULT_CELLS,
+            'max_columns': TableTransformationEngine.MAX_COLUMNS,
+        },
+    }))
+
+
+@app.route('/api/data/transform/suggest', methods=['POST'])
+def api_data_transform_suggest():
+    """根据字段画像和题意生成候选处理流水线，但不自动提交。"""
+    sdata = get_session()
+    frame = sdata.get('df')
+    if frame is None:
+        return jsonify({'success': False, 'error': '请先上传或选择数据表'}), 400
+    payload = request.get_json() or {}
+    problem = str(payload.get('problem', ''))
+    if len(problem) > 20_000:
+        return jsonify({'success': False, 'error': '处理目标最多20000字符'}), 400
+    profile_frame = frame if len(frame) <= 100_000 else frame.sample(n=100_000, random_state=42)
+    result = TableTransformationPlanner.suggest(profile_frame, problem)
+    result['profile']['rows'] = int(len(frame))
+    result['profile']['profiled_rows'] = int(len(profile_frame))
+    return jsonify(clean_for_json({'success': True, **result}))
+
+
+@app.route('/api/data/transform/validate', methods=['POST'])
+def api_data_transform_validate():
+    """用有界样本预检字段绑定与操作组合，不重复扫描完整大表。"""
+    sdata = get_session()
+    frame = sdata.get('df')
+    if frame is None:
+        return jsonify({'success': False, 'error': '请先上传或选择数据表'}), 400
+    payload = request.get_json() or {}
+    sample_rows = min(len(frame), 512)
+    sample = frame.head(sample_rows).copy(deep=False)
+    try:
+        result = TableTransformationEngine().execute(sample, payload.get('pipeline'))
+        return jsonify(clean_for_json({
+            'success': True,
+            'sampled': len(frame) > sample_rows,
+            'sampled_rows': int(sample_rows),
+            'source_rows': int(len(frame)),
+            'result_columns': [str(column) for column in result.data.columns],
+            'audit': result.audit,
+            'warnings': result.warnings,
+        }))
+    except TableTransformError as exc:
+        pipeline = payload.get('pipeline') if isinstance(payload.get('pipeline'), list) else []
+        matched_step = re.search(r'第(\d+)步', str(exc))
+        invalid_step = int(matched_step.group(1)) if matched_step else None
+        suggested_pipeline = [
+            step for index, step in enumerate(pipeline, start=1)
+            if index != invalid_step
+        ] if invalid_step else None
+        return jsonify(clean_for_json({
+            'success': False,
+            'error': str(exc),
+            'current_columns': [str(column) for column in frame.columns],
+            'action': '删除不适用步骤，或从操作注册表重新载入已绑定当前表字段的模板。',
+            'invalid_step': invalid_step,
+            'suggested_pipeline': suggested_pipeline,
+        })), 400
+    except Exception as exc:
+        return api_error_response(str(exc))
+
+
+@app.route('/api/data/transform/preview', methods=['POST'])
+def api_data_transform_preview():
+    """在完整当前表上执行流水线并返回预览，不修改会话数据。"""
+    sdata = get_session()
+    frame = sdata.get('df')
+    if frame is None:
+        return jsonify({'success': False, 'error': '请先上传或选择数据表'}), 400
+    payload = request.get_json() or {}
+    try:
+        result = TableTransformationEngine().execute(frame, payload.get('pipeline'))
+        response = _table_transform_payload(result)
+        response['committed'] = False
+        return jsonify(response)
+    except TableTransformError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return api_error_response(str(exc))
+
+
+@app.route('/api/data/transform/apply', methods=['POST'])
+def api_data_transform_apply():
+    """事务式执行并提交变换；任一步失败时当前表保持不变。"""
+    sdata = get_session()
+    frame = sdata.get('df')
+    if frame is None:
+        return jsonify({'success': False, 'error': '请先上传或选择数据表'}), 400
+    payload = request.get_json() or {}
+    pipeline = payload.get('pipeline')
+    try:
+        result = TableTransformationEngine().execute(frame, pipeline)
+        previous_lineage = list(sdata.get('transform_lineage', []))
+        undo_available = _remember_transform_state(sdata, frame, previous_lineage)
+        if not undo_available:
+            result.warnings.append('当前表超过64MB：为避免内存翻倍，本次只保留审计记录，不保留撤销快照。')
+        _clear_analysis_results(sdata)
+        sdata['df'] = result.data
+        sdata['df_info'] = df_to_dict(result.data)
+        lineage_entry = {
+            'timestamp': time.time(),
+            'pipeline': clean_for_json(pipeline),
+            'audit': result.audit,
+            'input_shape': list(result.input_shape),
+            'output_shape': list(result.output_shape),
+        }
+        sdata['transform_lineage'] = (previous_lineage + [lineage_entry])[-100:]
+        sdata['use_transformed_for_research'] = True
+        response = _table_transform_payload(result)
+        response.update({
+            'committed': True,
+            'undo_available': undo_available,
+            'lineage_depth': len(sdata['transform_lineage']),
         })
-    except Exception as e:
-        return api_error_response(str(e))
+        return jsonify(response)
+    except TableTransformError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return api_error_response(str(exc))
+
+
+@app.route('/api/data/transform/undo', methods=['POST'])
+def api_data_transform_undo():
+    """撤销最近一次已提交的中小表变换。"""
+    sdata = get_session()
+    history = sdata.get('transform_history', [])
+    if not history:
+        return jsonify({'success': False, 'error': '没有可撤销的变换；大表为控制内存不会保存快照'}), 400
+    snapshot = history.pop()
+    restored = snapshot['df']
+    _clear_analysis_results(sdata)
+    sdata['df'] = restored
+    sdata['df_info'] = snapshot.get('df_info') or df_to_dict(restored)
+    sdata['transform_lineage'] = snapshot.get('lineage', [])
+    sdata['use_transformed_for_research'] = bool(sdata['transform_lineage'])
+    return jsonify(clean_for_json({
+        'success': True,
+        'data': df_to_dict(restored),
+        'shape': list(restored.shape),
+        'undo_available': bool(history),
+        'lineage_depth': len(sdata['transform_lineage']),
+    }))
+
+
+@app.route('/api/data/math-compile', methods=['POST'])
+def api_mathematical_data_compile():
+    """编译多种数学数据视图并执行粒度、守恒、泄漏与结论翻转审计。"""
+    sdata = get_session()
+    frame = sdata.get('df')
+    if frame is None:
+        return jsonify({'success': False, 'error': '请先上传或选择数据表'}), 400
+    payload = request.get_json() or {}
+    problem = str(payload.get('problem', ''))
+    target = payload.get('target') or None
+    semantic_hints = payload.get('semantic_hints')
+    if len(problem) > 20_000:
+        return jsonify({'success': False, 'error': '题目或处理目标最多20000字符'}), 400
+    if target is not None and (not isinstance(target, str) or len(target) > 500):
+        return jsonify({'success': False, 'error': '目标字段必须是有效字符串'}), 400
+    if semantic_hints is not None:
+        if not isinstance(semantic_hints, dict):
+            return jsonify({'success': False, 'error': 'semantic_hints必须是JSON对象'}), 400
+        if len(json.dumps(semantic_hints, ensure_ascii=False)) > 100_000:
+            return jsonify({'success': False, 'error': 'semantic_hints最多100000字符'}), 400
+    try:
+        max_views = int(payload.get('max_views', 8))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'max_views必须是整数'}), 400
+    try:
+        result = MathematicalDataCompiler(
+            max_analysis_rows=min(max(len(frame), 1_000), 50_000),
+        ).compile(
+            frame,
+            problem=problem,
+            target=target,
+            max_views=max_views,
+            semantic_hints=semantic_hints,
+        )
+        sdata['mathematical_data_compilation'] = result
+        return jsonify(clean_for_json({'success': True, 'result': result}))
+    except TableTransformError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return api_error_response(str(exc))
 
 
 @app.route('/api/data/info', methods=['GET'])
@@ -1743,7 +2872,7 @@ def api_model_tune():
     except Exception as e:
         import traceback
         log_warning(f"[Tune] {model_key} evaluation failed: {e}")
-        return jsonify({'success': False, 'error': str(e), 'detail': traceback.format_exc()}), 500
+        return api_error_response(str(e), detail=traceback.format_exc())
 
 
 @app.route('/api/model/export', methods=['POST'])
@@ -1818,7 +2947,7 @@ def api_model_export():
     except Exception as e:
         import traceback
         log_warning(f"[Export] failed: {e}")
-        return jsonify({'success': False, 'error': str(e), 'detail': traceback.format_exc()}), 500
+        return api_error_response(str(e), detail=traceback.format_exc())
 
 
 @app.route('/api/experiments', methods=['GET'])
@@ -2156,6 +3285,47 @@ def api_model_explain_shap():
 # 可视化 API
 # =============================================================================
 
+@app.route('/api/visualization/explore/schema', methods=['GET'])
+def api_visualization_explore_schema():
+    """返回交互图形工作台所需的有界字段画像。"""
+    frame = get_session().get('df')
+    if frame is None:
+        return jsonify({'success': False, 'error': '请先上传或选择数据表'}), 400
+    try:
+        schema = InteractiveVisualizationCompiler().describe(frame)
+        return jsonify(clean_for_json({'success': True, 'schema': schema}))
+    except InteractiveVisualizationError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        log_error(f'[InteractiveVisualization] schema: {exc}')
+        return api_error_response('交互图字段画像失败')
+
+
+@app.route('/api/visualization/explore/data', methods=['POST'])
+def api_visualization_explore_data():
+    """编译筛选、聚合和有界抽样后的浏览器图形数据。"""
+    frame = get_session().get('df')
+    if frame is None:
+        return jsonify({'success': False, 'error': '请先上传或选择数据表'}), 400
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({'success': False, 'error': '图形配置必须是JSON对象'}), 400
+    if len(json.dumps(payload, ensure_ascii=False)) > 100_000:
+        return jsonify({'success': False, 'error': '图形配置最多100000字符'}), 400
+    try:
+        result = InteractiveVisualizationCompiler().compile(frame, payload)
+        return jsonify(clean_for_json({'success': True, 'result': result}))
+    except InteractiveVisualizationError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': f'图形配置无效：{exc}'}), 400
+    except Exception as exc:
+        log_error(f'[InteractiveVisualization] compile: {exc}')
+        return api_error_response('交互图编译失败')
+
+
 @app.route('/api/visualization/generate', methods=['POST'])
 def api_visualization_generate():
     """生成图表"""
@@ -2399,6 +3569,59 @@ def api_export_result():
 # 大模型智能分析 API
 # =============================================================================
 
+_LLM_IMAGE_MAX_COUNT = 5
+_LLM_IMAGE_MAX_BYTES = 6 * 1024 * 1024
+_LLM_IMAGE_TOTAL_MAX_BYTES = 20 * 1024 * 1024
+_LLM_IMAGE_DATA_URL_RE = re.compile(
+    r"^data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_llm_images(raw_images: Any) -> list[dict[str, str]]:
+    """校验并规范化浏览器上传的图片 data URL，不落盘也不写入会话。"""
+    if raw_images in (None, ""):
+        return []
+    if not isinstance(raw_images, list):
+        raise ValueError("images 必须是数组")
+    if len(raw_images) > _LLM_IMAGE_MAX_COUNT:
+        raise ValueError(f"最多同时上传 {_LLM_IMAGE_MAX_COUNT} 张图片")
+
+    normalized: list[dict[str, str]] = []
+    total_bytes = 0
+    for index, item in enumerate(raw_images, start=1):
+        if isinstance(item, str):
+            data_url = item.strip()
+            name = f"image-{index}"
+        elif isinstance(item, dict):
+            data_url = str(item.get("data_url") or item.get("data") or "").strip()
+            name = str(item.get("name") or f"image-{index}").strip()[:200]
+        else:
+            raise ValueError(f"第 {index} 张图片格式无效")
+        match = _LLM_IMAGE_DATA_URL_RE.fullmatch(data_url)
+        if not match:
+            raise ValueError(f"第 {index} 张图片必须是 PNG/JPEG/WEBP/GIF 的 base64 data URL")
+        mime_type = match.group(1).lower()
+        payload = re.sub(r"\s+", "", match.group(2))
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+        except (ValueError, TypeError):
+            raise ValueError(f"第 {index} 张图片的 base64 数据无效") from None
+        size = len(decoded)
+        if size == 0:
+            raise ValueError(f"第 {index} 张图片为空")
+        if size > _LLM_IMAGE_MAX_BYTES:
+            raise ValueError(f"第 {index} 张图片超过 {_LLM_IMAGE_MAX_BYTES // (1024 * 1024)} MB 限制")
+        total_bytes += size
+        if total_bytes > _LLM_IMAGE_TOTAL_MAX_BYTES:
+            raise ValueError(f"图片总大小超过 {_LLM_IMAGE_TOTAL_MAX_BYTES // (1024 * 1024)} MB 限制")
+        normalized.append({
+            "name": name or f"image-{index}",
+            "mime_type": mime_type,
+            "data_url": f"data:{mime_type};base64,{payload}",
+        })
+    return normalized
+
 @app.route('/api/llm/config', methods=['GET'])
 def api_llm_config():
     """获取 LLM 默认配置"""
@@ -2408,11 +3631,50 @@ def api_llm_config():
     })
 
 
+@app.route('/api/llm/test-connection', methods=['POST'])
+def api_llm_test_connection():
+    """测试 LLM 服务和密钥；密钥只用于本次请求，不进入会话或日志。"""
+    data = request.get_json() or {}
+    try:
+        timeout = int(data.get('timeout', 20))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'timeout 必须是整数'}), 400
+    try:
+        config = LLMConfig(
+            provider=data.get('provider', 'openai'),
+            base_url=data.get('base_url', 'https://api.openai.com/v1'),
+            api_key=data.get('api_key', ''),
+            model_name=data.get('model_name', 'gpt-4o'),
+            timeout=max(5, min(timeout, 20)),
+        )
+        models = LLMClient(config).list_models()
+        model_available = not models or config.model_name in models
+        return jsonify({
+            'success': True,
+            'provider': config.provider,
+            'model_name': config.model_name,
+            'model_available': model_available,
+            'available_models': models[:50],
+            'message': (
+                f'连接成功，模型 {config.model_name} 可用'
+                if model_available else
+                f'服务和密钥有效，但模型列表中未找到 {config.model_name}'
+            ),
+        })
+    except (ValueError, ConnectionError, TimeoutError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
+
 @app.route('/api/llm/analyze', methods=['POST'])
 def api_llm_analyze():
     """触发大模型分析"""
     sdata = get_session()
     data = request.get_json() or {}
+
+    try:
+        images = _normalize_llm_images(data.get('images', []))
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
     
     analysis_type = data.get('analysis_type')
     if analysis_type not in ('eda', 'result', 'error'):
@@ -2433,6 +3695,10 @@ def api_llm_analyze():
         api_key=data.get('api_key', ''),
         model_name=data.get('model_name', 'gpt-4o'),
     )
+    try:
+        llm_config.validate()
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
     sdata['llm_config'] = {
         'provider': llm_config.provider,
         'base_url': llm_config.base_url,
@@ -2442,7 +3708,7 @@ def api_llm_analyze():
     def analyze_task():
         try:
             analyzer = LLMAnalyzer(llm_config)
-            result = analyzer.analyze(analysis_type, sdata)
+            result = analyzer.analyze(analysis_type, sdata, images=images)
             sdata['llm_analysis_status'] = 'done'
             sdata['llm_analysis_result'] = result
             sdata['llm_analysis_error'] = None
@@ -2454,13 +3720,14 @@ def api_llm_analyze():
             log_warning(f"[Web] LLM 分析失败: {e}")
     
     sdata['llm_analysis_status'] = 'running'
+    sdata['llm_analysis_image_count'] = len(images)
     sdata['llm_analysis_result'] = None
     sdata['llm_analysis_error'] = None
     
     thread = threading.Thread(target=analyze_task)
     thread.start()
     
-    return jsonify({'success': True, 'status': 'running'})
+    return jsonify({'success': True, 'status': 'running', 'image_count': len(images)})
 
 
 @app.route('/api/llm/status', methods=['GET'])
@@ -2475,6 +3742,7 @@ def api_llm_status():
         'status': status,
         'error': error,
         'result': result,
+        'image_count': sdata.get('llm_analysis_image_count', 0),
     })
 
 
@@ -2651,6 +3919,10 @@ def api_report_chart_preview():
             color_scheme=chart_dict.get('color_scheme', 'default'),
             show_values=chart_dict.get('show_values', True),
             top_n=chart_dict.get('top_n', 0),
+            filters=chart_dict.get('filters', []),
+            time_unit=chart_dict.get('time_unit', 'none'),
+            bins=chart_dict.get('bins', 20),
+            discovery_note=chart_dict.get('discovery_note', ''),
         )
         img_bytes = ChartBuilder.build_to_bytes(df, chart_cfg)
         img_base64 = base64.b64encode(img_bytes).decode('utf-8')
@@ -2688,6 +3960,10 @@ def _parse_report_config(config_dict: Dict) -> ReportConfig:
             color_scheme=chart_dict.get('color_scheme', 'default'),
             show_values=chart_dict.get('show_values', True),
             top_n=chart_dict.get('top_n', 0),
+            filters=chart_dict.get('filters', []),
+            time_unit=chart_dict.get('time_unit', 'none'),
+            bins=chart_dict.get('bins', 20),
+            discovery_note=chart_dict.get('discovery_note', ''),
         ))
     
     if mode == 'pivot':
@@ -3027,12 +4303,14 @@ def handle_global_exception(e):
     msg = f"[{endpoint}] {type(e).__name__}: {str(e)}"
     app.logger.error(f"{msg}\n{detail}")
     log_error(msg, category="API")
-    return jsonify({
+    payload = {
         'success': False,
-        'error': str(e),
+        'error': '服务器内部错误' if _public_mode else str(e),
         'endpoint': endpoint,
-        'detail': detail,
-    }), 500
+    }
+    if not _public_mode:
+        payload['detail'] = detail
+    return jsonify(payload), 500
 
 
 def _wrap_api_handlers():
@@ -3050,12 +4328,14 @@ def _wrap_api_handlers():
                 msg = f"[{__endpoint}] {type(e).__name__}: {str(e)}"
                 app.logger.error(f"{msg}\n{detail}")
                 log_error(msg, category="API")
-                return jsonify({
+                payload = {
                     'success': False,
-                    'error': str(e),
+                    'error': '服务器内部错误' if _public_mode else str(e),
                     'endpoint': __endpoint,
-                    'detail': detail,
-                }), 500
+                }
+                if not _public_mode:
+                    payload['detail'] = detail
+                return jsonify(payload), 500
         app.view_functions[endpoint] = wrapper
 
 
@@ -3301,6 +4581,13 @@ if __name__ == '__main__':
     print("SmartChart Web Service Starting")
     print("URL: http://localhost:5000")
     print("=" * 60)
-    # Windows 下 reloader 与后台训练线程冲突，禁用自动重载
-    use_reloader = os.name != 'nt'
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, use_reloader=use_reloader)
+    # 生产环境请使用 Waitress/Gunicorn + 反向代理；这里默认只监听本机。
+    use_reloader = os.name != 'nt' and not _public_mode
+    run_host = os.getenv('FLASK_HOST', '127.0.0.1').strip() or '127.0.0.1'
+    try:
+        run_port = int(os.getenv('FLASK_PORT', '5000'))
+    except (TypeError, ValueError):
+        run_port = 5000
+    run_port = max(1, min(run_port, 65535))
+    debug = os.getenv('FLASK_DEBUG', '').strip().lower() in {'1', 'true', 'yes', 'on'} and not _public_mode
+    app.run(host=run_host, port=run_port, debug=debug, threaded=True, use_reloader=use_reloader)

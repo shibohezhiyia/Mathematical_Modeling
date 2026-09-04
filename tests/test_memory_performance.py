@@ -201,6 +201,14 @@ class TestResultCache(unittest.TestCase):
         self.assertIn('memory_entries', stats)
         self.assertIn('disk_entries', stats)
         self.assertTrue(stats['enabled'])
+
+    def test_cache_layout_is_versioned_and_logical_key_cannot_escape(self):
+        dangerous_key = "../../not-a-path"
+        self.assertTrue(self.cache.set(dangerous_key, {"safe": True}))
+        value_path = os.path.abspath(self.cache._get_cache_path(dangerous_key))
+        self.assertTrue(value_path.startswith(os.path.abspath(self.cache.entries_dir)))
+        self.assertTrue(os.path.isfile(self.cache.manifest_path))
+        self.assertEqual(self.cache.get(dangerous_key), {"safe": True})
     
     def test_disabled_cache(self):
         """禁用缓存"""

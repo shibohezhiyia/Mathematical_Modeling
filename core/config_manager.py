@@ -225,8 +225,9 @@ class ConfigManager:
                 return {
                     "enabled": dl.get("enabled", False),
                     "models": dl.get("models", ["torch_mlp"]),
+                    "use_amp": dl.get("use_amp", False),
                 }
-            return {"enabled": False, "models": ["torch_mlp"]}
+            return {"enabled": False, "models": ["torch_mlp"], "use_amp": False}
 
         config = {
             "data": {
@@ -245,7 +246,9 @@ class ConfigManager:
             },
             "deep_learning": _dl_cfg(),
             "performance": {
-                "strategy_preference": getattr(pipeline, "strategy_preference", None),
+                # Pipeline accepts None to mean automatic scheduling.  The
+                # exported configuration must still satisfy its string schema.
+                "strategy_preference": getattr(pipeline, "strategy_preference", None) or "balanced",
                 "n_jobs": -1,
                 "use_gpu": "auto",
                 "enable_kernel_approximation": getattr(pipeline, "enable_kernel_approximation", True),

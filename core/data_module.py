@@ -430,13 +430,13 @@ class TypeDetector:
             return None
         
         try:
-            converted = pd.to_datetime(sample, errors='coerce')
+            converted = pd.to_datetime(sample, errors='coerce', format='mixed')
             success_rate = converted.notna().sum() / len(sample)
             
             # 日期相关列名降低阈值
             threshold = 0.5 if is_date_like else 0.8
             if success_rate >= threshold:
-                return pd.to_datetime(series, errors='coerce')
+                return pd.to_datetime(series, errors='coerce', format='mixed')
         except Exception:
             # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass

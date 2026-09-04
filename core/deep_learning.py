@@ -103,6 +103,31 @@ class _AutoArchitecture:
 # =============================================================================
 
 if TORCH_AVAILABLE:
+
+    def _regression_loss(criterion: nn.Module, outputs: torch.Tensor,
+                         targets: torch.Tensor) -> torch.Tensor:
+        """Compute elementwise regression loss without accidental broadcasting."""
+        if outputs.numel() != targets.numel():
+            raise ValueError(
+                f"回归输出与目标元素数不一致: {tuple(outputs.shape)} vs {tuple(targets.shape)}"
+            )
+        return criterion(outputs.float().reshape(-1), targets.float().reshape(-1))
+
+    def _supervised_loss(criterion: nn.Module, outputs: torch.Tensor,
+                         targets: torch.Tensor, task_type: str) -> torch.Tensor:
+        if task_type == 'classification':
+            logits = outputs if outputs.ndim > 1 else outputs.unsqueeze(0)
+            return criterion(logits, targets.long().reshape(-1))
+        return _regression_loss(criterion, outputs, targets)
+
+    def _regression_predictions(outputs: torch.Tensor) -> np.ndarray:
+        """Return sklearn-compatible predictions, including for one-row input."""
+        values = outputs.detach().cpu().numpy()
+        if values.ndim == 0:
+            return values.reshape(1)
+        if values.ndim == 2 and values.shape[1] == 1:
+            return values[:, 0]
+        return values
     
     class _MLPNet(nn.Module):
         """多层感知机网络"""
@@ -261,7 +286,7 @@ if TORCH_AVAILABLE:
                             if self.task_type == 'classification':
                                 loss = criterion(outputs, batch_y.long())
                             else:
-                                loss = criterion(outputs.squeeze(), batch_y.float())
+                                loss = _regression_loss(criterion, outputs, batch_y)
 
                         scaler.scale(loss).backward()
                         scaler.step(optimizer)
@@ -271,7 +296,7 @@ if TORCH_AVAILABLE:
                         if self.task_type == 'classification':
                             loss = criterion(outputs, batch_y.long())
                         else:
-                            loss = criterion(outputs.squeeze(), batch_y.float())
+                            loss = _regression_loss(criterion, outputs, batch_y)
 
                         loss.backward()
                         optimizer.step()
@@ -324,7 +349,7 @@ if TORCH_AVAILABLE:
                     preds = self.label_encoder_.inverse_transform(preds)
                 return preds
             else:
-                return outputs.squeeze().cpu().numpy()
+                return _regression_predictions(outputs)
         
         def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.task_type != 'classification':
@@ -397,13 +422,13 @@ if TORCH_AVAILABLE:
                             if self.task_type == 'classification':
                                 loss = criterion(outputs, batch_y.long())
                             else:
-                                loss = criterion(outputs.squeeze(), batch_y.float())
+                                loss = _regression_loss(criterion, outputs, batch_y)
                     else:
                         outputs = self.model_(batch_x)
                         if self.task_type == 'classification':
                             loss = criterion(outputs, batch_y.long())
                         else:
-                            loss = criterion(outputs.squeeze(), batch_y.float())
+                            loss = _regression_loss(criterion, outputs, batch_y)
 
                     losses.append(loss.item())
             return np.mean(losses) if losses else float('inf')
@@ -514,7 +539,7 @@ if TORCH_AVAILABLE:
                     Xb, yb = Xb.to(self.device), yb.to(self.device)
                     optimizer.zero_grad()
                     outputs = self.model_(Xb)
-                    loss = criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb)
+                    loss = _supervised_loss(criterion, outputs, yb, self.task_type)
                     loss.backward()
                     optimizer.step()
                 self.model_.eval()
@@ -523,7 +548,7 @@ if TORCH_AVAILABLE:
                     for Xb, yb in val_loader:
                         Xb, yb = Xb.to(self.device), yb.to(self.device)
                         outputs = self.model_(Xb)
-                        val_loss += criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb).item()
+                        val_loss += _supervised_loss(criterion, outputs, yb, self.task_type).item()
                 val_loss /= len(val_loader)
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -542,7 +567,7 @@ if TORCH_AVAILABLE:
                 if self.task_type == 'classification':
                     preds = torch.argmax(outputs, dim=1).cpu().numpy()
                     return self.label_encoder_.inverse_transform(preds)
-                return outputs.squeeze().cpu().numpy()
+                return _regression_predictions(outputs)
         
         def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.task_type != 'classification':
@@ -633,7 +658,7 @@ if TORCH_AVAILABLE:
                     Xb, yb = Xb.to(self.device), yb.to(self.device)
                     optimizer.zero_grad()
                     outputs = self.model_(Xb)
-                    loss = criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb)
+                    loss = _supervised_loss(criterion, outputs, yb, self.task_type)
                     loss.backward()
                     optimizer.step()
                 self.model_.eval()
@@ -642,7 +667,7 @@ if TORCH_AVAILABLE:
                     for Xb, yb in val_loader:
                         Xb, yb = Xb.to(self.device), yb.to(self.device)
                         outputs = self.model_(Xb)
-                        val_loss += criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb).item()
+                        val_loss += _supervised_loss(criterion, outputs, yb, self.task_type).item()
                 val_loss /= len(val_loader)
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -662,7 +687,7 @@ if TORCH_AVAILABLE:
                 if self.task_type == 'classification':
                     preds = torch.argmax(outputs, dim=1).cpu().numpy()
                     return self.label_encoder_.inverse_transform(preds)
-                return outputs.squeeze().cpu().numpy()
+                return _regression_predictions(outputs)
         
         def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.task_type != 'classification':
@@ -755,7 +780,7 @@ if TORCH_AVAILABLE:
                     Xb, yb = Xb.to(self.device), yb.to(self.device)
                     optimizer.zero_grad()
                     outputs = self.model_(Xb)
-                    loss = criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb)
+                    loss = _supervised_loss(criterion, outputs, yb, self.task_type)
                     loss.backward()
                     optimizer.step()
                 self.model_.eval()
@@ -764,7 +789,7 @@ if TORCH_AVAILABLE:
                     for Xb, yb in val_loader:
                         Xb, yb = Xb.to(self.device), yb.to(self.device)
                         outputs = self.model_(Xb)
-                        val_loss += criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb).item()
+                        val_loss += _supervised_loss(criterion, outputs, yb, self.task_type).item()
                 val_loss /= len(val_loader)
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -784,7 +809,7 @@ if TORCH_AVAILABLE:
                 if self.task_type == 'classification':
                     preds = torch.argmax(outputs, dim=1).cpu().numpy()
                     return self.label_encoder_.inverse_transform(preds)
-                return outputs.squeeze().cpu().numpy()
+                return _regression_predictions(outputs)
         
         def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.task_type != 'classification':
@@ -1119,7 +1144,7 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
                     Xb, yb = Xb.to(self.device), yb.to(self.device)
                     optimizer.zero_grad()
                     outputs = self.model_(Xb)
-                    loss = criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb)
+                    loss = _supervised_loss(criterion, outputs, yb, self.task_type)
                     loss.backward()
                     optimizer.step()
                 
@@ -1129,7 +1154,7 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
                     for Xb, yb in val_loader:
                         Xb, yb = Xb.to(self.device), yb.to(self.device)
                         outputs = self.model_(Xb)
-                        val_loss += criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb).item()
+                        val_loss += _supervised_loss(criterion, outputs, yb, self.task_type).item()
                 val_loss /= len(val_loader)
                 
                 if val_loss < best_val_loss:
@@ -1149,7 +1174,7 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
                 if self.task_type == 'classification':
                     preds = torch.argmax(outputs, dim=1).cpu().numpy()
                     return self.label_encoder_.inverse_transform(preds)
-                return outputs.squeeze().cpu().numpy()
+                return _regression_predictions(outputs)
         
         def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.task_type != 'classification':
@@ -1257,7 +1282,7 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
                     Xb, yb = Xb.to(self.device), yb.to(self.device)
                     optimizer.zero_grad()
                     outputs = self.model_(Xb)
-                    loss = criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb)
+                    loss = _supervised_loss(criterion, outputs, yb, self.task_type)
                     loss.backward()
                     optimizer.step()
                 
@@ -1267,7 +1292,7 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
                     for Xb, yb in val_loader:
                         Xb, yb = Xb.to(self.device), yb.to(self.device)
                         outputs = self.model_(Xb)
-                        val_loss += criterion(outputs.squeeze(), yb.float() if self.task_type != 'classification' else yb).item()
+                        val_loss += _supervised_loss(criterion, outputs, yb, self.task_type).item()
                 val_loss /= len(val_loader)
                 
                 if val_loss < best_val_loss:
@@ -1288,7 +1313,7 @@ if TORCH_AVAILABLE and TABNET_AVAILABLE:
                 if self.task_type == 'classification':
                     preds = torch.argmax(outputs, dim=1).cpu().numpy()
                     return self.label_encoder_.inverse_transform(preds)
-                return outputs.squeeze().cpu().numpy()
+                return _regression_predictions(outputs)
         
         def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
             if self.task_type != 'classification':

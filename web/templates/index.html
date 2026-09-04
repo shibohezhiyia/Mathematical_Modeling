@@ -3,17 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mathematical Modeling - 自动化机器学习平台</title>
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <title>Mathematical Modeling - 智能研究助手</title>
+    <script src="{{ url_for('static', filename='vendor/echarts.min.js') }}?v=5.5.0"></script>
     <!-- echarts-gl 按需动态加载，默认不引入 -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=15">
 </head>
 <body>
     <!-- 顶部标题栏 -->
     <header class="header">
         <div class="header-left">
             <div class="logo">📊 Mathematical Modeling</div>
-            <span class="subtitle">自动化机器学习平台</span>
+            <span class="subtitle">题目驱动 · 多数据集智能研究</span>
         </div>
         <div class="header-right">
             <span id="data-status">未加载数据</span>
@@ -99,18 +99,82 @@
                 </div>
                 
                 <!-- 建模助手 -->
-                <div class="card" style="margin-top:16px;">
-                    <h3>🧠 建模助手</h3>
-                    <p style="font-size:13px;color:var(--text-light);margin-bottom:10px;">没有数据文件？输入题目描述，获取建模方案、公式推导和代码框架。</p>
-                    <div class="form-row" style="align-items:flex-end;">
+                <div class="card research-card" style="margin-top:16px;">
+                    <h3>🧠 数学建模研究助手</h3>
+                    <p style="font-size:13px;color:var(--text-light);margin-bottom:10px;">输入完整题目；附件可选。有数据时执行多表分析，无数据时从题面编译通用数学 IR、算子图和可执行模型，并主动寻找反证。论文写作不在此阶段自动执行。</p>
+                    <div class="form-row">
                         <div class="form-group" style="flex:1;">
-                            <textarea id="problem-description" rows="3" placeholder="例如：炮弹以初速度100m/s、45度角发射，考虑空气阻力，建立轨迹模型并计算射程..." style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;resize:vertical;"></textarea>
+                            <label>题目描述</label>
+                            <textarea id="problem-description" rows="5" placeholder="请粘贴完整题目，包括各小问、目标、约束和附件说明……" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;resize:vertical;"></textarea>
+                            <div class="research-image-upload">
+                                <div class="research-image-upload-head">
+                                    <small class="hint">题目图片（可选）：几何示意图、流程图、公式截图；启用语义模型并选择 Vision 模型后生效</small>
+                                    <label class="btn btn-secondary btn-sm llm-image-picker">
+                                        ＋ 添加题图
+                                        <input type="file" id="research-image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+                                    </label>
+                                </div>
+                                <div id="research-image-status" class="hint">未选择图片</div>
+                                <div id="research-image-preview" class="llm-image-preview" aria-live="polite"></div>
+                            </div>
                         </div>
-                        <button class="btn btn-primary" onclick="analyzeProblem()" style="margin-left:10px;">分析题目</button>
+                    </div>
+                    <details class="research-section" style="margin-bottom:12px;">
+                        <summary>可选：本地小模型 / 外部 API 辅助题面编译</summary>
+                        <p class="hint">模型只生成候选数学 IR，不能绕过题面引文、数值溯源、单位和契约校验。调用失败会自动退回本地确定性编译；API 密钥不写入报告、证据或会话。</p>
+                        <div class="form-row">
+                            <label class="research-checkbox">
+                                <input type="checkbox" id="research-semantic-model"> 启用语义模型编译
+                            </label>
+                            <div class="form-group">
+                                <label>后端</label>
+                                <select id="research-semantic-provider" onchange="onResearchSemanticProviderChange()">
+                                    <option value="ollama">Ollama 本地小模型</option>
+                                    <option value="local_openai">本机 OpenAI 兼容服务</option>
+                                    <option value="deepseek">DeepSeek 官方 API</option>
+                                    <option value="openai_compatible">外部 OpenAI 兼容 API</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>服务地址</label>
+                                <input id="research-semantic-base-url" type="text" value="http://localhost:11434" placeholder="http://localhost:11434">
+                            </div>
+                            <div class="form-group">
+                                <label>模型名称</label>
+                                <div class="model-preset-wrap">
+                                    <select id="research-semantic-model-preset" onchange="useResearchSemanticModelPreset(this.value)">
+                                        <option value="">选择常用模型…</option>
+                                    </select>
+                                    <input id="research-semantic-model-name" type="text" value="qwen2.5:3b" placeholder="也可手动输入模型名" list="deepseek-model-options">
+                                </div>
+                            </div>
+                            <div class="form-group hidden" id="research-semantic-key-group">
+                                <label>API 密钥</label>
+                                <input id="research-semantic-api-key" type="password" autocomplete="off" placeholder="仅本次请求使用">
+                            </div>
+                            <div class="form-group">
+                                <label>连接验证</label>
+                                <button type="button" class="btn btn-secondary btn-sm" id="research-semantic-test-btn" onclick="testResearchSemanticConnection()">测试 API</button>
+                                <small id="research-semantic-test-status" class="hint"></small>
+                            </div>
+                        </div>
+                    </details>
+                    <div class="research-controls">
+                        <div class="form-group research-target-input">
+                            <label>目标列（可选，可多个）</label>
+                            <input id="research-target" type="text" placeholder="数据集.列名；多个用逗号分隔；留空自动识别">
+                        </div>
+                        <label class="research-checkbox"><input type="checkbox" id="research-run-model" checked> 自动运行预测模型</label>
+                        <label class="research-checkbox"><input type="checkbox" id="research-feedback-optimize" checked> 根据验证结果反馈调参</label>
+                        <label class="research-checkbox"><input type="checkbox" id="research-credibility-audit" checked> 自动反证与可信度审计</label>
+                        <button class="btn btn-secondary" onclick="analyzeProblem()">仅分析题目</button>
+                        <button class="btn btn-primary" id="research-run-btn" onclick="runResearch()">🚀 一键完成研究</button>
                     </div>
                     <div id="problem-result" style="margin-top:12px;display:none;">
                         <div id="problem-result-content"></div>
                     </div>
+                    <div id="research-progress" class="research-progress hidden"></div>
+                    <div id="research-result" class="research-result hidden"></div>
                 </div>
                 
                 <!-- 多表数据面板 -->
@@ -127,6 +191,7 @@
                                     <option value="">选择操作...</option>
                                     <option value="merge">📎 合并多个表</option>
                                     <option value="join">🔗 关联两个表</option>
+                                    <option value="transform">🧩 通用数据变换流水线</option>
                                 </select>
                             </div>
                         </div>
@@ -142,8 +207,8 @@
                                     </select>
                                 </div>
                             </div>
-                            <p class="hint">勾选上方表格的复选框，选择要合并的sheet</p>
-                            <button class="btn btn-primary" onclick="executeMerge()">执行合并</button>
+                            <p class="hint">在上方表格勾选至少两个文件或 Sheet；单 Sheet 文件同样可以选择。</p>
+                            <button id="execute-merge-btn" class="btn btn-primary" onclick="executeMerge()" disabled>执行合并</button>
                         </div>
                         
                         <!-- 关联选项 -->
@@ -158,8 +223,14 @@
                                     <select id="join-right"></select>
                                 </div>
                                 <div class="form-group">
-                                    <label>关联键</label>
-                                    <select id="join-on">
+                                    <label>左表关联键（可多选）</label>
+                                    <select id="join-left-on" multiple size="4">
+                                        <option value="">先选择左右表</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>右表关联键（顺序对应）</label>
+                                    <select id="join-right-on" multiple size="4">
                                         <option value="">先选择左右表</option>
                                     </select>
                                 </div>
@@ -172,8 +243,104 @@
                                         <option value="outer">outer · 并集</option>
                                     </select>
                                 </div>
+                                <div class="form-group">
+                                    <label>键类型对齐</label>
+                                    <select id="join-key-type">
+                                        <option value="none">不转换（严格）</option>
+                                        <option value="string">统一为文本</option>
+                                        <option value="numeric">统一为数值</option>
+                                        <option value="datetime">统一为时间</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>预期键关系</label>
+                                    <select id="join-validate">
+                                        <option value="">自动审计</option>
+                                        <option value="one_to_one">一对一</option>
+                                        <option value="one_to_many">一对多</option>
+                                        <option value="many_to_one">多对一</option>
+                                        <option value="many_to_many">多对多</option>
+                                    </select>
+                                </div>
                             </div>
+                            <p class="hint">左右键按选择顺序一一对应；执行前会估算多对多膨胀，超出安全预算时拒绝合并。</p>
                             <button class="btn btn-primary" onclick="executeJoin()">执行关联</button>
+                        </div>
+
+                        <!-- 通用数据变换选项 -->
+                        <div id="transform-options" class="hidden transform-workbench">
+                            <section class="transform-simple-step transform-goal-step">
+                                <div class="transform-simple-heading">
+                                    <span>1</span>
+                                    <div><strong>告诉我你想怎么处理</strong><small>说人话即可，系统会根据当前字段生成方案</small></div>
+                                </div>
+                                <div class="transform-goal-compose">
+                                    <textarea id="transform-goal" rows="2" placeholder="例如：按地区汇总销量，再计算每个地区的占比"></textarea>
+                                    <button class="btn btn-primary transform-generate-btn" onclick="suggestTransformPipeline()">生成方案</button>
+                                </div>
+                                <div class="transform-goal-examples"><span>试试：</span><button onclick="setTransformGoalExample('清理缺失值和重复记录')">清理数据</button><button onclick="setTransformGoalExample('按主要类别汇总数值指标并比较高低')">汇总比较</button><button onclick="setTransformGoalExample('按时间排序并构造趋势、滞后和滚动指标')">时序特征</button></div>
+                            </section>
+                            <div id="transform-recommendations" class="transform-recommendations"></div>
+
+                            <section class="transform-simple-step">
+                                <div class="transform-simple-heading">
+                                    <span>2</span>
+                                    <div><strong>确认处理步骤</strong><small>点击常用动作即可添加，步骤按从上到下执行</small></div>
+                                </div>
+                                <div id="transform-quick-actions" class="transform-quick-actions"><span class="hint">正在读取当前表可用操作…</span></div>
+                                <details class="transform-more-operations">
+                                    <summary>添加其他操作</summary>
+                                    <div class="form-group">
+                                        <select id="transform-operation" onchange="insertTransformTemplate()">
+                                            <option value="">正在加载操作注册表...</option>
+                                        </select>
+                                        <div id="transform-capability-summary" class="transform-capability-summary">操作会按当前表的真实字段动态绑定。</div>
+                                    </div>
+                                </details>
+                                <section class="transform-pipeline-builder" aria-label="处理步骤">
+                                    <div class="transform-builder-head">
+                                        <div><span>当前方案</span><small>点“设置”直接修改字段与算法</small></div>
+                                        <strong id="transform-step-count">0 步</strong>
+                                    </div>
+                                    <div id="transform-pipeline-cards" class="transform-pipeline-cards">
+                                        <div class="transform-pipeline-empty">还没有步骤，请生成方案或点击上方常用动作。</div>
+                                    </div>
+                                </section>
+                                <details class="transform-advanced-editor">
+                                    <summary>高级模式 · 查看或编辑流水线 JSON</summary>
+                                    <textarea id="transform-pipeline" class="transform-pipeline-editor" rows="12" spellcheck="false" oninput="syncTransformPipelineCards(true)" placeholder='[{"operation":"aggregate","params":{"group_by":["地区"],"aggregations":[{"column":"销量","function":"sum","output":"销量_合计"}]}}]'></textarea>
+                                    <p class="hint">JSON 只用于高级组合和复制方案；日常操作无需直接编辑。公式派生不使用 eval。</p>
+                                </details>
+                            </section>
+
+                            <details class="transform-professional-options">
+                                <summary>专业建模审计 <span>目标字段、语义契约与多视图反证</span></summary>
+                                <div class="form-group">
+                                    <label>目标字段（可选；不唯一时填写）</label>
+                                    <input id="transform-target" type="text" placeholder="例如：销量">
+                                </div>
+                                <details class="semantic-contract-editor">
+                                    <summary>字段语义契约</summary>
+                                    <p class="hint">适合缩写、专业字段或非标准列名；显式绑定优先于字段名猜测。</p>
+                                    <textarea id="transform-semantic-hints" rows="8" spellcheck="false" placeholder='{"target":"outcome_v2","grain":["sample_no","event_at"],"columns":{"sample_no":{"role":"technical_id"},"event_at":{"role":"time"},"outcome_v2":{"role":"measure","unit":"%"}}}'></textarea>
+                                </details>
+                                <button class="btn btn-secondary" onclick="runMathematicalDataCompilation()">运行数学多视图审计</button>
+                                <div id="math-data-compilation-result" class="math-data-compilation-result"></div>
+                            </details>
+
+                            <section class="transform-simple-step transform-run-step">
+                                <div class="transform-simple-heading">
+                                    <span>3</span>
+                                    <div><strong>预览并使用结果</strong><small>预览不会修改数据，确认后再应用</small></div>
+                                </div>
+                                <div class="transform-actions">
+                                    <button class="btn btn-secondary" id="transform-preview-btn" onclick="executeTableTransformation(false)">先看结果</button>
+                                    <button class="btn btn-primary" id="transform-apply-btn" onclick="executeTableTransformation(true)">确认应用</button>
+                                    <button class="btn btn-link transform-undo-link" onclick="undoTableTransformation()">撤销上次应用</button>
+                                </div>
+                            </section>
+                            <div id="transform-status" class="hint"></div>
+                            <div id="transform-result" class="transform-result"></div>
                         </div>
                     </div>
                 </div>
@@ -211,6 +378,126 @@
                     <div class="card">
                         <h3>相关性热力图</h3>
                         <div id="correlation-chart" style="width:100%;height:400px;"></div>
+                    </div>
+
+                    <div class="card interactive-viz-card" id="interactive-viz-card">
+                        <header class="interactive-viz-hero">
+                            <div class="interactive-viz-hero-copy">
+                                <div class="interactive-viz-eyebrow"><span>EXPLORE</span> 数据探索与证据验证</div>
+                                <h3>探索驾驶舱</h3>
+                                <p>先提出一个可检验的问题，再用切片、筛选和多维编码寻找关系。这里负责发现，不负责最终排版。</p>
+                                <div class="interactive-viz-flow" aria-label="探索工作流">
+                                    <span class="is-active"><b>1</b> 选数据</span><i></i>
+                                    <span><b>2</b> 提问题</span><i></i>
+                                    <span><b>3</b> 交互验证</span><i></i>
+                                    <span><b>4</b> 固化发现</span>
+                                </div>
+                            </div>
+                            <div class="interactive-viz-actions">
+                                <button class="btn btn-sm interactive-viz-ghost-btn" onclick="resetInteractiveVisualization()">恢复推荐</button>
+                                <button class="btn btn-sm interactive-viz-ghost-btn" onclick="runInteractiveVisualization()">重新计算</button>
+                                <button class="btn btn-sm interactive-viz-report-btn" onclick="sendInteractiveVizToReport()">加入报表 <span>→</span></button>
+                            </div>
+                        </header>
+
+                        <div class="interactive-viz-context">
+                            <label class="interactive-viz-source">
+                                <span class="interactive-viz-context-label">当前数据</span>
+                                <select id="viz-dataset-source" onchange="switchInteractiveVisualizationDataset()">
+                                    <option value="">当前数据表</option>
+                                </select>
+                            </label>
+                            <div class="interactive-viz-capability">
+                                <span class="interactive-viz-context-label">可分析能力</span>
+                                <div id="interactive-viz-recommendation">正在分析字段语义…</div>
+                            </div>
+                        </div>
+
+                        <div class="interactive-viz-question-bar">
+                            <div>
+                                <span class="interactive-viz-section-kicker">分析问题</span>
+                                <strong>你想从这张表中验证什么？</strong>
+                            </div>
+                            <select id="viz-intent" class="interactive-viz-native-intent" aria-label="分析目标" onchange="applyInteractiveVizIntent()">
+                                <option value="auto">智能推荐</option>
+                                <option value="composition">类别数量与构成</option>
+                                <option value="comparison">分组数值比较</option>
+                                <option value="relationship">两个数值的关系</option>
+                                <option value="trend">时间趋势</option>
+                                <option value="custom">自定义（高级）</option>
+                            </select>
+                            <div class="interactive-viz-intents" role="group" aria-label="分析问题类型">
+                                <button type="button" data-viz-intent="auto" onclick="selectInteractiveVizIntent('auto')"><span>推荐</span><b>让系统先判断</b></button>
+                                <button type="button" data-viz-intent="composition" onclick="selectInteractiveVizIntent('composition')"><span>构成</span><b>哪些类别占得多</b></button>
+                                <button type="button" data-viz-intent="comparison" onclick="selectInteractiveVizIntent('comparison')"><span>比较</span><b>不同组差多少</b></button>
+                                <button type="button" data-viz-intent="relationship" onclick="selectInteractiveVizIntent('relationship')"><span>关系</span><b>两个量是否同变</b></button>
+                                <button type="button" data-viz-intent="trend" onclick="selectInteractiveVizIntent('trend')"><span>趋势</span><b>随时间如何变化</b></button>
+                            </div>
+                        </div>
+
+                        <div class="interactive-viz-layout">
+                            <aside class="interactive-viz-controls">
+                                <div class="interactive-viz-control-heading"><span>变量映射</span><small>把字段放进视觉通道</small></div>
+                                <div class="form-group">
+                                    <label>图形语法</label>
+                                    <select id="viz-chart-type" onchange="onInteractiveVizControlChange()">
+                                        <option value="auto">自动选择</option><option value="scatter">散点图</option><option value="line">折线图</option><option value="area">面积图</option><option value="bar">柱状图</option><option value="parallel">平行坐标</option>
+                                    </select>
+                                </div>
+                                <div class="interactive-viz-channel-grid">
+                                    <div class="form-group"><label>X · 解释/分组</label><select id="viz-x" onchange="onInteractiveVizControlChange()"></select></div>
+                                    <div class="form-group"><label id="viz-y-label">Y · 响应/度量</label><select id="viz-y" onchange="onInteractiveVizControlChange()"></select></div>
+                                    <div class="form-group interactive-viz-channel-wide"><label>颜色 · 分层系列</label><select id="viz-color" onchange="onInteractiveVizControlChange()"></select></div>
+                                </div>
+                                <div id="interactive-viz-config-note" class="interactive-viz-config-note hidden"></div>
+                                <details class="interactive-viz-option">
+                                    <summary><span>多层编码</span><small>大小、分面、播放与悬浮字段</small></summary>
+                                    <div class="interactive-viz-channel-grid">
+                                        <div class="form-group"><label>点大小</label><select id="viz-size" onchange="onInteractiveVizControlChange()"></select></div>
+                                        <div class="form-group"><label>分面</label><select id="viz-facet" onchange="onInteractiveVizControlChange()"></select></div>
+                                        <div class="form-group interactive-viz-channel-wide"><label>播放维度</label><select id="viz-animation" onchange="onInteractiveVizControlChange()"></select></div>
+                                    </div>
+                                    <div class="form-group"><label>悬浮详情 / 平行坐标字段</label><select id="viz-detail-fields" multiple size="4" onchange="scheduleInteractiveVisualization()"></select></div>
+                                </details>
+                                <details class="interactive-viz-option">
+                                    <summary><span>数学粒度</span><small>聚合、时间尺度与分箱</small></summary>
+                                    <div class="interactive-viz-channel-grid">
+                                        <div class="form-group"><label>聚合</label><select id="viz-aggregation" onchange="onInteractiveVizControlChange()"><option value="none">逐行</option><option value="count">计数</option><option value="mean">均值</option><option value="sum">求和</option><option value="median">中位数</option><option value="min">最小值</option><option value="max">最大值</option></select></div>
+                                        <div class="form-group"><label>时间粒度</label><select id="viz-time-unit" onchange="onInteractiveVizControlChange()"><option value="none">不改变</option><option value="day">日</option><option value="week">周</option><option value="month">月</option><option value="quarter">季度</option><option value="year">年</option></select></div>
+                                    </div>
+                                    <label class="slider-label">连续轴分箱 <output id="viz-bins-value">20</output></label><input id="viz-bins" type="range" min="5" max="60" value="20" oninput="syncInteractiveVizSliders(true)">
+                                </details>
+                                <details class="interactive-viz-option">
+                                    <summary><span>筛选实验</span><small>拖动范围，观察结论是否稳定</small></summary>
+                                    <div class="form-group"><label>连续字段</label><select id="viz-filter-field" onchange="configureInteractiveVizRange()"></select></div>
+                                    <label class="research-checkbox"><input type="checkbox" id="viz-filter-enabled" onchange="scheduleInteractiveVisualization()"> 启用当前范围</label>
+                                    <label class="slider-label">下界 <output id="viz-range-min-value">-</output></label><input id="viz-range-min" type="range" min="0" max="1000" value="0" oninput="syncInteractiveVizRange('min')">
+                                    <label class="slider-label">上界 <output id="viz-range-max-value">-</output></label><input id="viz-range-max" type="range" min="0" max="1000" value="1000" oninput="syncInteractiveVizRange('max')">
+                                    <div class="form-group interactive-viz-category-filter"><label>分类字段</label><select id="viz-category-filter-field" onchange="configureInteractiveVizCategories()"></select></div>
+                                    <div class="form-group"><label>保留值（不选表示全部）</label><select id="viz-category-filter-values" multiple size="5" onchange="scheduleInteractiveVisualization()"></select></div>
+                                </details>
+                                <details class="interactive-viz-option">
+                                    <summary><span>显示与性能</span><small>仅影响浏览器图元</small></summary>
+                                    <label class="slider-label">最大图元 <output id="viz-max-points-value">5000</output></label><input id="viz-max-points" type="range" min="500" max="15000" step="500" value="5000" oninput="syncInteractiveVizSliders(true)">
+                                    <label class="slider-label">透明度 <output id="viz-opacity-value">70%</output></label><input id="viz-opacity" type="range" min="10" max="100" value="70" oninput="syncInteractiveVizSliders(false)">
+                                    <label class="slider-label">点大小倍率 <output id="viz-symbol-size-value">100%</output></label><input id="viz-symbol-size" type="range" min="30" max="250" value="100" oninput="syncInteractiveVizSliders(false)">
+                                </details>
+                            </aside>
+                            <main class="interactive-viz-stage">
+                                <div class="interactive-viz-stage-head">
+                                    <div><span class="interactive-viz-section-kicker">交互验证画布</span><div id="interactive-viz-status" class="interactive-viz-status">正在读取字段画像…</div></div>
+                                    <span class="interactive-viz-live-badge"><i></i> 实时探索</span>
+                                </div>
+                                <div id="viz-facet-controls" class="interactive-viz-playback hidden"><span>分面窗口</span><input id="viz-facet-slider" type="range" min="0" max="0" value="0" oninput="renderInteractiveVisualization()"><output id="viz-facet-value">-</output></div>
+                                <div id="viz-animation-controls" class="interactive-viz-playback hidden"><button class="btn btn-sm" id="viz-animation-play" onclick="toggleInteractiveVizPlayback()">▶ 播放</button><input id="viz-animation-slider" type="range" min="0" max="0" value="0" oninput="renderInteractiveVisualization()"><output id="viz-animation-value">全部</output></div>
+                                <div class="interactive-viz-chart-shell"><div id="interactive-viz-chart" role="img" aria-label="多维交互数据图"></div></div>
+                                <section class="interactive-viz-insight" aria-live="polite">
+                                    <div class="interactive-viz-insight-main"><span class="interactive-viz-section-kicker">即时解读</span><h4 id="interactive-viz-insight-title">等待生成可检验视图</h4><p id="interactive-viz-insight-body">系统只描述图中直接可见的证据，并明确提示不能由图形推出的结论。</p></div>
+                                    <div class="interactive-viz-insight-boundary"><span>解释边界</span><p id="interactive-viz-insight-boundary">探索图用于发现模式，不自动证明因果、显著性或外推有效性。</p></div>
+                                    <div class="interactive-viz-insight-audit"><span>数据审计</span><div id="interactive-viz-audit" class="interactive-viz-audit"></div></div>
+                                </section>
+                            </main>
+                        </div>
                     </div>
                     
                     <!-- 数据质量报告 -->
@@ -286,7 +573,10 @@
 
             <!-- Step 3: 报表设计 -->
             <section class="step-panel" id="step-3">
-                <h2>🎨 报表设计</h2>
+                <div class="report-purpose-banner">
+                    <div><span class="report-purpose-kicker">PRESENT · 编排与交付</span><h2>报表编排台</h2><p>承接已经验证的发现，完成布局、组合、样式与导出；这里不负责探索数据关系。</p></div>
+                    <div class="report-purpose-flow"><span>探索发现</span><i>→</i><span class="is-active">报表编排</span><i>→</i><span>导出交付</span></div>
+                </div>
                 
                 <!-- 模式切换 -->
                 <div class="report-mode-tabs">
@@ -926,6 +1216,7 @@
                             <label>Provider</label>
                             <select id="llm-provider" onchange="onLLMProviderChange()">
                                 <option value="openai">OpenAI 兼容 API</option>
+                                <option value="deepseek">DeepSeek 官方 API</option>
                                 <option value="ollama">Ollama 本地模型</option>
                             </select>
                         </div>
@@ -942,12 +1233,39 @@
                         <div class="form-group" id="llm-model-group">
                             <label>模型名称</label>
                             <div class="model-input-wrap">
-                                <input type="text" id="llm-model-name" value="gpt-4o" placeholder="gpt-4o / llama3">
+                                <select id="llm-model-preset" onchange="useLLMModelPreset(this.value)" aria-label="选择常用模型">
+                                    <option value="">选择常用模型…</option>
+                                </select>
+                                <input type="text" id="llm-model-name" value="gpt-4o" placeholder="gpt-4o / llama3" list="deepseek-model-options">
                                 <button type="button" class="btn btn-secondary btn-sm" id="llm-browse-btn" onclick="openModelBrowser()" title="浏览本地模型">
                                     📁 浏览
                                 </button>
                             </div>
                         </div>
+                        <div class="form-group">
+                            <label>连接验证</label>
+                            <button type="button" class="btn btn-secondary" id="llm-test-btn" onclick="testLLMConnection()">测试 API</button>
+                            <small id="llm-test-status" class="hint"></small>
+                        </div>
+                    </div>
+                    <datalist id="deepseek-model-options">
+                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+                        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                        <option value="deepseek-v4-flash-vision-exp">DeepSeek V4 Flash Vision（实验版）</option>
+                    </datalist>
+                    <div class="llm-image-upload">
+                        <div class="llm-image-upload-head">
+                            <div>
+                                <label for="llm-image-input">图片输入（可选）</label>
+                                <small class="hint">上传题目截图、图表或模型结果；选择 Vision 模型可进行图像理解</small>
+                            </div>
+                            <label class="btn btn-secondary btn-sm llm-image-picker">
+                                ＋ 添加图片
+                                <input type="file" id="llm-image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+                            </label>
+                        </div>
+                        <div id="llm-image-status" class="hint">未选择图片（最多 5 张，每张不超过 6 MB）</div>
+                        <div id="llm-image-preview" class="llm-image-preview" aria-live="polite"></div>
                     </div>
                 </div>
                 
@@ -1306,6 +1624,6 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=2"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=16"></script>
 </body>
 </html>

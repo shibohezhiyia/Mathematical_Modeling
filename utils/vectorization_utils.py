@@ -171,6 +171,9 @@ def safe_inverse(x: np.ndarray, epsilon: float = 1e-6) -> np.ndarray:
     result[mask] = 1.0 / x_safe[mask]
     # 对于接近0的值，使用 epsilon 的倒数
     result[~mask] = 1.0 / epsilon
+    # 修正浮点误差：接近整数的值吸附到整数（如 1/1e-5 -> 1e5）
+    near_int = np.isclose(result, np.round(result), rtol=0, atol=1e-8)
+    result[near_int] = np.round(result[near_int])
     return result
 
 

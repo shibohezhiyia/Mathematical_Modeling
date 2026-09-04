@@ -12,6 +12,8 @@ OptimizerFactory 与附加优化器单元测试
 
 import os
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -104,6 +106,83 @@ class TestOptimizerFactoryCreate(unittest.TestCase):
         opt = OptimizerFactory.create('random', n_trials=5, cv_folds=2, random_state=123)
         self.assertEqual(opt.cv_folds, 2)
         self.assertEqual(opt.random_state, 123)
+
+    def test_create_preserves_time_order_for_parameter_search(self):
+        from sklearn.linear_model import LinearRegression
+
+        opt = OptimizerFactory.create('random', n_trials=2, cv_folds=3, fold_type='time')
+        X = pd.DataFrame({'time_feature': np.arange(40, dtype=float)})
+        y = pd.Series(np.arange(40, dtype=float) + 0.123456789)
+        cache = MagicMock()
+        cache._make_key.return_value = "time-order-test"
+        cache.get.return_value = None
+        with (
+            patch('core.result_cache.get_result_cache', return_value=cache),
+            patch('core.optimizer_base.cross_val_score', return_value=np.array([-1.0, -1.0, -1.0])) as mocked,
+        ):
+            opt._evaluate_model(LinearRegression(), X, y, TaskType.REGRESSION)
+        cv = mocked.call_args.kwargs['cv']
+        self.assertEqual(cv.__class__.__name__, 'TimeSeriesSplit')
+
+    def test_cv_cache_fingerprint_distinguishes_same_shape_datasets(self):
+        opt = OptimizerFactory.create('random', n_trials=2, cv_folds=3)
+        X_left = pd.DataFrame({'feature': np.arange(256, dtype=float)})
+        X_right = X_left.copy()
+        X_right.loc[200, 'feature'] = -9999.0
+        y = pd.Series(np.arange(256, dtype=float))
+
+        left = opt._data_fingerprint(X_left, y)
+        right = opt._data_fingerprint(X_right, y)
+
+        self.assertNotEqual(left, right)
+
+    def test_trial_timeout_returns_without_waiting_for_worker_shutdown(self):
+        from sklearn.linear_model import LinearRegression
+
+        opt = OptimizerFactory.create(
+            'random', n_trials=2, cv_folds=2, trial_timeout=0.05
+        )
+        X = pd.DataFrame({'feature': np.arange(20, dtype=float)})
+        y = pd.Series(np.arange(20, dtype=float))
+        release = threading.Event()
+        cache = MagicMock()
+        cache._make_key.return_value = "non-blocking-timeout-test"
+        cache.get.return_value = None
+
+        def blocked_cv(*args, **kwargs):
+            release.wait(timeout=2)
+            return np.array([-1.0, -1.0])
+
+        started = time.perf_counter()
+        try:
+            with (
+                patch('core.result_cache.get_result_cache', return_value=cache),
+                patch('core.optimizer_base.cross_val_score', side_effect=blocked_cv),
+            ):
+                with self.assertRaises(TimeoutError):
+                    opt._evaluate_model(LinearRegression(), X, y, TaskType.REGRESSION)
+            self.assertLess(time.perf_counter() - started, 0.5)
+        finally:
+            release.set()
+
+    def test_model_evaluation_error_is_not_retried_as_cache_failure(self):
+        from sklearn.linear_model import LinearRegression
+
+        opt = OptimizerFactory.create('random', n_trials=2, cv_folds=2)
+        X = pd.DataFrame({'feature': np.arange(20, dtype=float)})
+        y = pd.Series(np.arange(20, dtype=float))
+        cache = MagicMock()
+        cache._make_key.return_value = "evaluation-error-test"
+        cache.get.return_value = None
+
+        with (
+            patch('core.result_cache.get_result_cache', return_value=cache),
+            patch('core.optimizer_base.cross_val_score', side_effect=RuntimeError("fit failed")) as mocked,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fit failed"):
+                opt._evaluate_model(LinearRegression(), X, y, TaskType.REGRESSION)
+
+        self.assertEqual(mocked.call_count, 1)
 
 
 class TestRandomSearchOptimizer(unittest.TestCase):

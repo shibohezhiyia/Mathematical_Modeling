@@ -12,7 +12,7 @@
 """
 
 import os
-from typing import Optional, List, Tuple, Dict, Any, Union
+from typing import Optional, List, Tuple, Dict, Any, Union, Callable
 
 import numpy as np
 import pandas as pd
@@ -159,7 +159,7 @@ class ImageResNet(BaseEstimator):
                 if self.task_type == 'classification':
                     loss = criterion(outputs, labels)
                 else:
-                    loss = criterion(outputs.squeeze(), labels.float())
+                    loss = criterion(outputs.reshape(-1), labels.float().reshape(-1))
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
@@ -185,7 +185,7 @@ class ImageResNet(BaseEstimator):
                     p = torch.argmax(outputs, dim=1).cpu().numpy()
                     preds.extend(p)
                 else:
-                    preds.extend(outputs.squeeze().cpu().numpy())
+                    preds.extend(outputs.reshape(-1).cpu().numpy())
         
         preds_arr = np.array(preds)
         if self.task_type == 'classification' and self.label_encoder_ is not None:
@@ -351,7 +351,7 @@ class TextBERT(BaseEstimator):
                 if self.task_type == 'classification':
                     loss = criterion(outputs, labels)
                 else:
-                    loss = criterion(outputs.squeeze(), labels.float())
+                    loss = criterion(outputs.reshape(-1), labels.float().reshape(-1))
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
@@ -379,7 +379,7 @@ class TextBERT(BaseEstimator):
                     p = torch.argmax(outputs, dim=1).cpu().numpy()
                     preds.extend(p)
                 else:
-                    preds.extend(outputs.squeeze().cpu().numpy())
+                    preds.extend(outputs.reshape(-1).cpu().numpy())
         
         preds_arr = np.array(preds)
         if self.task_type == 'classification' and self.label_encoder_ is not None:

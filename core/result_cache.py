@@ -1,7 +1,7 @@
 """
 结果缓存机制：避免重复计算，提升性能
 
-基于文件系统的持久化缓存，使用 MD5 哈希作为缓存键。
+基于文件系统的持久化缓存，使用 SHA-256 物理键和版本化元数据。
 支持：
 - 模型评估结果缓存（交叉验证分数）
 - 数据预处理结果缓存
@@ -16,6 +16,8 @@ import hashlib
 import time
 import pickle
 import threading
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union, Callable
 from pathlib import Path
 from functools import wraps
@@ -28,7 +30,7 @@ class ResultCache:
     结果缓存管理器
     
     缓存策略：
-    - 键：基于输入数据+配置的 MD5 哈希
+    - 逻辑键：调用者可读；物理文件名始终为 SHA-256，不能穿越目录
     - 值：任意可序列化对象（JSON 或 pickle）
     - TTL：默认 7 天
     - 最大条目数：默认 1000（LRU 淘汰）
@@ -62,39 +64,87 @@ class ResultCache:
             except Exception:
                 cache_dir = os.path.join(os.getcwd(), 'workspace', 'cache', 'result_cache')
         
-        self.cache_dir = cache_dir
+        self.cache_dir = os.path.abspath(cache_dir)
+        self.entries_dir = os.path.join(self.cache_dir, 'entries')
+        self.metadata_dir = os.path.join(self.cache_dir, 'metadata')
+        self.temp_dir = os.path.join(self.cache_dir, 'temp')
+        self.manifest_path = os.path.join(self.cache_dir, 'cache_manifest.json')
         if enabled:
-            os.makedirs(self.cache_dir, exist_ok=True)
+            self._ensure_layout()
             self._cleanup_expired()
+            self._enforce_disk_limit()
     
     def _make_key(self, *args, **kwargs) -> str:
-        """基于输入生成 MD5 缓存键 - 优化：基本类型直接哈希，避免 pickle 开销"""
+        """基于输入生成稳定的 SHA-256 逻辑键。"""
         # 优化：基本类型直接字符串哈希，避免 pickle 序列化开销
         if len(args) == 1 and not kwargs:
             obj = args[0]
             if isinstance(obj, (int, float, str, bool, type(None))):
-                return hashlib.md5(str(obj).encode()).hexdigest()
+                return hashlib.sha256(str(obj).encode()).hexdigest()
             elif isinstance(obj, (list, tuple)):
-                return hashlib.md5(b"\x00".join(str(x).encode() for x in obj)).hexdigest()
+                return hashlib.sha256(b"\x00".join(str(x).encode() for x in obj)).hexdigest()
             elif isinstance(obj, dict):
                 items = sorted(obj.items(), key=lambda x: str(x[0]))
-                return hashlib.md5(b"\x00".join(f"{k}:{v}".encode() for k, v in items)).hexdigest()
+                return hashlib.sha256(b"\x00".join(f"{k}:{v}".encode() for k, v in items)).hexdigest()
         # 回退：pickle 序列化（用于 numpy/pandas 等复杂类型）
         try:
             key_data = pickle.dumps((args, sorted(kwargs.items())), protocol=4)
         except (TypeError, pickle.PicklingError):
             # 回退：使用字符串 repr
             key_data = repr((args, sorted(kwargs.items()))).encode('utf-8')
-        return hashlib.md5(key_data).hexdigest()
+        return hashlib.sha256(key_data).hexdigest()
+
+    @staticmethod
+    def _storage_key(key: str) -> str:
+        return hashlib.sha256(str(key).encode('utf-8')).hexdigest()
     
     def _get_cache_path(self, key: str) -> str:
         """获取缓存文件路径"""
-        # 分两层目录避免单个目录文件过多
-        return os.path.join(self.cache_dir, key[:2], f"{key}.json")
+        storage_key = self._storage_key(key)
+        return os.path.join(self.entries_dir, storage_key[:2], f"{storage_key}.value.json")
     
     def _get_meta_path(self, key: str) -> str:
         """获取元数据文件路径"""
-        return os.path.join(self.cache_dir, key[:2], f"{key}.meta.json")
+        storage_key = self._storage_key(key)
+        return os.path.join(self.metadata_dir, storage_key[:2], f"{storage_key}.meta.json")
+
+    def _ensure_layout(self) -> None:
+        for directory in (self.cache_dir, self.entries_dir, self.metadata_dir, self.temp_dir):
+            os.makedirs(directory, exist_ok=True)
+        manifest = {
+            'schema_version': 'mathmodel.result-cache/v1',
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'disposable': True,
+            'hash_algorithm': 'sha256',
+            'layout': {
+                'values': 'entries/<sha256-prefix>/<sha256>.value.json',
+                'metadata': 'metadata/<sha256-prefix>/<sha256>.meta.json',
+                'atomic_staging': 'temp/',
+            },
+            'ttl_seconds': self.ttl_seconds,
+            'max_entries': self.max_entries,
+            'cleanup': 'The entire cache directory is disposable.',
+        }
+        self._atomic_json_write(self.manifest_path, manifest)
+
+    def _atomic_json_write(self, target: str, payload: Any) -> None:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
+        temporary = os.path.join(
+            self.temp_dir, f".{os.path.basename(target)}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with open(temporary, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, ensure_ascii=False, sort_keys=True, default=str)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            try:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            except OSError:
+                pass
     
     def get(self, key: str) -> Optional[Any]:
         """获取缓存值，不存在或过期返回 None"""
@@ -123,6 +173,11 @@ class ResultCache:
             try:
                 with open(meta_path, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
+                if (
+                    meta.get('schema_version') != 'mathmodel.result-cache-entry/v1'
+                    or meta.get('logical_key') != str(key)
+                ):
+                    raise ValueError('缓存元数据版本或逻辑键不匹配')
                 
                 if time.time() - meta.get('timestamp', 0) > self.ttl_seconds:
                     # 磁盘缓存过期
@@ -165,23 +220,30 @@ class ResultCache:
             meta_path = self._get_meta_path(key)
             
             try:
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                
-                with open(cache_path, 'w', encoding='utf-8') as f:
-                    json.dump(value, f, ensure_ascii=False, default=str)
-                
-                with open(meta_path, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        'timestamp': time.time(),
-                        'access_count': 0,
-                        'size_bytes': os.path.getsize(cache_path)
-                    }, f)
+                timestamp = time.time()
+                self._atomic_json_write(cache_path, value)
+                self._atomic_json_write(meta_path, {
+                    'schema_version': 'mathmodel.result-cache-entry/v1',
+                    'logical_key': str(key),
+                    'storage_key': self._storage_key(key),
+                    'timestamp': timestamp,
+                    'created_at': datetime.fromtimestamp(
+                        timestamp, tz=timezone.utc
+                    ).isoformat(),
+                    'access_count': 0,
+                    'size_bytes': os.path.getsize(cache_path),
+                    'disposable': True,
+                })
                 
                 # 检查是否需要清理
                 self._enforce_lru()
+                self._enforce_disk_limit()
                 return True
             
             except Exception as e:
+                self._memory_cache.pop(key, None)
+                self._memory_meta.pop(key, None)
+                self._remove_files(key)
                 log_warning(f"[ResultCache] 写入缓存失败: {e}")
                 return False
     
@@ -222,33 +284,37 @@ class ResultCache:
             清除的条目数
         """
         with self._lock:
-            count = 0
-            
-            # 清除内存缓存
-            if pattern is None:
-                count += len(self._memory_cache)
-                self._memory_cache.clear()
-                self._memory_meta.clear()
-            else:
-                keys_to_remove = [k for k in self._memory_cache if k.startswith(pattern)]
-                for k in keys_to_remove:
-                    del self._memory_cache[k]
-                    del self._memory_meta[k]
-                count += len(keys_to_remove)
-            
-            # 清除磁盘缓存
-            if os.path.exists(self.cache_dir):
-                for root, dirs, files in os.walk(self.cache_dir):
-                    for f in files:
-                        if f.endswith('.json'):
-                            key = f.replace('.json', '').replace('.meta', '')
-                            if pattern is None or key.startswith(pattern):
-                                try:
-                                    os.remove(os.path.join(root, f))
-                                    count += 1
-                                except Exception:
-                                    pass
-            
+            removed_keys = set()
+            memory_keys = [
+                key for key in self._memory_cache
+                if pattern is None or str(key).startswith(pattern)
+            ]
+            for key in memory_keys:
+                self._memory_cache.pop(key, None)
+                self._memory_meta.pop(key, None)
+                removed_keys.add(str(key))
+
+            if os.path.exists(self.metadata_dir):
+                for root, _dirs, files in os.walk(self.metadata_dir):
+                    for filename in files:
+                        if not filename.endswith('.meta.json'):
+                            continue
+                        meta_path = os.path.join(root, filename)
+                        try:
+                            with open(meta_path, 'r', encoding='utf-8') as handle:
+                                meta = json.load(handle)
+                            logical_key = str(meta.get('logical_key', ''))
+                            if pattern is None or logical_key.startswith(pattern):
+                                self._remove_files(logical_key)
+                                removed_keys.add(logical_key)
+                        except (OSError, ValueError, json.JSONDecodeError):
+                            # Malformed metadata is disposable and cannot name a value safely.
+                            try:
+                                os.remove(meta_path)
+                            except OSError:
+                                pass
+            self._remove_empty_shards()
+            count = len(removed_keys)
             log_info(f"[ResultCache] 清除 {count} 个缓存条目")
             return count
     
@@ -258,10 +324,10 @@ class ResultCache:
             disk_count = 0
             disk_size = 0
             
-            if os.path.exists(self.cache_dir):
-                for root, dirs, files in os.walk(self.cache_dir):
+            if os.path.exists(self.entries_dir):
+                for root, dirs, files in os.walk(self.entries_dir):
                     for f in files:
-                        if f.endswith('.json') and not f.endswith('.meta.json'):
+                        if f.endswith('.value.json'):
                             disk_count += 1
                             fp = os.path.join(root, f)
                             try:
@@ -276,7 +342,10 @@ class ResultCache:
                 'disk_size_mb': disk_size / (1024 ** 2),
                 'ttl_seconds': self.ttl_seconds,
                 'max_entries': self.max_entries,
-                'cache_dir': self.cache_dir
+                'cache_dir': self.cache_dir,
+                'schema_version': 'mathmodel.result-cache/v1',
+                'manifest_path': self.manifest_path,
+                'disposable': True,
             }
     
     def _remove_files(self, key: str) -> None:
@@ -287,16 +356,29 @@ class ResultCache:
                     os.remove(path)
             except Exception:
                 pass
+
+    def _remove_empty_shards(self) -> None:
+        for base in (self.entries_dir, self.metadata_dir):
+            if not os.path.isdir(base):
+                continue
+            for directory in sorted(
+                (path for path in Path(base).rglob('*') if path.is_dir()),
+                key=lambda path: len(path.parts), reverse=True,
+            ):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
     
     def _cleanup_expired(self) -> None:
         """清理过期缓存"""
-        if not os.path.exists(self.cache_dir):
+        if not os.path.exists(self.metadata_dir):
             return
         
         now = time.time()
         removed = 0
         
-        for root, dirs, files in os.walk(self.cache_dir):
+        for root, dirs, files in os.walk(self.metadata_dir):
             for f in files:
                 if f.endswith('.meta.json'):
                     meta_path = os.path.join(root, f)
@@ -304,13 +386,17 @@ class ResultCache:
                         with open(meta_path, 'r', encoding='utf-8') as mf:
                             meta = json.load(mf)
                         if now - meta.get('timestamp', 0) > self.ttl_seconds:
-                            key = f.replace('.meta.json', '')
-                            self._remove_files(key)
+                            logical_key = str(meta.get('logical_key', ''))
+                            if logical_key:
+                                self._remove_files(logical_key)
+                            else:
+                                os.remove(meta_path)
                             removed += 1
                     except Exception:
                         pass
         
         if removed > 0:
+            self._remove_empty_shards()
             log_info(f"[ResultCache] 清理 {removed} 个过期缓存")
     
     def _enforce_lru(self) -> None:
@@ -328,6 +414,29 @@ class ResultCache:
             if k in self._memory_cache:
                 del self._memory_cache[k]
                 del self._memory_meta[k]
+                self._remove_files(k)
+
+    def _enforce_disk_limit(self) -> None:
+        """Bound persistent entries using metadata timestamps across restarts."""
+        if not os.path.isdir(self.metadata_dir):
+            return
+        records = []
+        for meta_path in Path(self.metadata_dir).rglob('*.meta.json'):
+            try:
+                meta = json.loads(meta_path.read_text(encoding='utf-8'))
+                logical_key = str(meta.get('logical_key', ''))
+                if logical_key:
+                    records.append((float(meta.get('timestamp', 0)), logical_key))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        excess = len(records) - self.max_entries
+        if excess <= 0:
+            return
+        for _timestamp, logical_key in sorted(records)[:excess]:
+            self._remove_files(logical_key)
+            self._memory_cache.pop(logical_key, None)
+            self._memory_meta.pop(logical_key, None)
+        self._remove_empty_shards()
 
 
 # =============================================================================

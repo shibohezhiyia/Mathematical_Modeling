@@ -18,6 +18,7 @@ from functools import wraps
 import time
 
 import pandas as pd
+import numpy as np
 from core.progress_bar import progress_iter
 from core.workspace_manager import get_workspace_manager
 from sklearn.feature_selection import mutual_info_classif
@@ -669,7 +670,19 @@ class MissingValueHandler:
             return self._fill_median(df, col)
         
         condition = df[rule.condition_col] == rule.condition_value
-        median_val = df.loc[condition, col].median()
+        conditional_values = df.loc[condition, col].dropna()
+        global_values = df[col].dropna()
+        if len(conditional_values):
+            median_val = conditional_values.median()
+        elif len(global_values):
+            median_val = global_values.median()
+            log_warning(
+                f"[{col}] 条件组 [{rule.condition_col}={rule.condition_value}] "
+                "没有观测值，回退到全局中位数"
+            )
+        else:
+            log_warning(f"[{col}] 全列缺少观测值，无法估计条件中位数，保留缺失")
+            return df
         
         # 对该条件下缺失的行填充
         fill_mask = condition & df[col].isnull()
@@ -678,7 +691,8 @@ class MissingValueHandler:
         # 其他缺失用全局中位数
         other_mask = df[col].isnull()
         if other_mask.any():
-            global_median = df[col].median()
+            remaining_values = df[col].dropna()
+            global_median = remaining_values.median() if len(remaining_values) else median_val
             df.loc[other_mask, col] = global_median
         
         log_info(f"[{col}] 条件中位数填充: [{rule.condition_col}={rule.condition_value}] -> {median_val:.4f}")

@@ -78,7 +78,8 @@ class DriftDetector:
                  numerical_method: str = 'ks',
                  categorical_method: str = 'chi2',
                  adversarial_estimator: Any = None,
-                 random_state: int = 42) -> None:
+                 random_state: int = 42,
+                 max_samples: int = 20_000) -> None:
         """
         Args:
             method: 'auto' | 'ks' | 'psi' | 'adversarial' | 'wasserstein'
@@ -93,10 +94,12 @@ class DriftDetector:
         self.numerical_method = numerical_method
         self.categorical_method = categorical_method
         self.adversarial_estimator = adversarial_estimator or RandomForestClassifier(
-            n_estimators=100, max_depth=5, random_state=random_state, n_jobs=-1
+            n_estimators=100, max_depth=5, random_state=random_state, n_jobs=1
         )
         self.random_state = random_state
+        self.max_samples = max_samples
         self._reference: Optional[pd.DataFrame] = None
+        self._reference_n_rows: int = 0
         self._ref_stats: Optional[Dict] = None
         self._num_cols: List[str] = []
         self._cat_cols: List[str] = []
@@ -104,7 +107,16 @@ class DriftDetector:
     def fit_reference(self, X: Union[pd.DataFrame, np.ndarray]) -> 'DriftDetector':
         """记录参考分布（通常是训练集）"""
         X = self._to_df(X)
-        self._reference = X.copy()
+        self._reference_n_rows = len(X)
+        if len(X) > self.max_samples:
+            self._reference = X.sample(n=self.max_samples, random_state=self.random_state).copy()
+            log_info(
+                f"[DriftDetector] 参考数据采样: {len(X):,} → {self.max_samples:,}，"
+                "避免漂移检测复制全量数据"
+            )
+        else:
+            self._reference = X.copy()
+        X = self._reference
         self._num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
         self._cat_cols = [c for c in X.columns if c not in self._num_cols]
 
@@ -151,14 +163,11 @@ class DriftDetector:
     def _detect_auto(self, X: pd.DataFrame) -> DriftReport:
         """自动选择最佳检测方法"""
         # 小数据用 KS，大数据用 adversarial
-        n = len(self._reference)
+        n = self._reference_n_rows
         if n < 5000:
             return self._detect_ks(X)
-        elif n < 50000:
-            return self._detect_adversarial(X)
-        else:
-            # 超大数据：采样后做 adversarial
-            return self._detect_adversarial(X, sample_size=20000)
+        # 对抗验证最多使用固定样本预算；数据越大不再线性增加内存和耗时。
+        return self._detect_adversarial(X, sample_size=self.max_samples)
 
     def _detect_ks(self, X: pd.DataFrame) -> DriftReport:
         """KS Test：逐列比较，Bonferroni 校正"""
@@ -247,8 +256,8 @@ class DriftDetector:
 
     def _detect_adversarial(self, X: pd.DataFrame, sample_size: Optional[int] = None) -> DriftReport:
         """对抗验证：用分类器判断能否区分 train/test"""
-        ref = self._reference.copy()
-        new = X.copy()
+        ref = self._reference
+        new = X
 
         if sample_size and len(ref) > sample_size:
             ref = ref.sample(n=sample_size, random_state=self.random_state)
@@ -278,13 +287,13 @@ class DriftDetector:
         estimator = clone(self.adversarial_estimator)
         try:
             scores = cross_val_score(estimator, X_combined, y_combined, cv=3,
-                                     scoring='roc_auc', n_jobs=-1)
+                                     scoring='roc_auc', n_jobs=1)
             mean_auc = float(np.mean(scores))
         except Exception as e:
             log_warning(f"[DriftDetector] 对抗验证失败: {e}，回退到 LogisticRegression")
             estimator = LogisticRegression(max_iter=1000, random_state=self.random_state)
             scores = cross_val_score(estimator, X_combined, y_combined, cv=3,
-                                     scoring='roc_auc', n_jobs=-1)
+                                     scoring='roc_auc', n_jobs=1)
             mean_auc = float(np.mean(scores))
 
         # AUC > 0.7 说明 train/test 很容易被区分，存在漂移

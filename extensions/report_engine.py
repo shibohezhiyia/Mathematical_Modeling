@@ -74,6 +74,10 @@ class ChartConfig:
     color_scheme: str = "default"  # default, pastel, dark, bright
     show_values: bool = True  # 是否显示数值标签
     top_n: int = 0  # 只显示前N项，0表示全部
+    filters: List[Dict[str, Any]] = field(default_factory=list)  # 从探索视图继承的筛选契约
+    time_unit: str = "none"  # none, day, week, month, quarter, year
+    bins: int = 20  # 连续分组轴的分箱数
+    discovery_note: str = ""  # 探索阶段保留的解释边界
 
 
 @dataclass
@@ -195,6 +199,61 @@ class ChartBuilder:
     }
 
     @staticmethod
+    def prepare_frame(df: pd.DataFrame, config: ChartConfig) -> pd.DataFrame:
+        """Reapply the exploration grain contract before static rendering."""
+        frame = df.copy()
+        for item in config.filters or []:
+            field_name = str(item.get("field", ""))
+            if field_name not in frame.columns:
+                continue
+            if item.get("kind") == "range":
+                numeric = pd.to_numeric(frame[field_name], errors="coerce")
+                lower = item.get("min")
+                upper = item.get("max")
+                mask = pd.Series(True, index=frame.index)
+                if lower is not None:
+                    mask &= numeric >= float(lower)
+                if upper is not None:
+                    mask &= numeric <= float(upper)
+                frame = frame.loc[mask]
+            elif item.get("kind") == "in":
+                allowed = {str(value) for value in item.get("values", [])}
+                frame = frame.loc[frame[field_name].astype("string").isin(allowed)]
+
+        if config.x_field in frame.columns and config.agg != "none":
+            x_values = frame[config.x_field]
+            if pd.api.types.is_numeric_dtype(x_values) and x_values.nunique(dropna=True) > max(2, int(config.bins)):
+                frame[config.x_field] = pd.cut(
+                    pd.to_numeric(x_values, errors="coerce"),
+                    bins=max(2, int(config.bins)),
+                    duplicates="drop",
+                ).astype("string")
+            elif config.time_unit != "none":
+                dates = pd.to_datetime(x_values, errors="coerce")
+                period = {
+                    "day": "D", "week": "W", "month": "M",
+                    "quarter": "Q", "year": "Y",
+                }.get(config.time_unit)
+                if period:
+                    frame[config.x_field] = dates.dt.to_period(period).dt.start_time
+        return frame
+
+    @staticmethod
+    def aggregate_frame(frame: pd.DataFrame, config: ChartConfig) -> pd.DataFrame:
+        """Aggregate including a first-class record-count measure."""
+        group_fields = [config.x_field]
+        if config.group_field and config.group_field in frame.columns:
+            group_fields.append(config.group_field)
+        if config.y_field == "__count__":
+            grouped = frame.groupby(group_fields, observed=True, dropna=False).size().reset_index(name="__count__")
+        else:
+            agg_func = config.agg if config.agg in AGG_FUNCTIONS else "sum"
+            grouped = frame.groupby(group_fields, observed=True, dropna=False)[config.y_field].agg(agg_func).reset_index()
+        if len(group_fields) > 1:
+            return grouped.pivot(index=config.x_field, columns=config.group_field, values=config.y_field).fillna(0)
+        return grouped.set_index(config.x_field)
+
+    @staticmethod
     def build(df: pd.DataFrame, config: ChartConfig) -> plt.Figure:
         """
         根据配置渲染图表
@@ -206,23 +265,16 @@ class ChartBuilder:
             ax.axis("off")
             return fig
 
-        if config.x_field not in df.columns or config.y_field not in df.columns:
+        if config.x_field not in df.columns or (config.y_field != "__count__" and config.y_field not in df.columns):
             fig, ax = plt.subplots(figsize=(8, 5))
             ax.text(0.5, 0.5, f"字段不存在: {config.x_field} 或 {config.y_field}", ha="center", va="center", fontsize=12)
             ax.axis("off")
             return fig
 
-        # 准备数据
+        # 准备数据，并严格重放探索阶段的筛选与粒度
         colors = ChartBuilder.COLOR_SCHEMES.get(config.color_scheme, ChartBuilder.COLOR_SCHEMES["default"])
-        agg_func = AGG_FUNCTIONS.get(config.agg, np.sum)
-
-        # 聚合数据
-        if config.group_field and config.group_field in df.columns:
-            grouped = df.groupby([config.x_field, config.group_field])[config.y_field].agg(agg_func).reset_index()
-            pivot_data = grouped.pivot(index=config.x_field, columns=config.group_field, values=config.y_field).fillna(0)
-        else:
-            grouped = df.groupby(config.x_field)[config.y_field].agg(agg_func).reset_index()
-            pivot_data = grouped.set_index(config.x_field)
+        render_df = ChartBuilder.prepare_frame(df, config)
+        pivot_data = ChartBuilder.aggregate_frame(render_df, config)
 
         # 取 top_n
         if config.top_n > 0 and len(pivot_data) > config.top_n:
@@ -301,14 +353,18 @@ class ChartBuilder:
                 ax.set_xticklabels(pivot_data.index, rotation=45, ha="right")
 
         elif config.chart_type == "scatter":
-            x_vals = df[config.x_field]
-            y_vals = df[config.y_field]
-            ax.scatter(x_vals, y_vals, alpha=0.6, color=colors[0], s=50)
+            if config.group_field and config.group_field in render_df.columns:
+                for index, (name, subset) in enumerate(render_df.groupby(config.group_field, observed=True, dropna=False)):
+                    ax.scatter(subset[config.x_field], subset[config.y_field], alpha=0.6, color=colors[index % len(colors)], s=50, label=str(name))
+                ax.legend()
+            else:
+                ax.scatter(render_df[config.x_field], render_df[config.y_field], alpha=0.6, color=colors[0], s=50)
             ax.set_xlabel(config.x_field)
 
         # 通用样式
         ax.set_title(config.title, fontsize=14, fontweight="bold", pad=15)
-        ax.set_ylabel(config.y_field if config.chart_type not in ("pie", "donut") else "")
+        y_label = "记录数" if config.y_field == "__count__" else config.y_field
+        ax.set_ylabel(y_label if config.chart_type not in ("pie", "donut") else "")
         ax.set_xlabel(config.x_field if config.chart_type not in ("pie", "donut") else "")
         ax.grid(axis="y", alpha=0.3, linestyle="--")
         ax.spines["top"].set_visible(False)
@@ -521,16 +577,13 @@ class ReportExporter:
             ax.axis("off")
             return
 
+        if chart_cfg.x_field not in df.columns or (chart_cfg.y_field != "__count__" and chart_cfg.y_field not in df.columns):
+            ax.text(0.5, 0.5, "图表字段不存在", ha="center", va="center", fontsize=10)
+            ax.axis("off")
+            return
         colors = ChartBuilder.COLOR_SCHEMES.get(chart_cfg.color_scheme, ChartBuilder.COLOR_SCHEMES["default"])
-        agg_func = AGG_FUNCTIONS.get(chart_cfg.agg, np.sum)
-
-        # 聚合数据
-        if chart_cfg.group_field and chart_cfg.group_field in df.columns:
-            grouped = df.groupby([chart_cfg.x_field, chart_cfg.group_field])[chart_cfg.y_field].agg(agg_func).reset_index()
-            pivot_data = grouped.pivot(index=chart_cfg.x_field, columns=chart_cfg.group_field, values=chart_cfg.y_field).fillna(0)
-        else:
-            grouped = df.groupby(chart_cfg.x_field)[chart_cfg.y_field].agg(agg_func).reset_index()
-            pivot_data = grouped.set_index(chart_cfg.x_field)
+        render_df = ChartBuilder.prepare_frame(df, chart_cfg)
+        pivot_data = ChartBuilder.aggregate_frame(render_df, chart_cfg)
 
         # top_n
         if chart_cfg.top_n > 0 and len(pivot_data) > chart_cfg.top_n:
@@ -595,13 +648,17 @@ class ReportExporter:
                 ax.set_xticklabels(pivot_data.index, rotation=45, ha="right")
 
         elif chart_cfg.chart_type == "scatter":
-            x_vals = df[chart_cfg.x_field]
-            y_vals = df[chart_cfg.y_field]
-            ax.scatter(x_vals, y_vals, alpha=0.6, color=colors[0], s=30)
+            if chart_cfg.group_field and chart_cfg.group_field in render_df.columns:
+                for index, (name, subset) in enumerate(render_df.groupby(chart_cfg.group_field, observed=True, dropna=False)):
+                    ax.scatter(subset[chart_cfg.x_field], subset[chart_cfg.y_field], alpha=0.6, color=colors[index % len(colors)], s=30, label=str(name))
+                ax.legend(fontsize=8)
+            else:
+                ax.scatter(render_df[chart_cfg.x_field], render_df[chart_cfg.y_field], alpha=0.6, color=colors[0], s=30)
             ax.set_xlabel(chart_cfg.x_field, fontsize=9)
 
         ax.set_title(chart_cfg.title, fontsize=11, fontweight="bold", pad=8)
-        ax.set_ylabel(chart_cfg.y_field if chart_cfg.chart_type not in ("pie", "donut") else "", fontsize=9)
+        y_label = "记录数" if chart_cfg.y_field == "__count__" else chart_cfg.y_field
+        ax.set_ylabel(y_label if chart_cfg.chart_type not in ("pie", "donut") else "", fontsize=9)
         ax.set_xlabel(chart_cfg.x_field if chart_cfg.chart_type not in ("pie", "donut") else "", fontsize=9)
         ax.grid(axis="y", alpha=0.3, linestyle="--")
         ax.spines["top"].set_visible(False)

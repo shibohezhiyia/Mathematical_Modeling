@@ -62,8 +62,8 @@ def extract_meta_features(X: pd.DataFrame, y: Optional[pd.Series], task_type: Ta
         n_categorical / max(n_features, 1),
     ]
     
-    # 向量化：使用 values 一次性计算缺失率，避免 sum().sum() 双重遍历
-    missing_ratio = np.isnan(X.values).sum() / max(X.size, 1) if X.size > 0 else 0.0
+    # 混合类型时 numpy isnan 不支持 object dtype，统一用 pandas isna
+    missing_ratio = X.isna().values.sum() / max(X.size, 1) if X.size > 0 else 0.0
     features.append(missing_ratio)
     
     # 向量化：使用 select_dtypes 筛选数值列，一次性计算零值比例
@@ -252,7 +252,8 @@ class RLOptimizer(BaseOptimizer):
         """
         super().__init__(n_trials=n_trials, cv_folds=cv_folds, random_state=random_state,
                          verbose=kwargs.get('verbose', True),
-                         trial_timeout=kwargs.get('trial_timeout', 120))
+                         trial_timeout=kwargs.get('trial_timeout', 120),
+                         fold_type=kwargs.get('fold_type', 'default'))
         self.lr = learning_rate
         self.gamma = gamma
         self.epsilon_start = epsilon_start
@@ -411,6 +412,9 @@ class RLOptimizer(BaseOptimizer):
                     model_key, next_params, X, y, task_type, metric,
                     cache, subset_fraction
                 )
+            except TimeoutError as e:
+                log_warning(f"[RLOptimizer] 单次评估超时，停止该模型的后续尝试: {e}")
+                break
             except Exception as e:
                 log_warning(f"[RLOptimizer] 评估失败 trial={trial+1}: {e}")
                 score = best_score - 1.0
@@ -532,7 +536,7 @@ class RLOptimizer(BaseOptimizer):
                 target_net.load_state_dict(policy_net.state_dict())
         
         # --- 并行最终验证: 对 top-K 唯一配置用全量数据重新评估 ---
-        if self.parallel_eval and TORCH_AVAILABLE:
+        if self.parallel_eval and TORCH_AVAILABLE and history:
             best_score, best_params = self._parallel_final_eval(
                 model_key, history, X, y, task_type, metric, best_score, best_params
             )

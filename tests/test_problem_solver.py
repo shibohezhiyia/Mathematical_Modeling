@@ -32,6 +32,21 @@ class TestProblemSolverUniversal(unittest.TestCase):
         result = analyze_problem(desc)
         self.assertEqual(result['task_type'], 'prediction_forecast')
 
+    def test_data_requirements_is_not_misclassified_as_optimization(self):
+        desc = (
+            '为了更好地制定上述补货和定价决策，还需要采集哪些数据？'
+            '这些数据对解决上述问题有什么帮助？请给出意见和理由。'
+        )
+        result = analyze_problem(desc)
+        self.assertEqual(result['task_type'], 'data_requirements')
+        self.assertEqual(result['task_graph'][0]['task_type'], 'data_requirements')
+        self.assertEqual(result['task_graph'][0]['depends_on'], [])
+
+    def test_bare_motion_speed_does_not_force_optimization(self):
+        desc = '物体以恒定速度运动，建立位置随时间变化的微分方程并计算轨迹'
+        result = analyze_problem(desc)
+        self.assertEqual(result['task_type'], 'differential_equations')
+
     def test_carbon_evaluation(self):
         desc = '对10个城市的碳排放水平进行综合评价和排名'
         result = analyze_problem(desc)

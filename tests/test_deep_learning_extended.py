@@ -22,6 +22,7 @@ from core.deep_learning import TORCH_AVAILABLE, register_deep_learning_models, _
 if TORCH_AVAILABLE:
     from core.deep_learning import (
         TorchMLP, TorchCNN1D, TorchLSTM, TorchGRU, TorchAutoEncoder,
+        _regression_loss,
     )
     from core.nas import TorchNAS, TransferFeatureExtractor
     from core.modeling_engine import ModelLibrary, TaskType
@@ -30,6 +31,24 @@ if TORCH_AVAILABLE:
 # =============================================================================
 # TorchMLP
 # =============================================================================
+
+@unittest.skipUnless(TORCH_AVAILABLE, "PyTorch not available")
+class TestRegressionLossShapeSafety(unittest.TestCase):
+    def test_column_target_does_not_broadcast_against_flat_prediction(self):
+        outputs = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        targets = torch.tensor([[1.0], [2.0], [6.0]])
+
+        loss = _regression_loss(torch.nn.MSELoss(), outputs, targets)
+
+        self.assertAlmostEqual(loss.item(), 3.0)
+
+    def test_mismatched_output_size_fails_explicitly(self):
+        with self.assertRaisesRegex(ValueError, "元素数不一致"):
+            _regression_loss(
+                torch.nn.MSELoss(),
+                torch.tensor([1.0, 2.0]),
+                torch.tensor([1.0, 2.0, 3.0]),
+            )
 
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch not available")
 class TestTorchMLP(unittest.TestCase):
@@ -140,6 +159,7 @@ class TestTorchMLP(unittest.TestCase):
         self.assertEqual(len(preds), len(self.X_reg))
         # 回归输出应为浮点型
         self.assertTrue(np.issubdtype(preds.dtype, np.floating))
+        self.assertEqual(model.predict(self.X_reg.iloc[:1]).shape, (1,))
 
     def test_early_stopping(self):
         model = TorchMLP(
@@ -247,6 +267,7 @@ class TestTorchCNN1D(unittest.TestCase):
         preds = model.predict(self.X)
         self.assertEqual(len(preds), len(self.X))
         self.assertTrue(np.issubdtype(preds.dtype, np.floating))
+        self.assertEqual(model.predict(self.X.iloc[:1]).shape, (1,))
 
     def test_predict_proba(self):
         model = TorchCNN1D(
@@ -313,6 +334,7 @@ class TestTorchLSTM(unittest.TestCase):
         model.fit(self.X, self.y_reg)
         preds = model.predict(self.X)
         self.assertEqual(len(preds), len(self.X))
+        self.assertEqual(model.predict(self.X.iloc[:1]).shape, (1,))
 
     def test_sequence_reshaping(self):
         # LSTM 将 (batch, features) reshape 为 (batch, seq_len=1, features)
@@ -381,6 +403,7 @@ class TestTorchGRU(unittest.TestCase):
         model.fit(self.X, self.y_reg)
         preds = model.predict(self.X)
         self.assertEqual(len(preds), len(self.X))
+        self.assertEqual(model.predict(self.X.iloc[:1]).shape, (1,))
 
     def test_small_data(self):
         # n=10 -> train=8, batch_size=4 gives exactly 2 batches of 4.
@@ -547,6 +570,7 @@ class TestTorchNAS(unittest.TestCase):
         model.fit(self.X, self.y_reg)
         preds = model.predict(self.X)
         self.assertEqual(len(preds), len(self.X))
+        self.assertEqual(model.predict(self.X.iloc[:1]).shape, (1,))
 
     def test_predict_proba(self):
         model = TorchNAS(
