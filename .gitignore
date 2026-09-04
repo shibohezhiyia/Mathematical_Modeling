@@ -40,6 +40,8 @@ third_party/
 # 数据 / 日志 / 数据库
 data/
 workspace/
+workspace/config/.api_key
+workspace/**/.api_key
 logs/
 cache/
 temp/
@@ -50,6 +52,8 @@ temp/
 *.tsv
 *.csv
 !test_data.csv
+docs/API.md
+OPTIMIZATION_REPORT.md
 
 # 压缩包 / 归档
 *.zip
@@ -79,6 +83,9 @@ catboost_info/
 *.pem
 *.key
 secrets.json
+credentials.json
+*_secrets.json
+*.secret
 
 # ============================================================
 # IDE / 编辑器
