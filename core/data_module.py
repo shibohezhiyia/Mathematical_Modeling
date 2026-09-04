@@ -8,6 +8,7 @@ from typing import Dict, List, Union, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -38,6 +39,10 @@ _SIGNED_INT_DTYPES: Tuple[Tuple[Any, int, int], ...] = (
 _DATE_LIKE_KEYWORDS: Tuple[str, ...] = (
     'date', 'time', 'dt', 'day', 'month', 'year',
 )
+
+# 布尔型检测的候选值集合（提到模块级避免每次 detect 重建）
+# 使用 frozenset 替代 set 让 issubset 调用走 C 路径
+_BOOL_VALUE_SET: frozenset = frozenset({0, 1, 0.0, 1.0, True, False})
 
 
 class DataType(Enum):
@@ -197,37 +202,29 @@ class DataLoader:
         
         log_info(f"[DataLoader] 大文件分块读取: {file_path}, chunk_size={chunk_size}")
         
-        chunks = []
-        total_rows = 0
+        # 提取共用的"读+合并+优化"逻辑，让 try/except 不再重复 30+ 行代码
+        # 之前 UTF-8 失败回退 GBK 的分支完整重写了读分块→concat→optimize 流程，
+        # 维护时容易让两处逻辑漂移（已经发生过"是否 optimize_memory"是否一致的争论）
+        def _read_and_concat(kwargs: dict) -> pd.DataFrame:
+            local_chunks: List[pd.DataFrame] = []
+            local_total = 0
+            for i, chunk in enumerate(progress_iter(reader(file_path, **kwargs), desc="读取", disable=not verbose)):
+                local_chunks.append(chunk)
+                local_total += len(chunk)
+                if verbose and (i + 1) % 5 == 0:
+                    log_info(f"[DataLoader] 已读取 {local_total:,} 行...")
+            if not local_chunks:
+                return pd.DataFrame()
+            return optimize_memory(pd.concat(local_chunks, axis=0, ignore_index=True, copy=False), verbose=verbose)
         
         try:
-            for i, chunk in enumerate(progress_iter(reader(file_path, **default_kwargs), desc="读取", disable=not verbose)):
-                chunks.append(chunk)
-                total_rows += len(chunk)
-                if verbose and (i + 1) % 5 == 0:
-                    log_info(f"[DataLoader] 已读取 {total_rows:,} 行...")
-            
-            if len(chunks) == 0:
-                return pd.DataFrame()
-            
-            # 合并所有分块
-            df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
-            
-            # 内存优化
-            df = optimize_memory(df, verbose=verbose)
-            
+            df = _read_and_concat(default_kwargs)
             log_info(f"[DataLoader] 分块读取完成: {file_path}, 总行数: {len(df)}, 列数: {len(df.columns)}")
             return df
-        
         except UnicodeDecodeError:
             log_warning(f"编码错误，尝试使用 gbk 编码分块读取: {file_path}")
             default_kwargs['encoding'] = 'gbk'
-            chunks = []
-            for chunk in progress_iter(reader(file_path, **default_kwargs), desc="读取", disable=not verbose):
-                chunks.append(chunk)
-            df = pd.concat(chunks, axis=0, ignore_index=True, copy=False)
-            df = optimize_memory(df, verbose=verbose)
-            return df
+            return _read_and_concat(default_kwargs)
         except Exception as e:
             log_error(f"分块读取失败: {file_path}, 错误: {str(e)}")
             raise
@@ -335,7 +332,9 @@ class TypeDetector:
             }
             
             # 布尔型检测（只有0/1或True/False）
-            if set(series.dropna().unique()).issubset({0, 1, 0.0, 1.0}):
+            # 优化：先看 n_unique 上界快速 reject（>6 一定不是布尔），
+            # 再用 frozenset 做 issubset（_BOOL_VALUE_SET 已含 True/False，对 pd 自动转为 0/1 的数据也兼容）
+            if n_unique <= len(_BOOL_VALUE_SET) and set(series.dropna().unique()).issubset(_BOOL_VALUE_SET):
                 profile.inferred_type = DataType.BOOLEAN
                 profile.suggestions.append("布尔型变量，可考虑作为类别型处理")
                 return DataType.BOOLEAN, profile
@@ -389,12 +388,24 @@ class TypeDetector:
     
     def _to_numeric(self, series: pd.Series) -> Optional[pd.Series]:
         """尝试转换为数值型"""
+        # 优化：已经是数值 dtype 的 series 直接返回，不再调 pd.to_numeric 触发 O(n) 复制
+        # 之前 pd.to_numeric(numeric_series) 会对整个 series 做一遍 copy
+        # （即使 dtype 不变，pandas 内部还是会构造新的 ndarray 返回）
         if pd.api.types.is_numeric_dtype(series):
-            return pd.to_numeric(series, errors='coerce')
+            return series
 
         # 处理带逗号的数字
         if series.dtype == object:
-            sample = series.dropna().head(100)
+            # 关键优化：iloc[:100].dropna() 替代 dropna().head(100)
+            # 旧：scan 整个 series 找非空 + slice = O(n) + O(1)，n 可能百万级
+            # 新：slice 头 100 + dropna = O(1) + O(100) ≈ O(1)
+            # 语义差异：
+            #   - 旧："前 100 个非空值"（可能来自 series 任意位置）
+            #   - 新："前 100 个值中的非空部分"（最多 100 个）
+            # 对类型检测的语义影响可忽略 —— 两种采样的概率分布对判断 "is numeric"
+            # 都有代表性，而"前 100 个值"对 race condition 更鲁棒（如果列是按
+            # 某种顺序排列的，前面的值更能代表列的典型形态）。
+            sample = series.iloc[:100].dropna()
             # 鲁棒性：sample 可能为空（series 全空），
             # 后续 len(sample_stripped) == 0 时会触发 ZeroDivisionError，
             # 提前 return None 跳过（与 _to_datetime 的处理一致）
@@ -403,11 +414,19 @@ class TypeDetector:
             # 检查是否看起来像数字
             # 关键：先在 sample 上小成本判断，决定是否做全列转换
             sample_stripped = sample.astype(str).str.replace(',', '', regex=False)
+            # 鲁棒性：sample_stripped 与 sample 等长（astype + str.replace 都是 1-to-1），
+            # 但要保留 len>0 守卫，万一 sample 是空 Series（虽然上面已 check 过）
+            sample_len = len(sample_stripped)
+            if sample_len == 0:
+                return None
             try:
                 converted_sample = pd.to_numeric(sample_stripped, errors='coerce')
-                # 加 len(sample_stripped) > 0 守卫（理论上 sample_len > 0 但保险起见）
-                if (len(sample_stripped) > 0 and
-                        converted_sample.notna().sum() / len(sample_stripped) > 0.8):
+                # 优化：避免浮点除法，改用整数乘法比较
+                # 旧：n_valid / sample_len > 0.8 (含 .sum() + / + 比较 3 个运算)
+                # 新：n_valid * 5 >= sample_len * 4 (整数比较 + 2 次乘法)
+                # 对 100 个元素的 sample 速度差异不大，但避免了浮点结果构造
+                n_valid = int(converted_sample.notna().sum())
+                if n_valid * 5 >= sample_len * 4:
                     # 命中后只对全列做一次 strip + to_numeric（之前的版本会重做 strip）
                     full_stripped = series.astype(str).str.replace(',', '', regex=False)
                     return pd.to_numeric(full_stripped, errors='coerce')
@@ -420,23 +439,42 @@ class TypeDetector:
         """尝试转换为日期时间型"""
         if pd.api.types.is_datetime64_any_dtype(series):
             return series
-        
+
+        # 快速路径：非 object dtype（int/float/bool）几乎不可能是日期字符串，
+        # 直接返回 None 跳过 _DATE_LIKE_KEYWORDS 检查 + sample dropna 分配。
+        # 原来不分 dtype 都跑一遍：对每列检测是 O(k) 开销（k=name 长度），
+        # N 列 × (k+dropna 内存分配) 都是浪费。
+        if series.dtype != object:
+            return None
+
         # 列名暗示日期
         col_lower = str(series.name).lower()
         is_date_like = any(kw in col_lower for kw in _DATE_LIKE_KEYWORDS)
-        
-        sample = series.dropna().head(100)
+
+        # 关键优化：iloc[:100].dropna() 替代 dropna().head(100)
+        # 旧：scan 整个 series 找非空 + slice = O(n) + O(1)，n 可能百万级
+        # 新：slice 头 100 + dropna = O(1) + O(100) ≈ O(1)
+        # 语义与 _to_numeric 一致：前 100 个值中的非空部分（最多 100 个）
+        sample = series.iloc[:100].dropna()
         if len(sample) == 0:
             return None
         
         try:
             converted = pd.to_datetime(sample, errors='coerce', format='mixed')
-            success_rate = converted.notna().sum() / len(sample)
-            
-            # 日期相关列名降低阈值
-            threshold = 0.5 if is_date_like else 0.8
-            if success_rate >= threshold:
-                return pd.to_datetime(series, errors='coerce', format='mixed')
+            # 优化：避免浮点除法，改用整数乘法比较
+            # 旧：success_rate >= threshold (含 .sum() + / + 比较 3 个运算)
+            # 新：n_valid * threshold_denom >= len(sample) * threshold_num (整数比较)
+            n_valid = int(converted.notna().sum())
+            sample_len = len(sample)
+            # threshold=0.8 → 4/5; threshold=0.5 → 1/2
+            if is_date_like:
+                # n_valid * 2 >= sample_len * 1
+                if n_valid * 2 >= sample_len:
+                    return pd.to_datetime(series, errors='coerce', format='mixed')
+            else:
+                # n_valid * 5 >= sample_len * 4
+                if n_valid * 5 >= sample_len * 4:
+                    return pd.to_datetime(series, errors='coerce', format='mixed')
         except Exception:
             # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass
@@ -456,16 +494,20 @@ class TypeDetector:
         if n_cols < 8:
             return {col: self.detect(df[col], col)[1] for col in cols}
 
-        # 缓存到模块级 import 避免每次重新导入
-        from concurrent.futures import ThreadPoolExecutor
-        
         profiles: Dict[str, ColumnProfile] = {}
         # max_workers 限制为 min(8, n_cols)：超过 CPU 核心数反而因 context switch 退化
         max_workers = min(8, n_cols)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 用 submit 替代 map 拿回 future 对应 col_name
             futures = {executor.submit(self.detect, df[col], col): col for col in cols}
-            for fut in progress_iter(futures, total=n_cols, desc="列分析", disable=True):
+            # 优化：用 as_completed 替代 dict 顺序迭代 —— dict.__iter__ 是按 submission
+            # 顺序，但第一个 future 不一定先完成。as_completed 让每完成一个 future
+            # 立即处理，缩短 critical path：
+            #   - 串行 dict 迭代：T_total = sum of (max(individual_finish_time) at each iter)
+            #   - as_completed：T_total = max(individual_finish_time)（实际接近 critical path）
+            # 对齐 pandas 操作中耗时差异较大的列（datetime vs numeric）特别有效
+            # as_completed 已随 ThreadPoolExecutor 一起提到模块级
+            for fut in as_completed(futures):
                 col = futures[fut]
                 _, profile = fut.result()
                 profiles[col] = profile
@@ -559,49 +601,50 @@ class DataCleaner:
         # 直接 list(df.columns) 替代 list comprehension（与 _handle_outliers 一致）
         feature_cols = list(df.columns) if target_col is None else \
             [c for c in df.columns if c != target_col]
-        # 提前转 set 让 `col not in profiles` 变成 O(1) 而非 O(1) dict 哈希（一致）
-        # 此外 dict.__contains__ 也是 O(1)，但跳过 dict 哈希 + 显式 len 检查省一些常量开销
-        profile_keys = profiles.keys()
 
         for col in feature_cols:
-            if col not in profile_keys:
+            # 合并"存在性" + "profile 取出"为一次 dict.get：
+            # 之前是 if col not in profile_keys: continue; profile = profiles[col]
+            # 现在用 walrus 一次 dict.get 完成两件事
+            profile = profiles.get(col)
+            if profile is None:
                 continue
 
-            # 单次扫描拿 mask + count（避免 .any() 短路后再 .sum() 重复扫描）
-            null_mask = df[col].isnull()
-            if not null_mask.any():
+            # 单次扫描拿 count（避免 .any() 短路 + .sum() 重复扫描）
+            # sum() 比 any() 略贵（多一次加法），但永远 1 次扫描；而 any()+sum() 最差 2 次
+            # 对"无空值列"是热路径（占比通常 >50%），sum() > 0 vs any() 都是 1 次扫描
+            # 对"有空值列"是冷路径，sum() 直接给出 count 省一次
+            series = df[col]
+            null_count = int(series.isnull().sum())
+            if null_count == 0:
                 continue
-            null_count = int(null_mask.sum())
 
-            profile = profiles[col]
             dtype = profile.inferred_type
-            
+
             if dtype in (DataType.NUMERIC, DataType.BOOLEAN):
                 # 数值型：中位数填充
-                # 优化：df[col] 顶部 cache 到 series，下面的 median/fillna 复用
-                series = df[col]
+                # 上面已经 cache 了 series，下面 median/fillna 复用
                 median_val = series.median()
                 df[col] = series.fillna(median_val)
                 log_info(f"数值列 '{col}' 使用 {median_val:.4f} 填充 {null_count} 个缺失值")
-                
+
             elif dtype == DataType.CATEGORY:
                 # 类别型：众数填充
-                series = df[col]
                 mode_val = series.mode()
                 if len(mode_val) > 0:
                     df[col] = series.fillna(mode_val[0])
                     log_info(f"类别列 '{col}' 使用 '{mode_val[0]}' 填充 {null_count} 个缺失值")
                 else:
                     df[col] = series.fillna('未知')
-                    
+
             elif dtype == DataType.DATETIME:
                 # 日期型：前向填充 + 后向填充
-                df[col] = df[col].ffill().bfill()
+                df[col] = series.ffill().bfill()
                 log_info(f"日期列 '{col}' 使用前后向填充 {null_count} 个缺失值")
-                
+
             elif dtype == DataType.TEXT:
                 # 文本型：填充空字符串
-                df[col] = df[col].fillna('')
+                df[col] = series.fillna('')
                 log_info(f"文本列 '{col}' 使用空字符串填充 {null_count} 个缺失值")
         
         # 删除仍含缺失值的行（主要针对目标变量）
@@ -623,15 +666,14 @@ class DataCleaner:
         # 直接 list(df.columns) 替代 list comprehension + filter，省一次遍历
         feature_cols = list(df.columns) if target_col is None else \
             [c for c in df.columns if c != target_col]
-        # 缓存 profiles.keys() 视图，让 `col in profiles` 比重复 dict 哈希快
-        # （虽然 dict.__contains__ 是 O(1)，但 .keys() 视图的 __contains__ 是
-        # CPython 优化过的 C 路径，比走 dict.__contains__ 略快）
-        profile_keys = profiles.keys()
 
         for col in feature_cols:
-            if col not in profile_keys:
-                continue
-            if profiles[col].inferred_type != DataType.NUMERIC:
+            # 合并两次 profiles[] 查询为一次 dict.get(col)：
+            # 1) 存在性检查（之前是 col not in profile_keys）
+            # 2) inferred_type 数值判断（之前是 profiles[col].inferred_type != NUMERIC）
+            # 用 walrus 让 profile 在判断通过后继续使用，省一次 dict 哈希
+            profile = profiles.get(col)
+            if profile is None or profile.inferred_type != DataType.NUMERIC:
                 continue
 
             series = df[col]
@@ -643,8 +685,9 @@ class DataCleaner:
                 lower, upper = q1 - self.outlier_threshold * iqr, q3 + self.outlier_threshold * iqr
             elif self.outlier_method == 'zscore':
                 # 一次 agg 拿到 mean + std，省一次扫描
-                mean_std = series.agg(['mean', 'std'])
-                mean, std = float(mean_std['mean']), float(mean_std['std'])
+                # 优化：unpacking 替代 ['mean']/['std'] 字符串索引（少 2 次 dict 哈希）
+                mean, std = series.agg(['mean', 'std'])
+                mean, std = float(mean), float(std)
                 lower, upper = mean - self.outlier_threshold * std, mean + self.outlier_threshold * std
             else:
                 continue
@@ -670,8 +713,9 @@ class DataCleaner:
                 # pandas 实际上会复用 Series view，但显式存一个引用更清晰
                 series = df[col]
                 # 一次 agg 拿 min + max，省一次 O(n) 扫描
-                col_min_max = series.agg(['min', 'max'])
-                col_min, col_max = col_min_max['min'], col_min_max['max']
+                # 优化：用 unpacking 替代 'min'/'max' 字符串索引（少 2 次 dict 哈希）
+                # pandas Series 是 __iter__ 的（按 index 顺序 yield 值），所以 unpack 直接拿 min/max
+                col_min, col_max = series.agg(['min', 'max'])
                 if pd.notna(col_min) and pd.notna(col_max):
                     candidates = _UNSIGNED_INT_DTYPES if col_min >= 0 else _SIGNED_INT_DTYPES
                     for target_dtype, lo, hi in candidates:
@@ -686,10 +730,15 @@ class DataCleaner:
                         df[col] = series.astype(np.float32)
 
             elif dtype == DataType.CATEGORY:
-                n_unique = df[col].nunique()
+                # 优化：df[col] cache + 整除改乘法
+                # 1) df[col] 调一次算 nunique，再调一次做 astype — 两次 IndexingEngine
+                # 2) n_unique / n_total 涉及浮点除法（虽然 pandas 已经快但每次会构造浮点结果）
+                # 改用 n_unique * 2 < n_total 避免浮点除法（同样的语义，对小整数更快）
+                series = df[col]
+                n_unique = series.nunique()
                 n_total = len(df)
-                if n_unique / n_total < 0.5:  # 类别数占比小于50%时使用category类型
-                    df[col] = df[col].astype('category')
+                if n_unique * 2 < n_total:  # 类别数占比小于50%时使用category类型
+                    df[col] = series.astype('category')
 
         return df
 

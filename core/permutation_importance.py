@@ -11,7 +11,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.inspection import permutation_importance
+from sklearn.inspection import permutation_importance as _sk_permutation_importance
 
 warnings.filterwarnings('ignore')
 
@@ -76,7 +76,7 @@ def compute_permutation_importance(
     model_copy.fit(X_train, y_train)
 
     # 计算 PI
-    result = sk_pi(
+    result = _sk_permutation_importance(
         model_copy, X_val, y_val,
         scoring=scoring,
         n_repeats=n_repeats,

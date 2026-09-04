@@ -81,11 +81,12 @@ def _create_kernel_approximation(X_tr, X_val, orig_kernel, kernel_params, n_comp
         try:
             # 使用随机 SVD 快速估计有效秩
             from sklearn.utils.extmath import randomized_svd
-            U, S, Vt = randomized_svd(X_tr.values, n_components=min(50, n_samples, n_features), random_state=42)
+            # 只关心奇异值 S：U/Vt 不需要，用 _ 占位避免一次性分配 (n, k) 和 (k, m) 数组
+            _, S, _ = randomized_svd(X_tr.values, n_components=min(50, n_samples, n_features), random_state=42)
             # 有效秩：累积奇异值能量达到 90% 的位置
-            total_energy = np.sum(S ** 2)
+            total_energy = float(np.sum(S ** 2))
             cumsum = np.cumsum(S ** 2)
-            effective_rank = np.searchsorted(cumsum, 0.9 * total_energy) + 1
+            effective_rank = int(np.searchsorted(cumsum, 0.9 * total_energy)) + 1
             # 自适应 n_components：有效秩的 1.5~3 倍，但不超过样本数的 1/4
             adaptive_n = min(max(int(effective_rank * 2), 128), n_samples // 4, KERNEL_APPROX_COMPONENTS)
             n_components = min(n_components, adaptive_n)
@@ -2464,6 +2465,12 @@ class ModelingEngine:
             return EnsembleMethod(normalized)
         except ValueError as exc:
             raise ValueError(f"不支持的融合策略: {value}") from exc
+    # 模型成本分类：这些模型在大数据上训练非常慢
+    # 用 frozenset 替代普通 set 让 _is_expensive_model 成员查找 O(1) 且不可变
+    _EXPENSIVE_MODELS = frozenset({
+        'svr', 'svm', 'knn',
+        'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'tabnet',
+    })
 
     def _apply_large_data_model_guards(self, models: Dict[str, Any], task_type: TaskType, n_samples: int) -> Dict[str, Any]:
         """在用户未指定模型时，为大数据选择有界复杂度的候选集。"""
@@ -2534,7 +2541,7 @@ class ModelingEngine:
         return max(min(configured, 100), adaptive)
 
     def _is_expensive_model(self, model_key: str) -> bool:
-        return model_key in {'svr', 'svm', 'knn', 'torch_mlp', 'torch_cnn1d', 'torch_lstm', 'torch_gru', 'torch_nas', 'tabnet'}
+        return model_key in self._EXPENSIVE_MODELS
 
     def _get_hyperopt_sample(self, X: pd.DataFrame, y: pd.Series, model_key: str) -> Tuple[pd.DataFrame, pd.Series]:
         """对慢模型的超参优化使用子样本，提高搜索速度。"""

@@ -13,6 +13,7 @@
 
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from collections import defaultdict
 
 import pandas as pd
 
@@ -319,7 +320,6 @@ class AutoMissingPipeline:
         
         # 统计摘要
         # 用 defaultdict 替代 dict.get(k, 0) + 1 模式，省一次 dict 哈希 + 显式 fallback
-        from collections import defaultdict
         pattern_counts: Dict[str, int] = defaultdict(int)
         strategy_counts: Dict[str, int] = defaultdict(int)
         total_missing_handled = 0
