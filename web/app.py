@@ -4365,7 +4365,13 @@ def api_model_snapshot():
         from core.model_versioning import save_snapshot
         exp_rows = list_experiments(limit=1)
         exp_id = exp_rows[0]['id'] if exp_rows else 0
-        sid = save_snapshot(exp_id, model_key, target_cv.fitted_models[-1], metadata={'score': getattr(target_cv, 'cv_score', None)})
+        sid = save_snapshot(
+            exp_id,
+            model_key,
+            target_cv.fitted_models[-1],
+            metadata={'score': getattr(target_cv, 'cv_score', None)},
+            owner_id=session.get('sid'),
+        )
         return jsonify({'success': True, 'snapshot_id': sid})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -4381,7 +4387,7 @@ def api_model_rollback():
         return jsonify({'success': False, 'error': 'snapshot_id required'}), 400
     try:
         from core.model_versioning import load_snapshot
-        model = load_snapshot(snapshot_id)
+        model = load_snapshot(snapshot_id, owner_id=session.get('sid'))
         if model is None:
             return jsonify({'success': False, 'error': 'Snapshot not found'}), 404
         sdata['rollback_model'] = model

@@ -41,6 +41,16 @@ class TestModelVersioning(unittest.TestCase):
         self.assertTrue(mv.delete_snapshot(sid))
         self.assertIsNone(mv.load_snapshot(sid))
 
+    def test_snapshot_owner_isolation(self):
+        sid = mv.save_snapshot(1, 'private', {'value': 7}, owner_id='session-a')
+
+        self.assertEqual(mv.load_snapshot(sid, owner_id='session-a'), {'value': 7})
+        self.assertIsNone(mv.load_snapshot(sid, owner_id='session-b'))
+        self.assertEqual(len(mv.list_snapshots(owner_id='session-a')), 1)
+        self.assertEqual(mv.list_snapshots(owner_id='session-b'), [])
+        self.assertFalse(mv.delete_snapshot(sid, owner_id='session-b'))
+        self.assertTrue(mv.delete_snapshot(sid, owner_id='session-a'))
+
 
 if __name__ == '__main__':
     unittest.main()

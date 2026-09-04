@@ -11,7 +11,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.inspection import permutation_importance as _sk_permutation_importance
+from sklearn.inspection import permutation_importance
 
 warnings.filterwarnings('ignore')
 
@@ -43,8 +43,6 @@ def compute_permutation_importance(
     Returns:
         DataFrame[feature, importance, std]
     """
-    sk_pi = permutation_importance
-
     # 排列重要性需要约 n_features * n_repeats 次预测，其复杂度很容易
     # 超过主训练。它只用于解释，不应无限消耗建模资源。
     if max_samples is not None and len(X) > max_samples:
@@ -76,7 +74,7 @@ def compute_permutation_importance(
     model_copy.fit(X_train, y_train)
 
     # 计算 PI
-    result = _sk_permutation_importance(
+    result = permutation_importance(
         model_copy, X_val, y_val,
         scoring=scoring,
         n_repeats=n_repeats,
