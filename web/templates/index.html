@@ -6,7 +6,7 @@
     <title>Mathematical Modeling - 智能研究助手</title>
     <script src="{{ url_for('static', filename='vendor/echarts.min.js') }}?v=5.5.0"></script>
     <!-- echarts-gl 按需动态加载，默认不引入 -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=15">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=16">
 </head>
 <body>
     <!-- 顶部标题栏 -->
@@ -100,7 +100,19 @@
                 
                 <!-- 建模助手 -->
                 <div class="card research-card" style="margin-top:16px;">
-                    <h3>🧠 数学建模研究助手</h3>
+                    <div class="research-title-row">
+                        <h3>🧠 数学建模研究助手</h3>
+                        <span class="research-help">
+                            <button class="research-help-trigger" type="button"
+                                    aria-label="查看功能测试提示"
+                                    aria-describedby="research-help-popup">?</button>
+                            <span class="research-help-popup" id="research-help-popup" role="tooltip">
+                                <strong>功能测试开发中喵，up猪菜菜喵，暂时不保证输出内容准确性喵</strong>
+                                <img src="{{ url_for('static', filename='images/research-assistant-notice.gif') }}"
+                                     alt="研究助手功能测试提示表情包">
+                            </span>
+                        </span>
+                    </div>
                     <p style="font-size:13px;color:var(--text-light);margin-bottom:10px;">输入完整题目；附件可选。有数据时执行多表分析，无数据时从题面编译通用数学 IR、算子图和可执行模型，并主动寻找反证。论文写作不在此阶段自动执行。</p>
                     <div class="form-row">
                         <div class="form-group" style="flex:1;">
