@@ -370,13 +370,16 @@ class TypeDetector:
         
         # 类别型 vs 文本型
         non_null = series.dropna().astype(str)
-        avg_length = non_null.str.len().mean()
-        
+        # 优化：原代码 `non_null.str.len().mean()` + `non_null.str.len().max()` 是两次
+        # 独立 O(n) 字符串长度计算。改用单次 agg 把 mean/max 合并为一次扫描。
+        length_stats = non_null.str.len().agg(['mean', 'max'])
+        avg_length = length_stats['mean']
+
         if avg_length > self.text_length_threshold or profile.unique_rate > self.category_threshold:
             profile.inferred_type = DataType.TEXT
             profile.stats = {
                 'avg_length': avg_length,
-                'max_length': non_null.str.len().max()
+                'max_length': length_stats['max']
             }
             profile.suggestions.append("文本型数据，建议进行向量化或提取关键词")
         else:
@@ -386,7 +389,7 @@ class TypeDetector:
             }
             if n_unique > 50:
                 profile.suggestions.append(f"类别数较多({n_unique})，建议考虑目标编码或合并稀有类别")
-        
+
         return profile.inferred_type, profile
     
     def _to_numeric(self, series: pd.Series) -> Optional[pd.Series]:
