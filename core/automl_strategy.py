@@ -18,6 +18,12 @@ _SMALL_DATA_SAMPLES = 1_000       # 小数据阈值
 _HIGH_COMPLEXITY = 70             # 高复杂度阈值（满分 100）
 _MEDIUM_COMPLEXITY = 60           # 中等复杂度阈值
 
+# 大数据场景下需要剔除的慢模型 frozenset：原代码 `m not in ['svm', 'knn']` 是
+# O(n) 列表扫描，提到模块级 frozenset 一次建表后变成 O(1) hash 查找。
+# n_models 通常 < 10，差异不大但保持 codebase 一致。
+_SLOW_MODELS_CLASSIFICATION = frozenset({'svm', 'knn'})
+_SLOW_MODELS_REGRESSION = frozenset({'svr', 'knn'})
+
 # 优化器 → 时间倍增映射：原代码每次 _estimate_time 调用都重建此 dict，提到模块级避免重复
 _OPTIMIZER_TIME_MULTIPLIER = {
     'random': 1.0,
@@ -159,7 +165,10 @@ class AutoMLStrategy:
 
             # 大数据：去掉慢模型
             if meta.n_samples > _BIG_DATA_SAMPLES:
-                base_models = [m for m in base_models if m not in ['svm', 'knn']]
+                # 优化：原代码 `m not in ['svm', 'knn']` 是 O(2) 列表线性扫描。
+                # 转 frozenset 一次建表，后续 m not in 是 O(1) hash 查找。
+                _slow_for_big = _SLOW_MODELS_CLASSIFICATION
+                base_models = [m for m in base_models if m not in _slow_for_big]
 
             # 高维：把线性模型放最前（'lr' 必然已在 base_models，insert(0, 'lr') 是 no-op，但保留
             # 兜底逻辑以防 base_models 初始列表未来被修改时漏掉 'lr'）
@@ -185,7 +194,9 @@ class AutoMLStrategy:
 
             # 大数据：用 LinearSVR 替代 SVR，保留更多模型
             if meta.n_samples > _BIG_DATA_SAMPLES:
-                base_models = [m for m in base_models if m not in ['svr', 'knn']]
+                # 优化：同 classification 分支，用 frozenset 避免 m not in 列表扫描
+                _slow_for_big = _SLOW_MODELS_REGRESSION
+                base_models = [m for m in base_models if m not in _slow_for_big]
                 if 'linear_svr' not in base_models:
                     base_models.append('linear_svr')
 
