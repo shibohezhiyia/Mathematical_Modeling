@@ -88,7 +88,6 @@ class AutoMissingPipeline:
         set_workspace_config(allow_disk_write=self.config.allow_disk_write)
         
         # 状态
-        self.raw_df: Optional[pd.DataFrame] = None
         self.train_df: Optional[pd.DataFrame] = None
         self.test_df: Optional[pd.DataFrame] = None
         self.column_profiles: Dict[str, ColumnMissingProfile] = {}
@@ -107,7 +106,9 @@ class AutoMissingPipeline:
             (train_df, test_df, report)
             - test_df 为 None 表示无法分离或没有测试集
         """
-        self.raw_df = df.copy()
+        # 优化：原代码 self.raw_df = df.copy() 是写后从不读的 dead state
+        # （其他方法用 _generate_report 的 raw_df 参数，不读 self.raw_df），
+        # 省去一次 O(n) 的 DataFrame 复制。
         log_info(f"=" * 60)
         log_info("自动缺失处理流程启动")
         log_info(f"输入数据: {df.shape}")
@@ -229,22 +230,6 @@ class AutoMissingPipeline:
             log_warning("未能自动识别目标列，将整份数据作为训练集处理")
         
         return None
-    
-    def _split_train_test(self, df: pd.DataFrame, 
-                          target_col: Optional[str]) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
-        """
-        分离训练集和测试集
-        
-        基于目标列：非空为训练，空为测试
-        """
-        if target_col is None or target_col not in df.columns:
-            return df, None
-        
-        train_mask = df[target_col].notna()
-        train_df = df[train_mask].copy()
-        test_df = df[~train_mask].copy() if (~train_mask).any() else None
-        
-        return train_df, test_df
     
     def _classify_all_missing(self, df: pd.DataFrame,
                               target_col: Optional[str]) -> Dict[str, ColumnMissingProfile]:
