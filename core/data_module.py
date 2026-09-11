@@ -290,7 +290,10 @@ class TypeDetector:
         profile.unique_rate = n_unique / n_total if n_total > 0 else 0
         # 复用 null_mask 避免再扫一次：取非空值的前 5 个
         non_null = series[~null_mask]
-        profile.sample_values = non_null.head(5).tolist()
+        # 优化：iloc[:5] vs head(5) — head() 是 iloc[:n] 的语义包装，
+        # 但 head() 内部有 positional/label index 的 type check；对默认
+        # RangeIndex 两者等价，但 iloc 直接走位置索引更明确且略快。
+        profile.sample_values = non_null.iloc[:5].tolist()
         
         # 空列检测
         if n_null == n_total or n_unique == 0:
