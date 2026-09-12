@@ -10,7 +10,10 @@ OUT="${MATHMODEL_SANDBOX_EVIDENCE_DIR:-${ROOT}/data/runtime/linux-sandbox}"
 mkdir -p "$OUT"
 
 command -v "$RUNTIME" >/dev/null || { echo "missing runtime: $RUNTIME" >&2; exit 2; }
-"$RUNTIME" build --pull=never -f "$ROOT/deploy/solver/Dockerfile" -t "$TAG" "$ROOT"
+# The hosted runner is disposable and may not have python:3.12-slim cached.
+# Pulling the pinned base tag is required for the first build; execution still
+# uses the resulting immutable digest and never pulls at runtime.
+"$RUNTIME" build --pull -f "$ROOT/deploy/solver/Dockerfile" -t "$TAG" "$ROOT"
 IMAGE="$($RUNTIME image inspect --format '{{.Id}}' "$TAG")"
 [[ "$IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "invalid image digest: $IMAGE" >&2; exit 3; }
 
