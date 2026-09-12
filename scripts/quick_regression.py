@@ -1,0 +1,128 @@
+"""Run the small deterministic regression set used before a commit."""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+
+
+QUICK_TESTS = [
+    "tests/test_primitive_runtime.py",
+    "tests/test_universal_math_solvers.py",
+    "tests/test_cegis_controller.py",
+    "tests/test_counterexample_protocol.py",
+    "tests/test_solver_runtime.py",
+    "tests/test_safe_code.py",
+    "tests/test_batch_candidate_evaluation.py",
+    "tests/test_numerical_stability.py",
+    "tests/test_property_testing.py",
+    "tests/test_parameter_uncertainty.py",
+    "tests/test_reversible_scaling.py",
+    "tests/test_input_snapshot.py",
+    "tests/test_variable_projection.py",
+    "tests/test_public_benchmark_catalog.py",
+    "tests/test_experiment_config.py",
+    "tests/test_baseline_staged_runner.py",
+    "tests/test_math_primitives_contract_matrix.py",
+    "tests/test_symbolic_discovery_benchmark.py",
+    "tests/test_differentiable_ir.py",
+    "tests/test_optimal_control.py",
+    "tests/test_synthetic_calibration.py",
+    "tests/test_candidate_metrics.py",
+    "tests/test_latent_state_benchmark.py",
+    "tests/test_paired_budget_benchmark.py",
+    "tests/test_cache_performance_benchmark.py",
+    "tests/test_worker_permissions.py",
+    "tests/test_probability_variance.py",
+    "tests/test_diagnostic_comparison.py",
+    "tests/test_observational_equivalence.py",
+    "tests/test_rewrite_certificate.py",
+    "tests/test_adversarial_cases.py",
+    "tests/test_axiom_candidate_filter.py",
+    "tests/test_observation_uncertainty.py",
+    "tests/test_numerical_strategy.py",
+    "tests/test_structure_reduction.py",
+    "tests/test_stream_plan.py",
+    "tests/test_work_queue.py",
+    "tests/test_preview_sampling.py",
+    "tests/test_cache_policy.py",
+    "tests/test_incremental_compile_cache.py",
+    "tests/test_split_integrity.py",
+    "tests/test_structure_extensions.py",
+    "tests/test_ablation_protocol.py",
+    "tests/test_benchmark_runner.py",
+    "tests/test_progressive_budget.py",
+    "tests/test_confirmation_budget.py",
+    "tests/test_failure_diagnosis.py",
+    "tests/test_hypothesis_controls.py",
+    "tests/test_modeling_policy.py",
+    "tests/test_stress_protocol.py",
+    "tests/test_sympy_backend.py",
+    "tests/test_reuse_plan.py",
+    "tests/test_efficiency_accounting.py",
+    "tests/test_persistent_compile_cache.py",
+    "tests/test_multitask_stress.py",
+    "tests/test_interactive_surface.py",
+    "tests/test_data_provenance.py",
+    "tests/test_discrete_exterior_calculus.py",
+    "tests/test_causal_dag.py",
+    "tests/test_comparison_protocol.py",
+    "tests/test_optional_backend_runtime.py",
+    "tests/test_multifidelity_runner.py",
+    "tests/test_rubric_review.py",
+    "tests/test_uncertainty_audit.py",
+    "tests/test_graph_benchmark.py",
+    "tests/test_conclusion_certificate.py",
+    "tests/test_blind_benchmark.py",
+    "tests/test_blind_statistics.py",
+    "tests/test_evaluation_source_audit.py",
+    "tests/test_holdout_intake.py",
+    "tests/test_holdout_binding.py",
+    "tests/test_search_ablation.py",
+    "tests/test_ude_fit.py",
+    "tests/test_shared_resource_quota.py",
+    "tests/test_benchmark_sources.py",
+    "tests/test_benchmark_material.py",
+    "tests/test_standard_comparison_plan.py",
+    "tests/test_acceptance_risk_gate.py",
+    "tests/test_information_value.py",
+    "tests/test_question_actions.py",
+    "tests/test_execution_readiness.py",
+    "tests/test_model_hypotheses.py",
+    "tests/test_structure_candidates.py",
+    "tests/test_external_benchmark_sources.py",
+    "tests/test_external_method_router.py",
+    "tests/test_external_method_runtime.py",
+    "tests/test_external_method_cegis.py",
+    "tests/test_external_method_comparison.py",
+    "tests/test_review_packet.py",
+    "tests/test_hidden_label_evaluation.py",
+    "tests/test_interaction_graph_screen.py",
+    "tests/test_module_catalog.py",
+    "tests/test_data_graph_bridge.py",
+    "tests/test_gnn_interaction_screen.py",
+    "tests/test_ude_neural_simulation.py",
+    "tests/test_optimization_cegis.py",
+    "tests/test_os_sandbox.py",
+    "tests/test_pde_discovery.py",
+    "tests/test_primitive_graph_runtime.py",
+    "tests/test_candidate_execution.py",
+    "tests/test_external_dataset_catalog.py",
+    "tests/test_external_data_benchmark.py",
+    "tests/test_evaluation_freeze.py",
+]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run bounded Mathematical_Modeling regression tests")
+    parser.add_argument("--full", action="store_true", help="run the complete pytest suite")
+    args = parser.parse_args()
+    command = [sys.executable, "-m", "pytest", "-q"]
+    if not args.full:
+        command.extend(QUICK_TESTS)
+    return subprocess.run(command, check=False).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

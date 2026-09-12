@@ -33,6 +33,111 @@ def generate_data_quality_report(
     return report
 
 
+def generate_streaming_data_quality_report(
+    file_path: str,
+    target_col: Optional[str] = None,
+    chunk_size: Optional[int] = None,
+    max_unique_per_column: int = 10_000,
+    **read_kwargs,
+) -> Dict[str, Any]:
+    """为超大 CSV/XLSX/Parquet 生成内存有界的基础质量报告。
+
+    这个入口故意不接受完整 ``DataFrame``，避免调用方先把大文件加载进内存。
+    可以精确计算的加法统计会直接报告；需要全局排序、成对比较或保存完整
+    分布的指标则保留原报告键并标为 ``deferred``，不会把近似值冒充精确结论。
+    """
+    # 延迟导入以保持 data_quality 模块的轻量性，并避免 data_module 的可选依赖
+    # 在仅使用小 DataFrame 报告时被强制加载。
+    from core.data_module import DataLoader
+
+    profile = DataLoader().profile_chunks(
+        file_path,
+        chunk_size=chunk_size,
+        max_unique_per_column=max_unique_per_column,
+        **read_kwargs,
+    )
+    columns = profile['columns']
+    missing_details = []
+    constants = []
+    high_cardinality = []
+    for name, item in columns.items():
+        null_percent = item['null_rate'] * 100
+        if item['null_count']:
+            missing_details.append({
+                'column': name,
+                'missing_count': int(item['null_count']),
+                'missing_percent': round(null_percent, 2),
+                'suggestion': 'Consider imputation or drop' if null_percent < 50 else 'Consider dropping column',
+            })
+        if item['unique_exact'] and item['unique_count'] <= 1:
+            value = item['sample_values'][0] if item['sample_values'] else 'N/A'
+            constants.append({'column': name, 'value': str(value)})
+        if item['unique_exact'] and profile['n_rows'] > 0:
+            ratio = item['unique_count'] / profile['n_rows']
+            if ratio >= 0.9:
+                high_cardinality.append({
+                    'column': name,
+                    'unique_count': int(item['unique_count']),
+                    'unique_ratio': round(ratio, 4),
+                })
+
+    missing_details.sort(key=lambda row: row['missing_percent'], reverse=True)
+    deferred = list(profile.get('requires_full_scan', []))
+    report: Dict[str, Any] = {
+        'n_rows': profile['n_rows'],
+        'n_columns': profile['n_columns'],
+        'memory_mb': None,
+        'streaming': True,
+        'missing_values': {
+            'total_missing_cells': int(sum(item['null_count'] for item in columns.values())),
+            'columns_with_missing': len(missing_details),
+            'details': missing_details,
+        },
+        'duplicates': {
+            'status': 'deferred',
+            'duplicate_rows': None,
+            'duplicate_percent': None,
+            'suggestion': 'Requires an explicit external-memory or full-scan duplicate check',
+        },
+        'outliers': {
+            'status': 'deferred',
+            'total_outliers': None,
+            'columns_with_outliers': None,
+            'details': [],
+        },
+        'correlations': {
+            'status': 'deferred',
+            'high_correlation_pairs': [],
+            'target_correlations': [],
+        },
+        'constant_columns': {'count': len(constants), 'columns': constants},
+        'high_cardinality': {'count': len(high_cardinality), 'columns': high_cardinality},
+        'target_leakage': {
+            'status': 'deferred',
+            'count': None,
+            'columns': [],
+        },
+        'deferred_checks': deferred,
+    }
+    if target_col and target_col in columns:
+        target = columns[target_col]
+        numeric = target.get('numeric_stats') or {}
+        if numeric:
+            report['target'] = {
+                'status': 'partial',
+                'type': 'regression',
+                **numeric,
+                'note': '分类分布、偏度和精确分位数需要完整扫描或有界近似',
+            }
+        else:
+            report['target'] = {
+                'status': 'partial',
+                'type': 'unknown',
+                'note': '目标列不是可直接聚合的数值列；类别分布需要完整扫描',
+            }
+    return report
+
+
 def _missing_value_report(df: pd.DataFrame) -> Dict[str, Any]:
     missing = df.isnull().sum()
     missing_pct = (missing / len(df) * 100).round(2)

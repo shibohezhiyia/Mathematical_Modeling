@@ -1,0 +1,219 @@
+{
+  "schema_version": "mathmodel.graph-search-bundle/v1",
+  "problem": {
+    "facts": [
+      {
+        "end": 110,
+        "id": "statement",
+        "start": 0,
+        "text": "Synthetic development example: infer a scalar relation from supplied numbers; this is not real-world evidence."
+      }
+    ],
+    "hard_constraint_ids": [],
+    "parent_hash": null,
+    "revision": 1,
+    "schema_version": "mathmodel.problem-contract/v1",
+    "statement": "Synthetic development example: infer a scalar relation from supplied numbers; this is not real-world evidence."
+  },
+  "experiment": {
+    "schema_version": "mathmodel.graph-experiment/v1",
+    "contract_hash": "74ab513900487affe452e94ceb0487ff10fde26f09fe273276cd58326df35457",
+    "template": {
+      "id": "initial",
+      "contract_hash": "74ab513900487affe452e94ceb0487ff10fde26f09fe273276cd58326df35457",
+      "nodes": [
+        {
+          "id": "x",
+          "op": "variable",
+          "inputs": [],
+          "type": {
+            "dtype": "real",
+            "shape": [],
+            "dimensions": {}
+          },
+          "attributes": {
+            "name": "x",
+            "role": "observed"
+          },
+          "assumption_ids": [
+            "mechanism"
+          ],
+          "context_fact_ids": [
+            "statement"
+          ]
+        },
+        {
+          "id": "y",
+          "op": "observation",
+          "inputs": [
+            "x"
+          ],
+          "type": {
+            "dtype": "real",
+            "shape": [],
+            "dimensions": {}
+          },
+          "attributes": {},
+          "assumption_ids": [
+            "mechanism"
+          ],
+          "context_fact_ids": [
+            "statement"
+          ]
+        }
+      ],
+      "outputs": [
+        "y"
+      ],
+      "assumptions": [
+        {
+          "id": "mechanism",
+          "text": "A dimensionless scalar mechanism on the declared domain; its structure is unknown."
+        }
+      ]
+    },
+    "domain": {
+      "x": [
+        -3,
+        3
+      ]
+    },
+    "parameter_bounds": {},
+    "training_cases": [
+      {
+        "id": "train_0",
+        "bindings": {
+          "x": -2
+        },
+        "expected": {
+          "y": 4
+        }
+      },
+      {
+        "id": "train_1",
+        "bindings": {
+          "x": -1
+        },
+        "expected": {
+          "y": 1
+        }
+      },
+      {
+        "id": "train_2",
+        "bindings": {
+          "x": 1
+        },
+        "expected": {
+          "y": 1
+        }
+      }
+    ],
+    "search_cases": [
+      {
+        "id": "search_0",
+        "bindings": {
+          "x": -1.5
+        },
+        "expected": {
+          "y": 2.25
+        }
+      },
+      {
+        "id": "search_1",
+        "bindings": {
+          "x": 0
+        },
+        "expected": {
+          "y": 0
+        }
+      },
+      {
+        "id": "search_2",
+        "bindings": {
+          "x": 0.5
+        },
+        "expected": {
+          "y": 0.25
+        }
+      },
+      {
+        "id": "search_3",
+        "bindings": {
+          "x": 2
+        },
+        "expected": {
+          "y": 4
+        }
+      }
+    ],
+    "properties": [],
+    "absolute_tolerance": 0.000001,
+    "relative_tolerance": 0.0001,
+    "probe_count": 4,
+    "seed": 42
+  },
+  "candidates": [
+    {
+      "id": "initial",
+      "contract_hash": "74ab513900487affe452e94ceb0487ff10fde26f09fe273276cd58326df35457",
+      "nodes": [
+        {
+          "id": "x",
+          "op": "variable",
+          "inputs": [],
+          "type": {
+            "dtype": "real",
+            "shape": [],
+            "dimensions": {}
+          },
+          "attributes": {
+            "name": "x",
+            "role": "observed"
+          },
+          "assumption_ids": [
+            "mechanism"
+          ],
+          "context_fact_ids": [
+            "statement"
+          ]
+        },
+        {
+          "id": "y",
+          "op": "observation",
+          "inputs": [
+            "x"
+          ],
+          "type": {
+            "dtype": "real",
+            "shape": [],
+            "dimensions": {}
+          },
+          "attributes": {},
+          "assumption_ids": [
+            "mechanism"
+          ],
+          "context_fact_ids": [
+            "statement"
+          ]
+        }
+      ],
+      "outputs": [
+        "y"
+      ],
+      "assumptions": [
+        {
+          "id": "mechanism",
+          "text": "A dimensionless scalar mechanism on the declared domain; its structure is unknown."
+        }
+      ]
+    }
+  ],
+  "budget": {
+    "max_candidates": 8,
+    "max_patch_attempts": 32,
+    "max_evaluations": 2000,
+    "per_candidate_evaluations": 500,
+    "wall_seconds": 60
+  },
+  "grammar_search": true
+}

@@ -2,11 +2,15 @@
 Unit tests for core/data_quality.py
 """
 import unittest
+import os
 
 import numpy as np
 import pandas as pd
 
-from core.data_quality import generate_data_quality_report
+from core.data_quality import (
+    generate_data_quality_report,
+    generate_streaming_data_quality_report,
+)
 
 
 class TestDataQualityReport(unittest.TestCase):
@@ -103,6 +107,30 @@ class TestDataQualityReport(unittest.TestCase):
         report = generate_data_quality_report(df, target_col='target')
         self.assertEqual(report['target_leakage']['count'], 1)
         self.assertEqual(report['target_leakage']['columns'][0]['column'], 'leak')
+
+    def test_streaming_report_marks_non_additive_checks_deferred(self):
+        from core.workspace_manager import get_workspace_manager
+
+        wm = get_workspace_manager()
+        directory = wm.create_temp_dir(prefix='quality_stream')
+        path = os.path.join(directory, 'data.csv')
+        frame = pd.DataFrame({
+            'value': np.arange(2105, dtype=float),
+            'group': ['a', 'b'] * 1052 + ['a'],
+            'missing': [None if i % 3 == 0 else i for i in range(2105)],
+        })
+        frame.to_csv(path, index=False)
+        report = generate_streaming_data_quality_report(
+            str(path), target_col='value', chunk_size=1000,
+            max_unique_per_column=10,
+        )
+        self.assertTrue(report['streaming'])
+        self.assertEqual(report['n_rows'], len(frame))
+        self.assertEqual(report['missing_values']['total_missing_cells'], 702)
+        self.assertEqual(report['duplicates']['status'], 'deferred')
+        self.assertEqual(report['outliers']['status'], 'deferred')
+        self.assertEqual(report['target']['status'], 'partial')
+        self.assertIn('correlations', report['deferred_checks'])
 
 
 if __name__ == '__main__':

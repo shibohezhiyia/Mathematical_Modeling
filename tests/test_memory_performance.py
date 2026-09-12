@@ -61,6 +61,23 @@ class TestChunkedLoading(unittest.TestCase):
         result = self.loader.load_chunked(path, chunk_size=200)
         self.assertEqual(len(result), 1000)
         self.assertEqual(list(result.columns), ['a', 'b', 'c'])
+
+    def test_materialized_chunk_load_has_explicit_row_cap(self):
+        path = os.path.join(self.test_dir, 'capped.csv')
+        pd.DataFrame({'a': range(6)}).to_csv(path, index=False)
+        with self.assertRaisesRegex(MemoryError, 'materialize=False'):
+            self.loader.load_chunked(path, chunk_size=2, max_materialize_rows=5)
+        lazy = self.loader.load_chunked(path, chunk_size=2, materialize=False,
+                                        max_materialize_rows=1)
+        self.assertEqual(sum(len(chunk) for chunk in lazy), 6)
+
+    def test_bounded_file_join_is_explicit_and_many_to_many_safe(self):
+        left = os.path.join(self.test_dir, 'left_join.csv')
+        right = os.path.join(self.test_dir, 'right_join.csv')
+        pd.DataFrame({'id': [1, 2, 1], 'x': [10, 20, 30]}).to_csv(left, index=False)
+        pd.DataFrame({'key': [1, 1, 3], 'v': [2, 4, 9]}).to_csv(right, index=False)
+        result = self.loader.bounded_join(left, right, left_on=['id'], right_on=['key'], chunk_size=2)
+        self.assertEqual(len(result), 4)
     
     def test_auto_chunk_disabled(self):
         """auto_chunk=False 时小文件正常加载"""
@@ -70,6 +87,43 @@ class TestChunkedLoading(unittest.TestCase):
         
         result = self.loader.load(path, auto_chunk=False)
         self.assertEqual(len(result), 100)
+
+    def test_explicit_lazy_load_does_not_materialize(self):
+        path = os.path.join(self.test_dir, 'lazy.csv')
+        pd.DataFrame({'A': range(1000), 'B': range(1000, 2000)}).to_csv(path, index=False)
+        chunks = self.loader.load(path, materialize=False, chunk_size=200)
+        self.assertFalse(isinstance(chunks, pd.DataFrame))
+        values = pd.concat(list(chunks), ignore_index=True)
+        self.assertEqual(len(values), 1000)
+        self.assertEqual(values.iloc[-1]['A'], 999)
+
+    def test_load_chunked_lazy_path_preserves_projection(self):
+        path = os.path.join(self.test_dir, 'lazy_chunked.csv')
+        pd.DataFrame({'keep': range(25), 'drop': ['x'] * 25}).to_csv(path, index=False)
+        chunks = self.loader.load_chunked(path, chunk_size=7, materialize=False, columns=['keep'])
+        pieces = list(chunks)
+        self.assertEqual(sum(len(piece) for piece in pieces), 25)
+        self.assertEqual(list(pieces[0].columns), ['keep'])
+
+    def test_data_module_stream_chunks_does_not_mutate_materialized_state(self):
+        path = os.path.join(self.test_dir, 'module_lazy.csv')
+        pd.DataFrame({'A': range(12)}).to_csv(path, index=False)
+        module = DataModule()
+        pieces = list(module.stream_chunks(path, chunk_size=5))
+        self.assertEqual(sum(len(piece) for piece in pieces), 12)
+        self.assertIsNone(module.raw_data)
+
+    def test_stream_reduce_keeps_only_reducer_state_and_reports_row_budget(self):
+        path = os.path.join(self.test_dir, 'reduce.csv')
+        pd.DataFrame({'value': range(25)}).to_csv(path, index=False)
+        result = self.loader.stream_reduce(
+            path, lambda state, chunk: state + int(chunk['value'].sum()),
+            0, chunk_size=6, max_rows=10,
+        )
+        self.assertEqual(result['state'], sum(range(10)))
+        self.assertEqual(result['rows'], 10)
+        self.assertEqual(result['status'], 'row_budget_exhausted')
+        self.assertFalse(result['materialized'])
     
     def test_chunked_encoding_fallback(self):
         """分块读取编码回退"""

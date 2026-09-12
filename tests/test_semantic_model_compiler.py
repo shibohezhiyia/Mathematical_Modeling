@@ -3,6 +3,7 @@
 import json
 
 import pytest
+import requests
 
 from core.mechanistic_modeling import MechanisticModelingEngine
 from core.semantic_model_compiler import (
@@ -10,6 +11,7 @@ from core.semantic_model_compiler import (
     SemanticCompilerConfig,
     SemanticModelCompiler,
     _attach_image_parts,
+    HttpSemanticBackend,
 )
 
 
@@ -192,3 +194,35 @@ def test_model_api_configuration_enforces_network_boundaries_and_hides_secret():
     assert config.public()["api_key_configured"] is True
     assert "top-secret" not in repr(config)
     assert "top-secret" not in json.dumps(config.public())
+
+
+def test_http_backend_retries_transient_failures_only_with_explicit_budget(monkeypatch):
+    class Response:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(response=self)
+
+        def iter_content(self, chunk_size=65536):
+            yield self._body
+
+    responses = [Response(503, b"{}"), Response(200, b'{"message":{"content":"{\\"hypotheses\\":[]}"}}')]
+    calls = []
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: (calls.append(kwargs) or responses.pop(0)))
+    config = SemanticCompilerConfig(provider="ollama", base_url="http://localhost:11434",
+                                    model_name="fixture", max_retries=1,
+                                    retry_backoff_seconds=0).validate()
+    result = HttpSemanticBackend(config).complete([{"role": "user", "content": "x"}])
+    assert result == '{"hypotheses":[]}'
+    assert len(calls) == 2 and responses == []
+    with pytest.raises(ValueError, match="retry budget"):
+        SemanticCompilerConfig(provider="callable", model_name="x", max_retries=True).validate()
+    with pytest.raises(ValueError, match="output token"):
+        SemanticCompilerConfig(provider="callable", model_name="x", max_output_tokens="512").validate()

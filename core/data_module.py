@@ -4,7 +4,9 @@
 import os
 import re
 import json
-from typing import Dict, List, Union, Optional, Tuple, Any
+import time
+import math
+from typing import Dict, List, Union, Optional, Tuple, Any, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
@@ -116,7 +118,9 @@ class DataLoader:
     def load(self, file_path: Union[str, os.PathLike],
              auto_chunk: bool = True,
              chunk_size: Optional[int] = None,
-             **kwargs) -> pd.DataFrame:
+             materialize: bool = True,
+             max_materialize_rows: Optional[int] = 2_000_000,
+             **kwargs) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
         """
         根据文件扩展名自动选择读取方式
         
@@ -126,6 +130,7 @@ class DataLoader:
             file_path: 文件路径
             auto_chunk: 是否自动分块读取大文件
             chunk_size: 分块行数，默认 50000
+            materialize: 是否把读取结果拼成一个 DataFrame；False 时返回惰性块迭代器
             **kwargs: 额外的读取参数
             
         Returns:
@@ -137,9 +142,15 @@ class DataLoader:
         if ext not in self.SUPPORTED_FORMATS:
             raise ValueError(f"不支持的文件格式: {ext}，支持的格式: {list(self.SUPPORTED_FORMATS.keys())}")
         
+        # 显式惰性模式永远不 materialize，避免调用方误以为 auto_chunk 会
+        # 自动解决内存问题。旧接口默认保持 DataFrame 返回行为。
+        if not materialize:
+            return self.iter_chunks(file_path, chunk_size=chunk_size, **kwargs)
+
         # 自动分块读取大文件
         if auto_chunk and self._should_chunk(file_path):
-            return self.load_chunked(file_path, chunk_size=chunk_size, **kwargs)
+            return self.load_chunked(file_path, chunk_size=chunk_size,
+                                     max_materialize_rows=max_materialize_rows, **kwargs)
         
         reader = self.SUPPORTED_FORMATS[ext]
         
@@ -168,7 +179,9 @@ class DataLoader:
     @timer
     def load_chunked(self, file_path: Union[str, os.PathLike],
                      chunk_size: Optional[int] = None,
-                     **kwargs) -> pd.DataFrame:
+                     materialize: bool = True,
+                     max_materialize_rows: Optional[int] = 2_000_000,
+                     **kwargs) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
         """
         分块读取大文件并合并
         
@@ -178,6 +191,7 @@ class DataLoader:
         Args:
             file_path: 文件路径
             chunk_size: 每块行数，默认 50000
+            materialize: 是否拼接所有块；False 时只返回惰性块迭代器
             **kwargs: 额外的读取参数
             
         Returns:
@@ -185,20 +199,31 @@ class DataLoader:
         """
         file_path = str(file_path)
         ext = os.path.splitext(file_path)[1].lower()
-        
+        if not materialize:
+            return self.iter_chunks(file_path, chunk_size=chunk_size, **kwargs)
+
+        if (max_materialize_rows is not None
+                and (isinstance(max_materialize_rows, bool)
+                     or not isinstance(max_materialize_rows, (int, np.integer))
+                     or int(max_materialize_rows) < 1)):
+            raise ValueError("max_materialize_rows 必须是正整数或 None")
+        if max_materialize_rows is not None:
+            max_materialize_rows = int(max_materialize_rows)
+
         if ext not in ['.csv', '.txt', '.tsv']:
             raise ValueError(f"分块读取不支持格式: {ext}，仅支持 csv/txt/tsv")
         
-        chunk_size = chunk_size or self.DEFAULT_CHUNK_SIZE
+        chunk_size = self._validate_chunk_size(chunk_size, self.DEFAULT_CHUNK_SIZE)
         reader = self.SUPPORTED_FORMATS[ext]
-        
+
+        # verbose 是 DataLoader 控制参数，不应透传给 pandas.read_csv。
+        verbose = bool(kwargs.pop('verbose', True))
+
         default_kwargs = {
             'encoding': self.encoding,
             'chunksize': chunk_size,
         }
         default_kwargs.update(kwargs)
-        
-        verbose = kwargs.pop('verbose', True)
         
         log_info(f"[DataLoader] 大文件分块读取: {file_path}, chunk_size={chunk_size}")
         
@@ -209,6 +234,11 @@ class DataLoader:
             local_chunks: List[pd.DataFrame] = []
             local_total = 0
             for i, chunk in enumerate(progress_iter(reader(file_path, **kwargs), desc="读取", disable=not verbose)):
+                if (max_materialize_rows is not None
+                        and local_total + len(chunk) > max_materialize_rows):
+                    raise MemoryError(
+                        "分块物化行数超过上限；请使用 materialize=False 或 stream_reduce"
+                    )
                 local_chunks.append(chunk)
                 local_total += len(chunk)
                 if verbose and (i + 1) % 5 == 0:
@@ -228,6 +258,336 @@ class DataLoader:
         except Exception as e:
             log_error(f"分块读取失败: {file_path}, 错误: {str(e)}")
             raise
+
+    @staticmethod
+    def _validate_chunk_size(chunk_size: Optional[int], default: int) -> int:
+        """校验分块大小，避免错误配置造成一次性读入过大数据。"""
+        value = default if chunk_size is None else chunk_size
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError("chunk_size 必须是正整数")
+        value = int(value)
+        # 过大违背分块读取的内存边界；小块仍允许用于测试、交互预览和窄表。
+        if value < 1 or value > 500_000:
+            raise ValueError("chunk_size 必须介于 1 和 500,000 行之间")
+        return value
+
+    def iter_chunks(self, file_path: Union[str, os.PathLike],
+                    chunk_size: Optional[int] = None,
+                    **kwargs) -> Iterator[pd.DataFrame]:
+        """以惰性迭代器读取 CSV/TSV/TXT、XLSX 或 Parquet。
+
+        该接口不会把块拼接回一个 DataFrame，调用方可以在每个块处理完后立即
+        释放它，从而把内存峰值从 ``O(总行数)`` 降为 ``O(chunk_size)``。
+        ``load``/``load_chunked`` 的历史行为保持不变；需要流式分析时显式使用
+        此接口或 :meth:`profile_chunks`。
+
+        CSV 的编码回退只发生在第一个块读取失败时；一旦已经向调用方产出数据，
+        再重启迭代器会造成重复结果，因此后续解码错误会原样抛出。
+        """
+        file_path = str(file_path)
+        ext = os.path.splitext(file_path)[1].lower()
+        chunk_size = self._validate_chunk_size(chunk_size, self.DEFAULT_CHUNK_SIZE)
+        verbose = bool(kwargs.pop('verbose', False))
+
+        if ext in {'.csv', '.txt', '.tsv'}:
+            read_kwargs = dict(kwargs)
+            requested_columns = read_kwargs.pop('columns', None)
+            if requested_columns is not None:
+                if 'usecols' in read_kwargs:
+                    raise ValueError("流式读取不能同时指定 columns 和 usecols")
+                read_kwargs['usecols'] = requested_columns
+            read_kwargs.setdefault('encoding', self.encoding)
+            read_kwargs.setdefault('low_memory', False)
+            read_kwargs['chunksize'] = chunk_size
+            if ext == '.tsv':
+                read_kwargs.setdefault('sep', '\t')
+
+            def _csv_iterator(options: Dict[str, Any]) -> Iterator[pd.DataFrame]:
+                reader = pd.read_csv(file_path, **options)
+                for index, chunk in enumerate(reader, start=1):
+                    if verbose and index % 5 == 0:
+                        log_info(f"[DataLoader] 流式读取已产出 {index * chunk_size:,} 行附近")
+                    yield chunk
+
+            try:
+                iterator = _csv_iterator(read_kwargs)
+                # 先取第一块，只有在完全没有产出时才安全地进行编码回退。
+                first = next(iterator, None)
+            except UnicodeDecodeError:
+                log_warning(f"编码错误，尝试使用 gbk 编码流式读取: {file_path}")
+                read_kwargs['encoding'] = 'gbk'
+                iterator = _csv_iterator(read_kwargs)
+                first = next(iterator, None)
+            if first is not None:
+                yield first
+                yield from iterator
+            return
+
+        if ext == '.xlsx':
+            try:
+                from openpyxl import load_workbook
+            except ImportError as exc:  # pragma: no cover - 环境缺少可选依赖时触发
+                raise ValueError("XLSX 流式读取需要安装 openpyxl") from exc
+            sheet_name = kwargs.pop('sheet_name', None)
+            requested_columns = kwargs.pop('columns', None)
+            if kwargs:
+                names = ', '.join(sorted(kwargs))
+                raise ValueError(f"XLSX 流式读取暂不支持参数: {names}；请使用 sheet_name/columns")
+            workbook = load_workbook(file_path, read_only=True, data_only=True)
+            try:
+                if sheet_name is None:
+                    worksheet = workbook.active
+                else:
+                    if sheet_name not in workbook.sheetnames:
+                        raise ValueError(f"Sheet不存在: {sheet_name}")
+                    worksheet = workbook[sheet_name]
+                rows = worksheet.iter_rows(values_only=True)
+                header = next(rows, None)
+                if header is None:
+                    return
+                names = [str(value) if value is not None else f"Unnamed: {index}"
+                         for index, value in enumerate(header)]
+                if requested_columns is None:
+                    selected_indices, selected_names = list(range(len(names))), names
+                else:
+                    requested = list(requested_columns)
+                    missing = [name for name in requested if name not in names]
+                    if missing:
+                        raise ValueError(f"XLSX 缺少列: {', '.join(map(str, missing))}")
+                    selected_indices = [names.index(name) for name in requested]
+                    selected_names = requested
+                buffer = []
+                for row in rows:
+                    buffer.append([row[index] if index < len(row) else None for index in selected_indices])
+                    if len(buffer) >= chunk_size:
+                        yield pd.DataFrame.from_records(buffer, columns=selected_names)
+                        buffer = []
+                if buffer:
+                    yield pd.DataFrame.from_records(buffer, columns=selected_names)
+            finally:
+                workbook.close()
+            return
+
+        if ext == '.parquet':
+            try:
+                import pyarrow.parquet as pq
+            except ImportError as exc:  # pragma: no cover - 环境缺少可选依赖时触发
+                raise ValueError("Parquet 流式读取需要安装 pyarrow") from exc
+            unsupported = set(kwargs) - {'columns'}
+            if unsupported:
+                names = ', '.join(sorted(unsupported))
+                raise ValueError(f"Parquet 流式读取暂不支持参数: {names}；请只传 columns")
+            parquet_file = pq.ParquetFile(file_path)
+            for batch in parquet_file.iter_batches(
+                    batch_size=chunk_size,
+                    columns=kwargs.get('columns')):
+                yield batch.to_pandas()
+            return
+
+        raise ValueError(
+            f"流式读取不支持格式: {ext}，仅支持 csv/txt/tsv/xlsx/parquet"
+        )
+
+    def bounded_join(self, left_file: Union[str, os.PathLike], right_file: Union[str, os.PathLike],
+                     *, left_on: List[str], right_on: Optional[List[str]] = None,
+                     right_columns: Optional[List[str]] = None,
+                     chunk_size: Optional[int] = None,
+                     max_right_rows: int = 500_000,
+                     max_output_rows: int = 2_000_000) -> pd.DataFrame:
+        """Join two files through lazy chunks with explicit output/memory caps.
+
+        This is intentionally separate from ``load``: callers must opt into a
+        bounded materialized result and receive a hard error instead of a
+        sampled or silently truncated relation.
+        """
+        from core.streaming_operations import bounded_stream_hash_join
+        return bounded_stream_hash_join(
+            self.iter_chunks(left_file, chunk_size=chunk_size),
+            self.iter_chunks(right_file, chunk_size=chunk_size),
+            left_on=left_on, right_on=right_on, right_columns=right_columns,
+            max_right_rows=max_right_rows, max_output_rows=max_output_rows,
+        )
+
+    def stream_reduce(self, file_path: Union[str, os.PathLike], reducer,
+                      initial_state: Any = None, chunk_size: Optional[int] = None,
+                      *, max_rows: Optional[int] = None,
+                      max_seconds: Optional[float] = None, **kwargs) -> Dict[str, Any]:
+        """Apply ``reducer(state, chunk)`` with bounded streaming resources.
+
+        The reducer owns the state representation, so callers can keep only
+        sufficient statistics instead of retaining every row.  Budget exits are
+        explicit and never reported as complete scans.
+        """
+        if not callable(reducer):
+            raise TypeError("reducer 必须是可调用对象")
+        if max_rows is not None:
+            if isinstance(max_rows, bool) or not isinstance(max_rows, (int, np.integer)) or max_rows < 1:
+                raise ValueError("max_rows 必须是正整数")
+            max_rows = int(max_rows)
+        if max_seconds is not None:
+            if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(float(max_seconds)) or max_seconds <= 0:
+                raise ValueError("max_seconds 必须是正数")
+            max_seconds = float(max_seconds)
+        started = time.monotonic()
+        state = initial_state
+        processed_rows = 0
+        chunk_count = 0
+        status = "complete"
+        for chunk in self.iter_chunks(file_path, chunk_size=chunk_size, **kwargs):
+            if max_seconds is not None and time.monotonic() - started >= max_seconds:
+                status = "time_budget_exhausted"
+                break
+            if max_rows is not None and processed_rows >= max_rows:
+                status = "row_budget_exhausted"
+                break
+            if max_rows is not None and processed_rows + len(chunk) > max_rows:
+                chunk = chunk.iloc[:max_rows - processed_rows].copy()
+            if len(chunk) == 0:
+                break
+            state = reducer(state, chunk)
+            processed_rows += len(chunk)
+            chunk_count += 1
+            if max_rows is not None and processed_rows >= max_rows:
+                status = "row_budget_exhausted"
+                break
+        return {
+            "state": state,
+            "status": status,
+            "rows": int(processed_rows),
+            "chunks": int(chunk_count),
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "budget": {"max_rows": max_rows, "max_seconds": max_seconds},
+            "materialized": False,
+        }
+
+    def profile_chunks(self, file_path: Union[str, os.PathLike],
+                       chunk_size: Optional[int] = None,
+                       max_unique_per_column: int = 10_000,
+                       sample_size: int = 5,
+                       **kwargs) -> Dict[str, Any]:
+        """对分块数据计算内存有界的数据画像。
+
+        行数、缺失数、数值列的 count/sum/mean/std/min/max 是精确聚合；唯一值
+        在未超过 ``max_unique_per_column`` 时精确，否则返回下界并显式标注
+        ``unique_exact=False``。分位数、相关系数等需要保存全量分布的统计量不在
+        此接口中伪造，返回 ``requires_full_scan`` 提醒上层另行处理。
+        """
+        if isinstance(max_unique_per_column, bool) or not isinstance(max_unique_per_column, int):
+            raise ValueError("max_unique_per_column 必须是正整数")
+        if max_unique_per_column < 1:
+            raise ValueError("max_unique_per_column 必须是正整数")
+        if isinstance(sample_size, bool) or not isinstance(sample_size, int) or sample_size < 0:
+            raise ValueError("sample_size 必须是非负整数")
+
+        columns: List[Any] = []
+        state: Dict[Any, Dict[str, Any]] = {}
+        total_rows = 0
+        for chunk in self.iter_chunks(file_path, chunk_size=chunk_size, **kwargs):
+            if not columns:
+                columns = list(chunk.columns)
+                state = {
+                    col: {
+                        'dtype': str(chunk[col].dtype),
+                        'null_count': 0,
+                        'non_null_count': 0,
+                        'unique_values': set(),
+                        'unique_overflow': False,
+                        'sample_values': [],
+                        'numeric_count': 0,
+                        'numeric_mean': 0.0,
+                        'numeric_m2': 0.0,
+                        'numeric_min': None,
+                        'numeric_max': None,
+                    }
+                    for col in columns
+                }
+            total_rows += len(chunk)
+            for col in columns:
+                series = chunk[col]
+                item = state[col]
+                null_count = int(series.isna().sum())
+                item['null_count'] += null_count
+                non_null = series[~series.isna()]
+                item['non_null_count'] += len(non_null)
+                if sample_size and len(item['sample_values']) < sample_size:
+                    item['sample_values'].extend(non_null.head(sample_size - len(item['sample_values'])).tolist())
+
+                if not item['unique_overflow']:
+                    for value in non_null.tolist():
+                        try:
+                            key = value if hash(value) is not None else repr(value)
+                        except (TypeError, ValueError):
+                            key = repr(value)
+                        item['unique_values'].add(key)
+                        if len(item['unique_values']) > max_unique_per_column:
+                            item['unique_overflow'] = True
+                            # 保留有界下限，避免继续增长。
+                            item['unique_values'] = set(list(item['unique_values'])[:max_unique_per_column])
+                            break
+
+                # 日期时间的底层纳秒整数不能冒充业务数值；对象列只有在大多数
+                # 非空值都能转数值时才纳入数值充分统计量。
+                if pd.api.types.is_datetime64_any_dtype(series):
+                    values = np.empty(0, dtype=float)
+                else:
+                    numeric = pd.to_numeric(series, errors='coerce')
+                    non_null_count = int(series.notna().sum())
+                    numeric_count = int(numeric.notna().sum())
+                    if non_null_count and numeric_count * 20 < non_null_count * 19:
+                        values = np.empty(0, dtype=float)
+                    else:
+                        values = numeric.dropna().to_numpy(dtype=float, copy=False)
+                if values.size:
+                    count = int(values.size)
+                    mean = float(values.mean())
+                    # Chan-Welford 合并公式，避免按块简单平均造成偏差。
+                    old_count = item['numeric_count']
+                    if old_count == 0:
+                        item['numeric_mean'] = mean
+                        item['numeric_m2'] = float(((values - mean) ** 2).sum())
+                    else:
+                        delta = mean - item['numeric_mean']
+                        new_count = old_count + count
+                        item['numeric_m2'] += float(((values - mean) ** 2).sum()) + delta * delta * old_count * count / new_count
+                        item['numeric_mean'] += delta * count / new_count
+                    item['numeric_count'] = old_count + count
+                    low, high = float(values.min()), float(values.max())
+                    item['numeric_min'] = low if item['numeric_min'] is None else min(item['numeric_min'], low)
+                    item['numeric_max'] = high if item['numeric_max'] is None else max(item['numeric_max'], high)
+
+        result_columns: Dict[str, Any] = {}
+        for col in columns:
+            item = state[col]
+            numeric_count = item['numeric_count']
+            stats: Dict[str, Any] = {}
+            if numeric_count:
+                stats = {
+                    'count': numeric_count,
+                    'mean': item['numeric_mean'],
+                    'std': float(np.sqrt(item['numeric_m2'] / (numeric_count - 1))) if numeric_count > 1 else 0.0,
+                    'min': item['numeric_min'],
+                    'max': item['numeric_max'],
+                }
+            unique_count = len(item['unique_values'])
+            result_columns[str(col)] = {
+                'dtype': item['dtype'],
+                'null_count': item['null_count'],
+                'null_rate': item['null_count'] / total_rows if total_rows else 0.0,
+                'non_null_count': item['non_null_count'],
+                'unique_count': unique_count,
+                'unique_lower_bound': unique_count,
+                'unique_exact': not item['unique_overflow'],
+                'sample_values': item['sample_values'],
+                'numeric_stats': stats,
+            }
+        return {
+            'n_rows': total_rows,
+            'n_columns': len(columns),
+            'columns': result_columns,
+            'streaming': True,
+            'chunk_size': self._validate_chunk_size(chunk_size, self.DEFAULT_CHUNK_SIZE),
+            'requires_full_scan': ['quantiles', 'correlations', 'exact_duplicate_count'],
+        }
     
     @timer
     def load_multiple(self, file_paths: List[Union[str, os.PathLike]], 
@@ -780,6 +1140,38 @@ class DataModule:
             **kwargs
         )
         return self
+
+    def stream_profile(self, file_path: Union[str, os.PathLike],
+                       chunk_size: Optional[int] = None,
+                       **kwargs) -> Dict[str, Any]:
+        """在不保存完整 DataFrame 的情况下生成有界数据画像。
+
+        适用于探索超大 CSV/XLSX/Parquet；结果中的 ``unique_exact`` 和
+        ``requires_full_scan`` 明确区分了精确统计与需要完整分布的分析。
+        调用此方法不会修改 ``raw_data``、``cleaned_data`` 或已有分析状态。
+        """
+        return self.loader.profile_chunks(file_path, chunk_size=chunk_size, **kwargs)
+
+    def stream_chunks(self, file_path: Union[str, os.PathLike],
+                      chunk_size: Optional[int] = None,
+                      **kwargs) -> Iterator[pd.DataFrame]:
+        """Return a lazy chunk iterator without mutating ``raw_data``.
+
+        This keeps the high-level ``DataModule`` entry point usable for large
+        files while making it explicit that downstream code must consume chunks
+        instead of calling ``analyze`` on a materialized frame.
+        """
+        return self.loader.iter_chunks(file_path, chunk_size=chunk_size, **kwargs)
+
+    def stream_reduce(self, file_path: Union[str, os.PathLike], reducer,
+                      initial_state: Any = None, chunk_size: Optional[int] = None,
+                      *, max_rows: Optional[int] = None,
+                      max_seconds: Optional[float] = None, **kwargs) -> Dict[str, Any]:
+        """Reduce chunks with explicit row/time budgets and no materialization."""
+        return self.loader.stream_reduce(
+            file_path, reducer, initial_state, chunk_size=chunk_size,
+            max_rows=max_rows, max_seconds=max_seconds, **kwargs
+        )
     
     @timer
     def analyze(self) -> 'DataModule':

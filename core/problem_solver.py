@@ -12,32 +12,37 @@ _PROBLEM_TYPE_PATTERNS = {
     'data_requirements': re.compile(
         r'还需[^。；\n]{0,30}数据|需要[^。；\n]{0,30}(?:采集|收集|补充)[^。；\n]{0,20}数据|'
         r'(?:采集|收集|补充)[^。；\n]{0,20}(?:哪些|什么)?数据|哪些数据|数据需求|'
-        r'数据[^。；\n]{0,20}(?:帮助|作用|用途)|意见和理由'
+        r'数据[^。；\n]{0,20}(?:帮助|作用|用途)|意见和理由|'
+        r'(?i:\b(?:additional|missing|required|needed)\s+data\b|what\s+data\s+should\s+be\s+collected)'
     ),
     'optimization': re.compile(
         r'最大化|最小化|最大|最小|最优|优化|分配|调度|规划|配置|'
         r'路径(?:选择|规划|优化)|成本|利润|效费|节约|资源配置|约束|方案|策略|'
-        r'尽可能|尽量|决策|选择[^。；\n]{0,30}(?:位置|时间|方向|速度)'
+        r'尽可能|尽量|决策|选择[^。；\n]{0,30}(?:位置|时间|方向|速度)|'
+        r'(?i:\b(?:maximize|minimize|optimal|optimization|allocate|allocation|schedule|scheduling|planning|route|routing|constraint|constraints|policy|strategy|decision)\b)'
     ),
-    'differential_equations': re.compile(r'变化|增长|传播|扩散|动态|演化|速率|随时间|导数|微分|方程|运动|轨迹|弹道'),
+    'differential_equations': re.compile(r'变化|增长|传播|扩散|动态|演化|速率|随时间|导数|微分|方程|运动|轨迹|弹道|(?i:\b(?:differential equation|ordinary differential equation|ode|dynamics|growth|decay|diffusion|trajectory|evolution|rate of change|over time)\b)'),
     'prediction_forecast': re.compile(
         r'预测|预报|估计|趋势|未来|'
-        r'下(?:一|个)(?:时刻|周期|季度|年度|月份?|周|天)|会达到|销量|人口|疫情'
+        r'下(?:一|个)(?:时刻|周期|季度|年度|月份?|周|天)|会达到|销量|人口|疫情|'
+        r'(?i:\b(?:predict|prediction|forecast|forecasting|future|project|projection|estimate)\w*\b)'
     ),
-    'classification': re.compile(r'分类|识别|判别|诊断|判断|是否|好坏|等级|类型'),
-    'clustering': re.compile(r'聚类|分组|划分|聚成|相似|类别|群落'),
+    'classification': re.compile(r'分类|识别|判别|诊断|判断|是否|好坏|等级|类型|(?i:\b(?:classif\w*|diagnos\w*|label\w*|categor\w*)\b)'),
+    'clustering': re.compile(r'聚类|分组|划分|聚成|相似|类别|群落|(?i:\b(?:cluster\w*|group\w*|segment\w*|similar\w*)\b)'),
     'simulation': re.compile(
         r'模拟|仿真|蒙特卡洛|随机|概率|风险|不确定|抽样|'
-        r'有效(?:持续|作用|覆盖|遮蔽)?(?:时间|时长)|事件(?:持续)?时间|作用时长'
+        r'有效(?:持续|作用|覆盖|遮蔽)?(?:时间|时长)|事件(?:持续)?时间|作用时长|'
+        r'(?i:\b(?:simulat\w*|monte\s+carlo|stochastic|uncertaint\w*|risk\w*|scenario\w*)\b)'
     ),
-    'graph_network': re.compile(r'网络|图|节点|边|路径|流量|连接|路线|拓扑|最短|联通'),
+    'graph_network': re.compile(r'网络|图|节点|边|路径|流量|连接|路线|拓扑|最短|联通|(?i:\b(?:graph\w*|network\w*|node\w*|edge\w*|path\w*|route\w*|flow\w*|connect\w*)\b)'),
     'statistical_inference': re.compile(
-        r'显著|相关|回归|检验|置信(?:区间|水平|度)|假设|分布|频率|统计|影响因素|作用因素'
+        r'显著|相关|回归|检验|置信(?:区间|水平|度)|假设|分布|频率|统计|影响因素|作用因素|'
+        r'(?i:\b(?:significant|correlation|regression|hypothesis|distribution|statistic\w*|confidence interval|inference|effect size)\b)'
     ),
-    'causal_inference': re.compile(r'因果|处理效应|干预效应|政策效果|政策效应|反事实|因果效应|treatment effect|causal'),
-    'evaluation_ranking': re.compile(r'评价|评估|排名|排序|指标|得分|综合|优劣'),
-    'anomaly_detection': re.compile(r'异常|离群|异常点|异常值|反常|突变|预警|故障检测|outlier|anomaly'),
-    'dimension_reduction': re.compile(r'主成分|因子分析|降维|维度约简|指标压缩|特征提取|pca|PCA'),
+    'causal_inference': re.compile(r'因果|处理效应|干预效应|政策效果|政策效应|反事实|因果效应|(?i:\b(?:treatment effect|causal\w*|counterfactual\w*|intervention\w*)\b)'),
+    'evaluation_ranking': re.compile(r'评价|评估|排名|排序|指标|得分|综合|优劣|(?i:\b(?:evaluat\w*|assess\w*|rank\w*|score\w*|criterion|criteria|index\w*|performance)\b)'),
+    'anomaly_detection': re.compile(r'异常|离群|异常点|异常值|反常|突变|预警|故障检测|(?i:\b(?:outlier\w*|anomal\w*|change point|fault\w*|early warning)\b)'),
+    'dimension_reduction': re.compile(r'主成分|因子分析|降维|维度约简|指标压缩|特征提取|(?i:\b(?:pca|factor analysis|dimension reduction|dimensionality reduction|feature extraction)\b)'),
 }
 _ENTITY_PATTERN = re.compile(r'([A-Z]{1,3}\d{1,3})[（\(]([\d\-,.\s]+)[）\)]')
 # 预编译 _extract_variables / _extract_constraints 正则
@@ -52,8 +57,21 @@ _MIN_PATTERN = re.compile(r'(?:至少|最少|不低于|不小于|≥|>=)\s*(\d+)
 _INTERVAL_PATTERN = re.compile(r'间隔\s*(\d+(?:\.\d+)?)\s*s?')
 _MAXIMIZE_PATTERN = re.compile(r'(?:使|让|求|要)(.*?)(?:尽可能大|最大|最长|最高|最优|最好)')
 _MINIMIZE_PATTERN = re.compile(r'(?:使|让|求|要)(.*?)(?:尽可能小|最小|最短|最低|最少)')
+_ENGLISH_UNIT_PATTERN = re.compile(
+    r'(?i)\b(\d+(?:\.\d+)?)\s*(m/s|km/h|kg|tons?|seconds?|minutes?|hours?|km|m|%)\b'
+)
+_ENGLISH_BOUND_PATTERN = re.compile(
+    r'(?i)\b(?:at\s+most|no\s+more\s+than|up\s+to|at\s+least|no\s+less\s+than|'
+    r'between|within)\s+[^.;,\n]{0,40}'
+)
+_ENGLISH_OBJECTIVE_PATTERNS = (
+    (re.compile(r'(?i)\bmaximize\s+([^.;\n]+)'), '最大化'),
+    (re.compile(r'(?i)\bminimize\s+([^.;\n]+)'), '最小化'),
+    (re.compile(r'(?i)\b(?:find|determine|choose|select)\s+(?:the\s+)?(?:optimal|best|shortest|minimum|maximum)\s+([^.;\n]+)'), '求最优'),
+    (re.compile(r'(?i)\b(?:predict|forecast|estimate)\s+([^.;\n]+)'), '预测'),
+)
 _EXPLICIT_SUBPROBLEM_PATTERN = re.compile(
-    r'(?<![0-9A-Za-z_\u4e00-\u9fff])(?:问题|任务|小问|Problem|Task)\s*'
+    r'(?<![0-9A-Za-z_\u4e00-\u9fff])(?:问题|任务|小问|Problem|Question|Task|Part)\s*'
     r'(?:[一二三四五六七八九十]+|\d+(?!\.\d))\s*[、.．)）:：]?\s*',
     re.IGNORECASE,
 )
@@ -826,6 +844,26 @@ def _extract_variables(desc: str) -> List[str]:
     entities = _ENTITY_PATTERN.findall(desc)
     for e in entities:
         variables.append(f"{e[0]}: ({e[1]})")
+
+    # English statements often carry the only machine-readable numeric
+    # binding (for example ``speed is 12 m/s``).  Keep this extraction narrow:
+    # it records quantities and units, not every noun in the prose.
+    for m in _ENGLISH_UNIT_PATTERN.finditer(desc):
+        value = float(m.group(1))
+        unit = m.group(2).lower()
+        # PDF extraction can turn the contest year plus the letter in “MCM”
+        # into a spurious ``2025 m`` measurement.
+        if unit == "m" and 1900 <= value <= 2100:
+            continue
+        variables.append(m.group(0).replace("\n", " "))
+    for m in re.finditer(
+        r'(?i)\b([a-z][a-z0-9_ -]{1,24})\s+(?:is|are|equals|denoted\s+by)\s+'
+        r'([-+]?\d+(?:\.\d+)?(?:\s*[a-z%/]+)?)',
+        desc,
+    ):
+        label = re.sub(r'\s+', ' ', m.group(1)).strip()
+        if label not in {"the", "this", "that", "there", "it"}:
+            variables.append(f"{label} = {m.group(2)}")
     
     return list(dict.fromkeys(variables))[:15]  # dedup, max 15
 
@@ -851,6 +889,27 @@ def _extract_constraints(desc: str) -> List[str]:
     # Spatial
     if '范围内' in desc or '距离' in desc:
         constraints.append("空间距离约束")
+
+    for m in _ENGLISH_BOUND_PATTERN.finditer(desc):
+        text = m.group(0).strip()
+        # Contest instructions such as "no more than 25 pages" are document
+        # limits, not model constraints.  Keeping them would incorrectly open
+        # a numerical optimization path for a pure modelling prompt.
+        if re.search(r'(?i)\b(?:page|pages|word|words|report|solution|submission)\b', text):
+            continue
+        constraints.append(f"英文边界约束: {text}")
+    # ``must follow the contest AI policy`` is an instruction for the solver,
+    # not a mathematical constraint.  Require model-facing wording before
+    # promoting this broad English signal into the contract.
+    has_model_constraint = re.search(
+        r'(?i)\bsubject\s+to\b|\bmust\s+(?:be|remain|satisfy|not\s+exceed|stay)\b|'
+        r'\bconstraint(?:s)?\s+(?:on|for|such\s+that|require)\b', desc,
+    )
+    has_document_instruction = re.search(
+        r'(?i)\b(?:must\s+follow|must\s+include|submission|contest|AI\s+use|page|pages|words?)\b', desc,
+    )
+    if has_model_constraint and not has_document_instruction:
+        constraints.append("英文显式约束: subject-to/must/constraint 条件")
     
     return constraints if constraints else ['需从题目中进一步提取']
 
@@ -874,7 +933,13 @@ def _extract_objectives(desc: str) -> List[str]:
         objectives.append('设计最优策略/方案')
     if '保存到文件' in desc or 'excel' in desc or 'xlsx' in desc:
         objectives.append('输出结果到文件')
-    
+
+    for pattern, label in _ENGLISH_OBJECTIVE_PATTERNS:
+        for m in pattern.finditer(desc):
+            value = re.sub(r'\s+', ' ', m.group(1)).strip(' :;,.')
+            if value:
+                objectives.append(f"{label}: {value}")
+
     return objectives if objectives else ['分析题目并建立数学模型']
 
 

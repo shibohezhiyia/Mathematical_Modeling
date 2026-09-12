@@ -349,6 +349,27 @@ curl -X POST http://localhost:5000/api/model/explain \
 curl http://localhost:5000/api/model/result
 ```
 
+### 执行类型化数学图
+
+仅提交 JSON 节点和显式变量绑定；服务端不会执行提交的 Python 源码。
+
+```bash
+curl -X POST http://localhost:5000/api/research/primitive-graph \
+  -H "Content-Type: application/json" \
+  -d '{"nodes":[{"id":"x","op":"variable","inputs":[],"kind":"quantity","dimensions":{"Q":1},"attributes":{}},{"id":"c","op":"constant","inputs":[],"kind":"quantity","dimensions":{"Q":1},"attributes":{"value":1}},{"id":"y","op":"add","inputs":["x","c"],"kind":"quantity","dimensions":{"Q":1},"attributes":{}}],"bindings":{"x":[1,2]},"output_ids":["y"]}'
+```
+
+结构候选可通过 `/api/research/structure-candidate/execute` 进入同一执行门；返回
+`proposal_status` 和独立验证状态，执行成功不等同于模型正确。
+
+### 显式目标的数据图搜索
+
+研究助手默认不猜目标，也不自动把普通表格解释成因果模型。需要将明确目标送入
+受控图搜索时，可在 `/api/research/run` 请求中设置 `enable_graph_search=true`，同时
+提供 `target="数据集名.目标列"`。系统最多取四个数值特征，建立互斥训练/搜索分区，
+写入 `specialized_results.data_graph_search`；单位未声明时仍标记为待确认，结果只能
+作为探索候选，不能直接当作因果或物理结论。
+
 ---
 
 ## 配置参考

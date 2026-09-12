@@ -124,6 +124,20 @@ def _save_or_show(fig: Any, save_path: Optional[str] = None,
         safe = wm.safe_path(save_path, subdir='reports')
         os.makedirs(os.path.dirname(safe), exist_ok=True)
         fig.savefig(safe, bbox_inches='tight', dpi=150)
+        # Saved figures are artifacts, not interactive handles.  Closing them
+        # here prevents a research run that creates dozens of charts from
+        # accumulating pyplot figures and exhausting memory.  The figure
+        # object is still returned for API compatibility; callers that need an
+        # open canvas can omit ``save_path`` and close it explicitly.
+        _close_fig(fig)
+        # Saving is the batch/reporting mode.  A previous chart from a failed
+        # or third-party plotting call must not accumulate across a long
+        # research run, so clear any remaining pyplot-managed figures too.
+        try:
+            import matplotlib.pyplot as plt
+            plt.close("all")
+        except Exception:
+            pass
         log_info(f"[Visualization] 图表已保存: {safe}")
         return safe
     return None
@@ -137,6 +151,21 @@ def _close_fig(fig: Any) -> None:
     except Exception:
         # 关闭图表是 best-effort 操作；matplotlib 未安装或图已被关闭时静默跳过
         pass
+
+
+def _bounded_rows(frame: pd.DataFrame, max_rows: int) -> pd.DataFrame:
+    """Return a deterministic evenly-spaced view for plotting only."""
+    if len(frame) <= max_rows:
+        return frame
+    positions = np.linspace(0, len(frame) - 1, max_rows, dtype=np.int64)
+    return frame.iloc[np.unique(positions)]
+
+
+def _bounded_series(series: pd.Series, max_rows: int) -> pd.Series:
+    if len(series) <= max_rows:
+        return series
+    positions = np.linspace(0, len(series) - 1, max_rows, dtype=np.int64)
+    return series.iloc[np.unique(positions)]
 
 
 # =============================================================================
@@ -157,8 +186,15 @@ class DataVisualizer:
     - 散点图矩阵
     """
     
-    def __init__(self, color_theme: Optional[Dict] = None) -> None:
+    def __init__(self, color_theme: Optional[Dict] = None,
+                 max_plot_rows: int = 20_000, max_plot_columns: int = 80) -> None:
+        if type(max_plot_rows) is not int or not 500 <= max_plot_rows <= 1_000_000:
+            raise ValueError("max_plot_rows 必须在500到1000000之间")
+        if type(max_plot_columns) is not int or not 2 <= max_plot_columns <= 500:
+            raise ValueError("max_plot_columns 必须在2到500之间")
         self.colors = color_theme or _COLOR_THEME
+        self.max_plot_rows = max_plot_rows
+        self.max_plot_columns = max_plot_columns
         _init_matplotlib()
     
     def plot_distribution(self, df: pd.DataFrame, column: str,
@@ -187,14 +223,15 @@ class DataVisualizer:
         
         # 左：直方图 + KDE
         ax1 = axes[0]
-        if hue and hue in df.columns:
-            for i, (val, subdf) in enumerate(df.groupby(hue)):
+        plot_df = _bounded_rows(df, self.max_plot_rows)
+        if hue and hue in plot_df.columns:
+            for i, (val, subdf) in enumerate(plot_df.groupby(hue)):
                 color = self.colors['palette'][i % len(self.colors['palette'])]
                 sns.histplot(subdf[column].dropna(), bins=bins, kde=True,
                             color=color, alpha=0.5, label=str(val), ax=ax1)
             ax1.legend(title=hue)
         else:
-            sns.histplot(df[column].dropna(), bins=bins, kde=True,
+            sns.histplot(plot_df[column].dropna(), bins=bins, kde=True,
                         color=self.colors['primary'], ax=ax1)
         ax1.set_title(f'{column} 分布')
         ax1.set_xlabel(column)
@@ -203,10 +240,11 @@ class DataVisualizer:
         # 右：箱线图
         ax2 = axes[1]
         if hue and hue in df.columns:
-            sns.boxplot(data=df, x=hue, y=column, ax=ax2, palette=self.colors['palette'])
+            sns.boxplot(data=plot_df, x=hue, y=column, hue=hue, ax=ax2,
+                        palette=self.colors['palette'], legend=False)
             ax2.set_title(f'{column} 按 {hue} 分组箱线图')
         else:
-            sns.boxplot(y=df[column].dropna(), color=self.colors['primary'], ax=ax2)
+            sns.boxplot(y=plot_df[column].dropna(), color=self.colors['primary'], ax=ax2)
             ax2.set_title(f'{column} 箱线图')
         
         plt.tight_layout()
@@ -233,7 +271,8 @@ class DataVisualizer:
         import seaborn as sns
         
         # 只选数值列
-        numeric_df = df.select_dtypes(include=[np.number])
+        numeric_df = _bounded_rows(df, self.max_plot_rows).select_dtypes(include=[np.number])
+        numeric_df = numeric_df.iloc[:, :self.max_plot_columns]
         n_cols = numeric_df.shape[1]
         if n_cols < 2:
             log_warning("[Visualization] 数值列不足，无法绘制相关性热力图")
@@ -295,7 +334,8 @@ class DataVisualizer:
         
         import matplotlib.pyplot as plt
         
-        missing = df.isnull().mean().sort_values(ascending=False)
+        plot_df = _bounded_rows(df, self.max_plot_rows).iloc[:, :self.max_plot_columns]
+        missing = plot_df.isnull().mean().sort_values(ascending=False)
         missing = missing[missing > 0]
         
         if missing.empty:
@@ -328,7 +368,7 @@ class DataVisualizer:
         # 右：缺失模式热力图（抽样显示）
         ax2 = axes[1]
         cols_with_missing = missing.index.tolist()
-        sample_df = df[cols_with_missing].sample(min(500, len(df)), random_state=42)
+        sample_df = plot_df[cols_with_missing].iloc[:min(500, len(plot_df))]
         
         import seaborn as sns
         sns.heatmap(sample_df.isnull(), cbar=False, yticklabels=False,
@@ -356,8 +396,9 @@ class DataVisualizer:
         import matplotlib.pyplot as plt
         import seaborn as sns
         
-        if isinstance(y, np.ndarray):
+        if not isinstance(y, pd.Series):
             y = pd.Series(y)
+        y = _bounded_series(y, self.max_plot_rows)
         
         fig, axes = plt.subplots(1, 2, figsize=figsize)
         
@@ -431,10 +472,14 @@ class DataVisualizer:
         if len(plot_df) > sample_n:
             plot_df = plot_df.sample(sample_n, random_state=42)
         
-        g = sns.pairplot(plot_df, hue=hue, palette=self.colors['palette'],
-                        diag_kind='kde', corner=True,
-                        plot_kws={'alpha': 0.6, 's': 20},
-                        diag_kws={'fill': True})
+        pairplot_kwargs = {
+            "diag_kind": "kde", "corner": True,
+            "plot_kws": {"alpha": 0.6, "s": 20},
+            "diag_kws": {"fill": True},
+        }
+        if hue and hue in plot_df.columns:
+            pairplot_kwargs.update({"hue": hue, "palette": self.colors['palette']})
+        g = sns.pairplot(plot_df, **pairplot_kwargs)
         g.fig.suptitle('特征散点图矩阵', y=1.02, fontsize=14)
         
         safe = _save_or_show(g.fig, save_path)
@@ -452,7 +497,7 @@ class DataVisualizer:
         
         import matplotlib.pyplot as plt
         
-        counts = df[column].value_counts().head(top_n)
+        counts = _bounded_rows(df[[column]], self.max_plot_rows)[column].value_counts().head(top_n)
         
         fig, ax = plt.subplots(figsize=figsize)
         # 向量化生成颜色，避免 Python 循环
@@ -1057,9 +1102,11 @@ class EvaluationVisualizer:
         ax.set_ylabel('排名')
         ax.set_title('不同决策模式下的模型排名变化')
         ax.invert_yaxis()  # 排名1在最上面
-        ax.set_ylim(len(model_keys) + 0.5, 0.5)
+        if model_keys:
+            ax.set_ylim(len(model_keys) + 0.5, 0.5)
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=9, loc='upper right')
+        if model_keys:
+            ax.legend(fontsize=9, loc='upper right')
         ax.tick_params(axis='x', rotation=15)
         
         plt.tight_layout()

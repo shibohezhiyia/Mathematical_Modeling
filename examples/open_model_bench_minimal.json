@@ -1,0 +1,51 @@
+{
+  "schema_version": "mathmodel.open-model-bench/v1",
+  "name": "open-model-bench-minimal",
+  "revision": 1,
+  "cases": [
+    {
+      "id": "dev-data-regression-001",
+      "split": "development",
+      "family": "data",
+      "statement": "根据观测特征估计一个连续目标，并报告残差、稳定性和适用范围。",
+      "data_fingerprints": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "tags": ["regression", "observed-data"],
+      "has_ground_truth": true
+    },
+    {
+      "id": "dev-pure-mechanistic-001",
+      "split": "development",
+      "family": "pure_mechanistic",
+      "statement": "在给定守恒关系、初值和边界条件下建立可验证的机理模型。",
+      "tags": ["no-observed-table", "boundary-condition"],
+      "has_ground_truth": true
+    },
+    {
+      "id": "unseen-multi-table-001",
+      "split": "unseen",
+      "family": "multi_table",
+      "statement": "从含实体键和时间键的多张表中建立可审计的关联，并分析变量交互。",
+      "data_fingerprints": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "tags": ["entity-key", "time-key", "join-cardinality"],
+      "has_ground_truth": true
+    },
+    {
+      "id": "transform-optimization-001",
+      "split": "structure_transform",
+      "family": "optimization",
+      "statement": "在容量、预算和可行域约束下优化多个目标，并保留近优方案之间的权衡。",
+      "data_fingerprints": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      "tags": ["multi-objective", "constraints"],
+      "has_ground_truth": true
+    },
+    {
+      "id": "adversarial-dynamics-001",
+      "split": "adversarial",
+      "family": "dynamics",
+      "statement": "面对噪声、机制切换和可能未观测状态的时间序列，区分数值失败与结构不足。",
+      "data_fingerprints": ["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
+      "tags": ["noise", "regime-switch", "latent-state"],
+      "has_ground_truth": true
+    }
+  ]
+}

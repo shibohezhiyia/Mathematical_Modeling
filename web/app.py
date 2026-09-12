@@ -220,6 +220,18 @@ log_info(f"Flask API 日志已配置: {_log_file}", category="System")
 # 全局会话存储（内存，生产环境应使用 Redis）
 user_sessions: Dict[str, Dict[str, Any]] = {}
 
+# All typed dynamic-compile requests share one bounded admission queue.  The
+# queue is process-local (multi-process deployments should use a shared job
+# service); task ownership is checked against the signed Flask session.
+from core.process_execution import ProcessExecutionService
+from core.task_store import TaskStore
+_task_store_root = Path(os.getenv('MATHMODEL_TASK_STORE_PATH', str(PROJECT_ROOT / 'data' / 'runtime'))).expanduser()
+_shared_task_store = TaskStore(_task_store_root / 'tasks.sqlite3')
+_dynamic_execution_service = ProcessExecutionService(_shared_task_store)
+_research_task_store = _shared_task_store
+_research_process_service = ProcessExecutionService(_shared_task_store)
+_training_process_service = ProcessExecutionService(_shared_task_store)
+
 UPLOAD_DIR = PROJECT_ROOT / 'data' / 'uploads'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -257,6 +269,24 @@ def clear_session():
         user_sessions[sid] = {}
         user_sessions[sid]['train_events'] = []
         user_sessions[sid]['train_live_results'] = []
+
+
+# Explicit graph experiments use independent run IDs and never replace research
+# results or uploaded table data. Public deployments must not expose this local tool.
+from web.graph_lab import GraphLab, graph_lab_blueprint
+
+graph_lab = GraphLab(PROJECT_ROOT / 'workspace' / 'graph_lab_runs',
+                     PROJECT_ROOT / 'workspace' / 'confirmation' / 'usage.sqlite3')
+
+
+def _graph_lab_owner():
+    get_session()
+    return session['sid']
+
+
+app.register_blueprint(graph_lab_blueprint(graph_lab, _graph_lab_owner, lambda: _public_mode,
+                                           lambda: get_session().get('df')),
+                       url_prefix='/api/graph-lab')
 
 
 def clean_for_json(obj: Any) -> Any:
@@ -308,10 +338,16 @@ def api_error_response(error: str, detail: str = None, status_code: int = 500):
 def df_to_dict(df: pd.DataFrame, max_rows: int = 20) -> Dict[str, Any]:
     """DataFrame 转为前端可用的字典"""
     preview_df = df.head(max_rows)
+    source_rows = int(df.attrs.get('source_rows', len(df)))
+    representation = str(df.attrs.get('research_representation', 'complete_rows'))
     return clean_for_json({
         'columns': df.columns.tolist(),
         'dtypes': {c: str(df[c].dtype) for c in df.columns},
         'shape': df.shape,
+        'source_shape': [source_rows, len(df.columns)],
+        'display_rows': len(df),
+        'bounded_representation': source_rows > len(df) or representation != 'complete_rows',
+        'representation': representation,
         'preview': preview_df.to_dict('records'),
         'memory_mb': round(df.memory_usage(deep=True).sum() / (1024**2), 2),
         'missing': {c: int(df[c].isnull().sum()) for c in df.columns},
@@ -331,19 +367,165 @@ def index():
 # 数据上传 API
 # =============================================================================
 
-def _read_file_with_sheets(save_path, ext):
+MAX_SESSION_ROWS = 100_000
+MAX_SESSION_FILE_BYTES = 50 * 1024 * 1024
+
+
+def _read_large_csv_representation(save_path, ext, *, max_rows=MAX_SESSION_ROWS,
+                                    encoding='utf-8'):
+    """Read a bounded deterministic coverage view without retaining all rows.
+
+    The raw upload remains on disk. Two streaming passes determine total rows
+    and then retain evenly spaced rows; no full DataFrame or O(n²) object is
+    constructed. This is explicitly a preview representation, not full-data
+    evidence, so downstream reports carry the source-row count and warning.
+    """
+    sep = '\t' if ext == '.tsv' else ','
+    kwargs = {'encoding': encoding, 'sep': sep, 'chunksize': 50_000, 'low_memory': True}
+    total = 0
+    columns = None
+    try:
+        for chunk in pd.read_csv(save_path, **kwargs):
+            if columns is None:
+                columns = chunk.columns
+            total += len(chunk)
+    except UnicodeDecodeError:
+        if encoding.lower() != 'gbk':
+            return _read_large_csv_representation(save_path, ext, max_rows=max_rows, encoding='gbk')
+        raise
+    if total <= max_rows:
+        frame = pd.read_csv(save_path, encoding=encoding, sep=sep, low_memory=False)
+        frame.attrs['source_rows'] = total
+        return frame
+    positions = np.unique(np.linspace(0, total - 1, num=max_rows, dtype=np.int64))
+    selected, offset = [], 0
+    for chunk in pd.read_csv(save_path, **kwargs):
+        end = offset + len(chunk)
+        start_index = int(np.searchsorted(positions, offset, side='left'))
+        stop_index = int(np.searchsorted(positions, end, side='left'))
+        if stop_index > start_index:
+            local = (positions[start_index:stop_index] - offset).astype(np.int64)
+            selected.append(chunk.iloc[local])
+        offset = end
+    frame = pd.concat(selected, axis=0, ignore_index=True, copy=False) if selected else pd.DataFrame(columns=columns)
+    frame.attrs.update({
+        'source_rows': total,
+        'research_representation_schema': 'mathmodel.research-frame/v2',
+        'research_representation': 'deterministic_coverage_sample',
+        'aggregation_complete': False,
+        'sampled_source_positions': True,
+        'sampling_max_rows': max_rows,
+    })
+    return frame
+
+
+def _read_large_xlsx_representation(save_path, sheet_name, *, max_rows=MAX_SESSION_ROWS):
+    """Read an XLSX sheet in openpyxl read-only mode with bounded rows."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ValueError('大文件XLSX需要openpyxl的只读读取支持') from exc
+
+    def scan_rows():
+        workbook = load_workbook(save_path, read_only=True, data_only=True)
+        try:
+            worksheet = workbook[sheet_name]
+            iterator = worksheet.iter_rows(values_only=True)
+            headers = next(iterator, ())
+            total = sum(1 for _ in iterator)
+            return list(headers), total
+        finally:
+            workbook.close()
+
+    headers, total = scan_rows()
+    positions = (np.unique(np.linspace(0, total - 1, num=min(max_rows, total), dtype=np.int64))
+                 if total else np.array([], dtype=np.int64))
+    wanted = set(int(value) for value in positions)
+    values = []
+    workbook = load_workbook(save_path, read_only=True, data_only=True)
+    try:
+        worksheet = workbook[sheet_name]
+        iterator = worksheet.iter_rows(values_only=True)
+        next(iterator, None)
+        for index, row in enumerate(iterator):
+            if index in wanted:
+                values.append(row)
+    finally:
+        workbook.close()
+    columns = [str(value) if value is not None else f'Unnamed: {index}'
+               for index, value in enumerate(headers)]
+    frame = pd.DataFrame(values, columns=columns)
+    frame.attrs.update({
+        'source_rows': total,
+        'research_representation_schema': 'mathmodel.research-frame/v2',
+        'research_representation': 'deterministic_coverage_sample',
+        'aggregation_complete': False,
+        'sampled_source_positions': True,
+        'sampling_max_rows': max_rows,
+    })
+    return frame
+
+
+def _read_large_parquet_representation(save_path, *, max_rows=MAX_SESSION_ROWS):
+    """Read Parquet row groups in bounded batches for an exploratory view."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ValueError('大文件Parquet需要pyarrow的分批读取支持') from exc
+    parquet = pq.ParquetFile(save_path)
+    total = int(parquet.metadata.num_rows)
+    columns = list(parquet.schema.names)
+    if total <= max_rows:
+        frame = parquet.read().to_pandas()
+        frame.attrs['source_rows'] = total
+        return frame
+    positions = np.unique(np.linspace(0, total - 1, num=max_rows, dtype=np.int64))
+    selected, offset = [], 0
+    for batch in parquet.iter_batches(batch_size=50_000):
+        end = offset + batch.num_rows
+        start_index = int(np.searchsorted(positions, offset, side='left'))
+        stop_index = int(np.searchsorted(positions, end, side='left'))
+        if stop_index > start_index:
+            local = (positions[start_index:stop_index] - offset).astype(np.int64)
+            selected.append(batch.to_pandas().iloc[local])
+        offset = end
+    frame = pd.concat(selected, axis=0, ignore_index=True, copy=False) if selected else pd.DataFrame(columns=columns)
+    frame.attrs.update({
+        'source_rows': total,
+        'research_representation_schema': 'mathmodel.research-frame/v2',
+        'research_representation': 'deterministic_coverage_sample',
+        'aggregation_complete': False,
+        'sampled_source_positions': True,
+        'sampling_max_rows': max_rows,
+    })
+    return frame
+
+
+def _read_file_with_sheets(save_path, ext, *, bounded=True):
     """读取文件，对于Excel返回所有sheet名称"""
     sheets = None
     if ext in ('.xls', '.xlsx'):
+        if bounded and ext == '.xls' and os.path.getsize(save_path) > MAX_SESSION_FILE_BYTES:
+            raise ValueError('大文件XLS暂不支持安全分块读取，请另存为XLSX或Parquet后再上传')
         xl = pd.ExcelFile(save_path)
         sheets = xl.sheet_names
-        df = pd.read_excel(save_path, sheet_name=sheets[0])
-    elif ext == '.csv':
-        df = pd.read_csv(save_path)
+        if bounded and ext == '.xlsx' and os.path.getsize(save_path) > MAX_SESSION_FILE_BYTES:
+            df = _read_large_xlsx_representation(save_path, sheets[0])
+        else:
+            df = pd.read_excel(save_path, sheet_name=sheets[0])
+    elif ext in ('.csv', '.txt', '.tsv'):
+        if bounded and os.path.getsize(save_path) > MAX_SESSION_FILE_BYTES:
+            df = _read_large_csv_representation(save_path, ext)
+        else:
+            sep = '\t' if ext == '.tsv' else ','
+            df = pd.read_csv(save_path, sep=sep)
     elif ext == '.json':
         df = pd.read_json(save_path)
     elif ext == '.parquet':
-        df = pd.read_parquet(save_path)
+        if bounded and os.path.getsize(save_path) > MAX_SESSION_FILE_BYTES:
+            df = _read_large_parquet_representation(save_path)
+        else:
+            df = pd.read_parquet(save_path)
     else:
         raise ValueError(f'不支持的格式: {ext}')
     return df, sheets
@@ -385,12 +567,15 @@ def api_upload():
                 'filename': file.filename,
                 'ext': ext,
                 'path': str(save_path),
-                'shape': clean_for_json(list(df.shape)),
+                'shape': clean_for_json([int(df.attrs.get('source_rows', len(df))), len(df.columns)]),
+                'display_shape': clean_for_json(list(df.shape)),
+                'bounded_representation': bool(df.attrs.get('source_rows', len(df)) > len(df)),
+                'source_rows': int(df.attrs.get('source_rows', len(df))),
                 'sheets': sheets,
                 'active_sheet': sheets[0] if sheets else None,
                 'columns': list(df.columns),
             }
-            if len(df) > 100_000:
+            if int(df.attrs.get('source_rows', len(df))) > MAX_SESSION_ROWS:
                 prepared = _prepare_research_frame(df, max_rows=100_000)
                 cache_path = _research_cache_path(
                     file_info, sheets[0] if sheets else None
@@ -465,8 +650,36 @@ def api_data_quality():
     target_col = data.get('target_col')
     task_type = data.get('task_type')
     try:
-        from core.data_quality import generate_data_quality_report
-        report = generate_data_quality_report(df, target_col=target_col, task_type=task_type)
+        from core.data_quality import (
+            generate_data_quality_report,
+            generate_streaming_data_quality_report,
+        )
+        # 上传层对超大文件只在会话中保留受限覆盖预览。直接对预览运行
+        # 全量质量报告会把“样本统计”误标成“源文件统计”，因此优先回到
+        # 原始 CSV/Parquet 做一次惰性聚合；不支持流式的 Excel 则显式保留警告。
+        active_index = get_session().get('active_file_index', 0)
+        uploaded = get_session().get('uploaded_files') or []
+        source_info = uploaded[active_index] if isinstance(active_index, int) and 0 <= active_index < len(uploaded) else None
+        if df.attrs.get('bounded_representation') or df.attrs.get('research_representation') not in (None, 'complete_rows'):
+            ext = str((source_info or {}).get('ext', '')).lower()
+            source_path = (source_info or {}).get('path')
+            if source_path and ext in {'.csv', '.txt', '.tsv', '.xlsx', '.parquet'}:
+                stream_kwargs = {}
+                if ext == '.xlsx' and get_session().get('active_sheet'):
+                    stream_kwargs['sheet_name'] = get_session()['active_sheet']
+                report = generate_streaming_data_quality_report(
+                    source_path, target_col=target_col, chunk_size=50_000,
+                    **stream_kwargs,
+                )
+            else:
+                report = generate_data_quality_report(df, target_col=target_col, task_type=task_type)
+                report.update({
+                    'streaming': False,
+                    'source_rows': df.attrs.get('source_rows'),
+                    'representation_warning': '当前质量结果基于受限预览，不能代表未读取的源文件全量；请转换为 CSV 或 Parquet 后重试。',
+                })
+        else:
+            report = generate_data_quality_report(df, target_col=target_col, task_type=task_type)
         return jsonify({'success': True, 'report': report})
     except Exception as e:
         log_error(f'[DataQuality] {e}')
@@ -739,6 +952,26 @@ def api_research_run():
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': 'feedback_trials 必须是整数'}), 400
 
+    requested_contract = None
+    requested_contract_hash = data.get('clarification_contract_hash')
+    if requested_contract_hash is not None:
+        if not isinstance(requested_contract_hash, str) or not re.fullmatch(
+            r'[0-9a-f]{64}', requested_contract_hash
+        ):
+            return jsonify({'success': False, 'error': '题意契约标识无效'}), 400
+        stored_payload = sdata.get('research_clarification_contract')
+        if not isinstance(stored_payload, dict):
+            return jsonify({'success': False, 'error': '题意契约已失效，请重新回答澄清问题'}), 409
+        try:
+            from core.model_hypotheses import ProblemContract
+            requested_contract = ProblemContract.from_payload(stored_payload)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '题意契约校验失败，请重新回答澄清问题'}), 409
+        if requested_contract.digest != requested_contract_hash:
+            return jsonify({'success': False, 'error': '题意契约版本不一致，请刷新结果'}), 409
+        if requested_contract.public()['statement'].strip() != description:
+            return jsonify({'success': False, 'error': '题目文本已改变，请先重新生成澄清问题'}), 409
+
     def request_bool(name, default):
         value = data.get(name, default)
         if isinstance(value, str):
@@ -750,11 +983,18 @@ def api_research_run():
         return bool(value)
 
     def execute_research():
+        # Cancellation is cooperative: the worker is never force-killed, but
+        # it checks the request before starting and before committing its
+        # result.  This keeps the process and file system in a known state.
+        cancel_event = sdata.get('research_cancel_event')
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError('research_cancelled')
         datasets = _session_research_datasets(sdata, max_rows=max_rows)
         from core.modeling_assistant import MathModelingAssistant
         from core.artifact_manager import create_run_id
         semantic_compiler = None
-        if request_bool('semantic_model_compiler', False):
+        hypothesis_generator = None
+        if request_bool('semantic_model_compiler', False) or request_bool('hypothesis_generation', False):
             from core.semantic_model_compiler import (
                 SemanticCompilerConfig,
                 SemanticModelCompiler,
@@ -766,7 +1006,11 @@ def api_research_run():
                 api_key=str(data.get('semantic_api_key', '')),
                 timeout_seconds=max(5, min(int(data.get('semantic_timeout_seconds', 90)), 300)),
             )
-            semantic_compiler = SemanticModelCompiler(semantic_config)
+            if request_bool('semantic_model_compiler', False):
+                semantic_compiler = SemanticModelCompiler(semantic_config)
+            if request_bool('hypothesis_generation', False):
+                from core.hypothesis_generator import HypothesisGenerator
+                hypothesis_generator = HypothesisGenerator(semantic_config)
         run_id = create_run_id()
         output_dir = PROJECT_ROOT / 'data' / 'reports' / 'research' / run_id
         assistant = MathModelingAssistant(
@@ -776,6 +1020,9 @@ def api_research_run():
             feedback_trials=feedback_trials,
             credibility_audit=request_bool('credibility_audit', True),
             semantic_compiler=semantic_compiler,
+            hypothesis_generator=hypothesis_generator,
+            enable_gnn_screen=request_bool('enable_gnn_screen', False),
+            enable_graph_search=request_bool('enable_graph_search', False),
         )
         result = assistant.run(
             problem=description,
@@ -785,7 +1032,35 @@ def api_research_run():
             generate_plots=request_bool('generate_plots', True),
             mechanistic_ir=data.get('mechanistic_ir'),
             problem_images=problem_images,
+            problem_contract=requested_contract,
         ).to_dict()
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError('research_cancelled')
+        # Optional, explicitly supplied hypothesis controls are validated as
+        # a non-executable UI schema.  They never enter the factual contract
+        # or solver path; the browser only uses them for bounded what-if
+        # previews and displays affected nodes.
+        raw_controls = data.get('hypothesis_controls')
+        if isinstance(raw_controls, dict):
+            try:
+                from core.hypothesis_controls import build_hypothesis_controls
+                result['hypothesis_controls'] = build_hypothesis_controls(
+                    raw_controls.get('controls', []),
+                    node_ids=raw_controls.get('node_ids', []),
+                )
+                # Keep the executable preview contract separate from the
+                # display-only controls.  It is only exposed when the caller
+                # explicitly supplied bindings and a typed graph; otherwise
+                # the UI must remain plan-only.
+                if isinstance(raw_controls.get('bindings'), dict) and isinstance(raw_controls.get('graph'), dict):
+                    result['hypothesis_preview_contract'] = {
+                        'controls': result['hypothesis_controls']['controls'],
+                        'bindings': raw_controls['bindings'],
+                        'graph': raw_controls['graph'],
+                        'output_ids': raw_controls.get('output_ids', raw_controls['graph'].get('output_ids', [])),
+                    }
+            except (TypeError, ValueError) as exc:
+                result.setdefault('warnings', []).append(f'假设滑块契约未通过，已停用：{type(exc).__name__}')
         for chart in result.get('charts', []):
             try:
                 relative_path = Path(chart['path']).resolve().relative_to(
@@ -807,29 +1082,138 @@ def api_research_run():
         result.pop('output_dir', None)
         sdata['research_output_dir'] = str(output_dir)
         sdata['research_result'] = result
+        latest_proposal = (result.get('specialized_results') or {}).get('model_hypotheses')
+        latest_contract = latest_proposal.get('problem_contract') if isinstance(latest_proposal, dict) else None
+        if isinstance(latest_contract, dict):
+            # Reset the clarification base to the contract actually used by
+            # this completed run.  This prevents answers from a newer result
+            # being appended to an unrelated, stale session contract.
+            sdata['research_clarification_contract'] = latest_contract
+        else:
+            sdata.pop('research_clarification_contract', None)
         return result
 
     if request_bool('async', False):
-        if sdata.get('research_status') == 'running':
+        if not app.config.get('TESTING', False):
+            # Production research runs use the same hard-terminable process
+            # service as dynamic compilation. DataFrames are reduced to a
+            # bounded JSON snapshot before crossing the process boundary.
+            try:
+                from core.artifact_manager import create_run_id
+                process_run_id = create_run_id()
+                process_output_dir = PROJECT_ROOT / 'data' / 'reports' / 'research' / process_run_id
+                process_datasets = _session_research_datasets(sdata, max_rows=max_rows)
+                serialized = {
+                    name: {
+                        'records': json.loads(frame.to_json(orient='records', date_format='iso')),
+                        'source_rows': int(frame.attrs.get('source_rows', len(frame))),
+                    }
+                    for name, frame in process_datasets.items()
+                }
+                process_payload = {
+                    'description': description, 'datasets': serialized,
+                    'problem_contract': requested_contract.public() if requested_contract is not None else None,
+                    'target': data.get('targets') or data.get('target') or None,
+                    'mechanistic_ir': data.get('mechanistic_ir'), 'problem_images': problem_images,
+                    'output_dir': str(process_output_dir), 'run_id': process_run_id,
+                    'options': {
+                        'max_analysis_rows': max_rows, 'feedback_optimization': request_bool('feedback_optimization', True),
+                        'feedback_trials': feedback_trials, 'credibility_audit': request_bool('credibility_audit', True),
+                        'enable_gnn_screen': request_bool('enable_gnn_screen', False),
+                        'enable_graph_search': request_bool('enable_graph_search', False),
+                        'run_modeling': request_bool('run_modeling', True), 'generate_plots': request_bool('generate_plots', True),
+                    },
+                }
+                task = _research_process_service.submit_research(
+                    session.get('sid', ''), process_payload,
+                    wall_seconds=max(30, min(int(data.get('wall_seconds', 600)), 1800)),
+                )
+                sdata['research_status'] = 'running'
+                sdata['research_task_id'] = task['task_id']
+                sdata['research_output_dir'] = str(process_output_dir)
+                sdata['research_result'] = None
+                sdata['research_error'] = None
+                return jsonify({'success': True, 'status': 'running', 'task_id': task['task_id'], 'execution_mode': 'spawn_process'}), 202
+            except (TypeError, ValueError, KeyError) as exc:
+                return jsonify({'success': False, 'error': str(exc)}), 409
+        if sdata.get('research_status') in {'running', 'cancelling'}:
             return jsonify({'success': False, 'error': '已有研究任务正在运行'}), 409
         sdata['research_status'] = 'running'
         sdata['research_error'] = None
         sdata['research_result'] = None
+        sdata['research_cancel_event'] = threading.Event()
+        research_task_id = uuid.uuid4().hex
+        sdata['research_task_id'] = research_task_id
+        _research_task_store.create(research_task_id, session.get('sid', ''))
+        _research_task_store.update(research_task_id, status='running', started_at=time.time())
 
         def research_task():
             try:
                 execute_research()
-                sdata['research_status'] = 'done'
+                if sdata.get('research_cancel_event') is not None and sdata['research_cancel_event'].is_set():
+                    sdata['research_status'] = 'cancelled'
+                    _research_task_store.update(research_task_id, status='cancelled', finished_at=time.time(), cancellation_requested=1)
+                else:
+                    sdata['research_status'] = 'done'
+                    _research_task_store.update(research_task_id, status='completed', finished_at=time.time())
+            except RuntimeError as exc:
+                if str(exc) == 'research_cancelled':
+                    sdata['research_status'] = 'cancelled'
+                    sdata['research_error'] = None
+                    _research_task_store.update(research_task_id, status='cancelled', finished_at=time.time(), cancellation_requested=1)
+                else:
+                    sdata['research_status'] = 'error'
+                    sdata['research_error'] = str(exc)
+                    _research_task_store.update(research_task_id, status='failed', finished_at=time.time(), error=type(exc).__name__)
+                    log_error(f'[ResearchAssistant] {exc}')
             except Exception as exc:
                 sdata['research_status'] = 'error'
                 sdata['research_error'] = str(exc)
+                _research_task_store.update(research_task_id, status='failed', finished_at=time.time(), error=type(exc).__name__)
                 log_error(f'[ResearchAssistant] {exc}')
 
         thread = threading.Thread(target=research_task, daemon=True)
         thread.start()
         return jsonify({'success': True, 'status': 'running'})
 
+    if not app.config.get('TESTING', False):
+        try:
+            from core.artifact_manager import create_run_id
+            process_run_id = create_run_id()
+            process_output_dir = PROJECT_ROOT / 'data' / 'reports' / 'research' / process_run_id
+            process_datasets = _session_research_datasets(sdata, max_rows=max_rows)
+            serialized = {name: {'records': json.loads(frame.to_json(orient='records', date_format='iso')), 'source_rows': int(frame.attrs.get('source_rows', len(frame)))} for name, frame in process_datasets.items()}
+            process_payload = {
+                'description': description, 'datasets': serialized,
+                'problem_contract': requested_contract.public() if requested_contract is not None else None,
+                'target': data.get('targets') or data.get('target') or None,
+                'mechanistic_ir': data.get('mechanistic_ir'), 'problem_images': problem_images,
+                'output_dir': str(process_output_dir), 'run_id': process_run_id,
+                'options': {
+                    'max_analysis_rows': max_rows, 'feedback_optimization': request_bool('feedback_optimization', True),
+                    'feedback_trials': feedback_trials, 'credibility_audit': request_bool('credibility_audit', True),
+                    'enable_gnn_screen': request_bool('enable_gnn_screen', False), 'enable_graph_search': request_bool('enable_graph_search', False),
+                    'run_modeling': request_bool('run_modeling', True), 'generate_plots': request_bool('generate_plots', True),
+                },
+            }
+            task = _research_process_service.submit_research(session.get('sid', ''), process_payload, wall_seconds=max(30, min(int(data.get('wall_seconds', 600)), 1800)))
+            done = _research_process_service.wait(session.get('sid', ''), task['task_id'], timeout=max(35, min(int(data.get('wall_seconds', 600)) + 10, 1810)))
+            if done['status'] != 'completed':
+                return jsonify({'success': False, 'error': done.get('error') or done['status'], 'status': done['status']}), 504 if done['status'] == 'timeout' else 500
+            sdata['research_status'] = 'done'; sdata['research_task_id'] = task['task_id']; sdata['research_output_dir'] = str(process_output_dir)
+            sdata['research_result'] = done.get('result')
+            return jsonify(clean_for_json({'success': True, 'result': done.get('result'), 'execution_mode': 'spawn_process'}))
+        except (TypeError, ValueError, KeyError) as exc:
+            return jsonify({'success': False, 'error': str(exc)}), 409
+        except Exception as exc:
+            log_error(f'[ResearchAssistant] {exc}')
+            return api_error_response(str(exc), traceback.format_exc())
+
     try:
+        # A previous asynchronous cancellation must not poison a subsequent
+        # synchronous request; the latter has no cancellation event.
+        sdata.pop('research_cancel_event', None)
+        sdata.pop('research_task_id', None)
         result = execute_research()
         return jsonify(clean_for_json({'success': True, 'result': result}))
     except ValueError as e:
@@ -839,19 +1223,660 @@ def api_research_run():
         return api_error_response(str(e), traceback.format_exc())
 
 
+@app.route('/api/research/method-plan', methods=['POST'])
+def api_research_method_plan():
+    """Return a bounded external-method plan without executing third-party code."""
+    payload = request.get_json(silent=True) or {}
+    profile = payload.get('profile')
+    if profile is None:
+        profile = {key: value for key, value in payload.items()
+                   if key not in {'enabled_methods', 'installed_backends', 'max_methods'}}
+    enabled = payload.get('enabled_methods')
+    installed = payload.get('installed_backends')
+    max_methods = payload.get('max_methods', 8)
+    try:
+        from core.external_method_router import plan_external_methods
+        result = plan_external_methods(
+            profile,
+            enabled_methods=enabled,
+            installed_backends=installed,
+            max_methods=max_methods,
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/binding-contract', methods=['POST'])
+def api_research_binding_contract():
+    """Build a versioned semantic binding and conservative backend plan."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from core.binding_contract import build_binding_contract, plan_bound_subgraphs
+        contract = build_binding_contract(**{key: payload.get(key) for key in (
+            'input_tables', 'variables', 'target', 'constraints', 'initial_conditions',
+            'valid_domain', 'sources', 'unresolved', 'data_version') if key in payload})
+        result = {'contract': contract, 'plan': plan_bound_subgraphs(contract)}
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result,
+                                   'execution_policy': 'binding_only_no_implicit_units'}))
+
+
+@app.route('/api/research/module-catalog', methods=['GET'])
+def api_research_module_catalog():
+    """Expose explicit module maturity and evidence scope to the UI."""
+    try:
+        from core.module_catalog import audit_module_usage, load_module_catalog
+        if request.args.get('audit') == '1':
+            result = audit_module_usage(PROJECT_ROOT)
+        else:
+            result = load_module_catalog(check_imports=request.args.get('check_imports') == '1')
+    except (OSError, TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/graph-search', methods=['POST'])
+def api_research_graph_search():
+    """Execute one explicitly bound typed-graph search in the local worker.
+
+    The browser submits a versioned graph bundle, never Python source or a
+    callback.  The server owns the output root and the graph-search validator
+    decides whether the bundle is executable.  This is the first concrete
+    execution bridge for dynamic candidates; it does not infer missing units or
+    silently turn a proposal into a model.
+    """
+    payload = request.get_json(silent=True) or {}
+    bundle = payload.get('bundle', payload)
+    if not isinstance(bundle, dict):
+        return jsonify({'success': False, 'error': 'bundle 必须是 JSON 对象'}), 400
+    try:
+        from core.graph_search_artifacts import run_search_bundle
+        result, directory = run_search_bundle(
+            bundle,
+            output_root=PROJECT_ROOT / 'workspace' / 'graph_search_runs',
+        )
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True,
+        'result': result,
+        'run_directory': str(directory),
+        'execution_policy': 'typed_graph_bundle_only_local_worker',
+    }))
+
+
+@app.route('/api/research/primitive-graph', methods=['POST'])
+def api_research_primitive_graph():
+    """Execute a completed arithmetic graph without evaluating submitted code."""
+    payload = request.get_json(silent=True) or {}
+    nodes, bindings = payload.get('nodes'), payload.get('bindings')
+    output_ids = payload.get('output_ids', [])
+    if not isinstance(nodes, list) or not isinstance(bindings, dict) or not isinstance(output_ids, list):
+        return jsonify({'success': False, 'error': 'nodes、bindings 和 output_ids 必须是 JSON 类型'}), 400
+    try:
+        from core.primitive_graph_runtime import execute_primitive_graph
+        result = execute_primitive_graph(nodes, bindings, output_ids=output_ids)
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'result': result,
+        'execution_policy': 'typed_arithmetic_graph_only_no_source_eval',
+    }))
+
+
+@app.route('/api/research/dynamic-compile', methods=['POST'])
+def api_research_dynamic_compile():
+    """Dispatch a typed model contract to its bounded local execution backend."""
+    payload = request.get_json(silent=True) or {}
+    kind = payload.get('kind')
+    contract = payload.get('payload')
+    if not isinstance(kind, str) or not isinstance(contract, dict):
+        return jsonify({'success': False, 'error': 'kind 和 payload 必须是 JSON 类型'}), 400
+    if bool(payload.get('async', False)) or not app.config.get('TESTING', False):
+        try:
+            get_session()
+            task = _dynamic_execution_service.submit_dynamic(
+                session.get('sid', ''), kind, contract,
+                wall_seconds=max(1, min(int(payload.get('wall_seconds', 120)), 600)),
+            )
+            if not bool(payload.get('async', False)):
+                task = _dynamic_execution_service.wait(session.get('sid', ''), task['task_id'], timeout=605)
+                if task['status'] != 'completed':
+                    return jsonify({'success': False, 'status': task['status'], 'error': task.get('error')}), 504
+                return jsonify(clean_for_json({'success': True, 'result': task.get('result'), 'execution_policy': 'typed_dynamic_spawn_worker'}))
+        except (TypeError, ValueError) as exc:
+            return jsonify({'success': False, 'error': str(exc)}), 409
+        return jsonify({'success': True, 'status': task['status'], 'task': task}), 202
+    try:
+        from core.dynamic_model_compiler import compile_and_execute_model
+        result = compile_and_execute_model(kind, contract)
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result,
+                                   'execution_policy': 'typed_dynamic_dispatch_no_source_eval'}))
+
+
+@app.route('/api/execution/capabilities', methods=['GET'])
+def api_execution_capabilities():
+    """Expose executable backend limits so the UI cannot promise unsupported work."""
+    from core.execution_capabilities import get_capabilities
+    return jsonify({'success': True, 'capabilities': get_capabilities(),
+                    'execution_policy': 'spawn_process_shared_sqlite_ledger'})
+
+
+def _execute_dynamic_contract(kind, contract):
+    from core.dynamic_model_compiler import compile_and_execute_model
+    return compile_and_execute_model(kind, contract)
+
+
+@app.route('/api/research/dynamic-compile/status/<task_id>', methods=['GET'])
+def api_research_dynamic_compile_status(task_id):
+    try:
+        get_session()
+        task = _dynamic_execution_service.status(session.get('sid', ''), task_id)
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 404
+    return jsonify(clean_for_json({'success': True, 'task': task}))
+
+
+@app.route('/api/research/dynamic-compile/cancel/<task_id>', methods=['POST'])
+def api_research_dynamic_compile_cancel(task_id):
+    try:
+        get_session()
+        task = _dynamic_execution_service.cancel(session.get('sid', ''), task_id)
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 404
+    return jsonify(clean_for_json({'success': True, 'task': task}))
+
+
+@app.route('/api/research/structure-candidate/execute', methods=['POST'])
+def api_research_structure_candidate_execute():
+    """Execute a completed candidate graph while preserving proposal status."""
+    payload = request.get_json(silent=True) or {}
+    candidate, bindings = payload.get('candidate'), payload.get('bindings')
+    output_ids = payload.get('output_ids', [])
+    if not isinstance(candidate, dict) or not isinstance(bindings, dict) or not isinstance(output_ids, list):
+        return jsonify({'success': False, 'error': 'candidate、bindings 和 output_ids 必须是 JSON 类型'}), 400
+    try:
+        from core.candidate_execution import execute_structure_candidate
+        result = execute_structure_candidate(candidate, bindings, output_ids=output_ids)
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'result': result,
+        'execution_policy': 'completed_typed_candidate_only_no_source_eval',
+    }))
+
+
+@app.route('/api/research/structure-candidate/cegis', methods=['POST'])
+def api_research_structure_candidate_cegis():
+    """Run bounded arithmetic candidate repair against explicit JSON cases."""
+    payload = request.get_json(silent=True) or {}
+    candidate, cases = payload.get('candidate'), payload.get('cases')
+    if not isinstance(candidate, dict) or not isinstance(cases, list):
+        return jsonify({'success': False, 'error': 'candidate 和 cases 必须是 JSON 类型'}), 400
+    if not 1 <= len(cases) <= 256 or not all(isinstance(case, dict) for case in cases):
+        return jsonify({'success': False, 'error': 'cases 必须包含 1 到 256 个对象'}), 400
+    options = payload.get('config', {})
+    if not isinstance(options, dict):
+        return jsonify({'success': False, 'error': 'config 必须是对象'}), 400
+    try:
+        from core.candidate_execution import run_arithmetic_candidate_cegis
+        from core.cegis_controller import CEGISConfig
+        allowed = {'max_rounds', 'max_candidates', 'max_repairs', 'max_counterexamples', 'max_wall_seconds', 'max_cost_units'}
+        if set(options) - allowed:
+            raise ValueError('config_fields_invalid')
+        config = CEGISConfig(**options) if options else None
+        result = run_arithmetic_candidate_cegis(
+            candidate, cases, config=config, output_id=payload.get('output_id'),
+            tolerance=payload.get('tolerance', 1e-6),
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'result': result,
+        'execution_policy': 'bounded_arithmetic_cegis_constant_repairs; not_a_proof',
+    }))
+
+
+@app.route('/api/research/ode-cegis', methods=['POST'])
+def api_research_ode_cegis():
+    """Run the bounded polynomial ODE family through the shared CEGIS loop."""
+    payload = request.get_json(silent=True) or {}
+    candidate, cases = payload.get('candidate'), payload.get('cases')
+    if not isinstance(candidate, dict) or not isinstance(cases, list):
+        return jsonify({'success': False, 'error': 'candidate 和 cases 必须是 JSON 类型'}), 400
+    if not 1 <= len(cases) <= 128 or not all(isinstance(case, dict) for case in cases):
+        return jsonify({'success': False, 'error': 'cases 必须包含 1 到 128 个对象'}), 400
+    options = payload.get('config', {})
+    if not isinstance(options, dict):
+        return jsonify({'success': False, 'error': 'config 必须是对象'}), 400
+    try:
+        from core.ode_cegis import run_ode_cegis
+        from core.cegis_controller import CEGISConfig
+        allowed = {'max_rounds', 'max_candidates', 'max_repairs', 'max_counterexamples', 'max_wall_seconds', 'max_cost_units'}
+        if set(options) - allowed:
+            raise ValueError('config_fields_invalid')
+        config = CEGISConfig(**options) if options else None
+        result = run_ode_cegis([candidate], cases, config=config,
+                               tolerance=payload.get('tolerance', 1e-2))
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'result': result,
+        'execution_policy': 'bounded_ode_cegis_polynomial_rhs; not_a_dynamics_proof',
+    }))
+
+
+@app.route('/api/research/optimization-cegis', methods=['POST'])
+def api_research_optimization_cegis():
+    """Run a bounded validated linear-program candidate through CEGIS."""
+    payload = request.get_json(silent=True) or {}
+    candidate, cases = payload.get('candidate'), payload.get('cases')
+    if not isinstance(candidate, dict) or not isinstance(cases, list):
+        return jsonify({'success': False, 'error': 'candidate 和 cases 必须是 JSON 类型'}), 400
+    if not 1 <= len(cases) <= 128 or not all(isinstance(case, dict) for case in cases):
+        return jsonify({'success': False, 'error': 'cases 必须包含 1 到 128 个对象'}), 400
+    options = payload.get('config', {})
+    if not isinstance(options, dict):
+        return jsonify({'success': False, 'error': 'config 必须是对象'}), 400
+    try:
+        from core.optimization_cegis import run_optimization_family_cegis
+        from core.cegis_controller import CEGISConfig
+        allowed = {'max_rounds', 'max_candidates', 'max_repairs', 'max_counterexamples', 'max_wall_seconds', 'max_cost_units'}
+        if set(options) - allowed:
+            raise ValueError('config_fields_invalid')
+        config = CEGISConfig(**options) if options else None
+        kind = str(candidate.get('kind', 'linear_program'))
+        result = run_optimization_family_cegis(kind, [candidate], cases, config=config,
+                                               tolerance=payload.get('tolerance', 1e-7))
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'result': result,
+        'execution_policy': 'bounded_linear_program_cegis; not_an_optimization_proof',
+    }))
+
+
+@app.route('/api/research/data-graph-search', methods=['POST'])
+def api_research_data_graph_search():
+    """Bind a bounded JSON table to a scalar typed-graph search.
+
+    This is intentionally not a general-purpose dataframe upload endpoint:
+    callers must name one to four features and one target, and the bridge records the
+    dimensionless/unit and causal limitations in its audit.  It gives the UI a
+    real data-to-execution path without allowing arbitrary Python or paths.
+    """
+    payload = request.get_json(silent=True) or {}
+    rows = payload.get('rows')
+    feature, features, target = payload.get('feature'), payload.get('features'), payload.get('target')
+    if not isinstance(rows, list) or not rows or len(rows) > 384:
+        return jsonify({'success': False, 'error': 'rows 必须是 1 到 384 行的 JSON 数组'}), 400
+    if features is None:
+        features = [feature] if isinstance(feature, str) else None
+    if not isinstance(features, list) or not all(isinstance(item, str) for item in features) or not isinstance(target, str):
+        return jsonify({'success': False, 'error': 'features（最多四列）和 target 必须是列名'}), 400
+    if not all(isinstance(row, dict) for row in rows):
+        return jsonify({'success': False, 'error': 'rows 的每一项必须是对象'}), 400
+    try:
+        from core.data_graph_bridge import build_tabular_graph_bundle
+        frame = pd.DataFrame.from_records(rows)
+        bundle, audit = build_tabular_graph_bundle(
+            frame, features, target, statement=payload.get('statement'),
+            max_rows=payload.get('max_rows', 384), random_state=payload.get('random_state', 42),
+            feature_dimensions=payload.get('feature_dimensions'),
+            target_dimensions=payload.get('target_dimensions'),
+        )
+        from core.graph_search_artifacts import run_search_bundle
+        result, directory = run_search_bundle(
+            bundle, output_root=PROJECT_ROOT / 'workspace' / 'graph_search_runs',
+        )
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'result': result, 'audit': audit,
+        'run_directory': str(directory),
+        'execution_policy': 'bounded_json_table_to_typed_scalar_graph_local_worker',
+    }))
+
+
+@app.route('/api/research/gnn-interactions', methods=['POST'])
+def api_research_gnn_interactions():
+    """Run the optional bounded torch message-passing interaction screen."""
+    payload = request.get_json(silent=True) or {}
+    rows, target = payload.get('rows'), payload.get('target')
+    if not isinstance(rows, list) or not rows or len(rows) > 2_000:
+        return jsonify({'success': False, 'error': 'rows 必须是 1 到 2000 行的 JSON 数组'}), 400
+    if not isinstance(target, str) or not target:
+        return jsonify({'success': False, 'error': 'target 必须是列名'}), 400
+    if not all(isinstance(row, dict) for row in rows):
+        return jsonify({'success': False, 'error': 'rows 的每一项必须是对象'}), 400
+    try:
+        from core.gnn_interaction_screen import discover_gnn_interactions
+        result = discover_gnn_interactions(
+            pd.DataFrame.from_records(rows), target, columns=payload.get('columns'),
+            max_rows=payload.get('max_rows', 2_000), epochs=payload.get('epochs', 120),
+            hidden_dim=payload.get('hidden_dim', 16), restarts=payload.get('restarts', 2),
+            message_layers=payload.get('message_layers', 1),
+            dynamic_windows=payload.get('dynamic_windows', 0),
+            group_column=payload.get('group_column'), time_column=payload.get('time_column'),
+            random_state=payload.get('random_state', 0),
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'result': result,
+        'execution_policy': 'bounded_torch_message_passing_predictive_only',
+    }))
+
+
+@app.route('/api/research/causal-discovery', methods=['POST'])
+def api_research_causal_discovery():
+    """Run the bounded order-constrained DAG hypothesis screen."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from core.causal_dag import discover_linear_causal_dag
+        result = discover_linear_causal_dag(
+            payload.get('data'), payload.get('variable_names'),
+            edge_threshold=payload.get('edge_threshold', 0.15),
+            bootstrap=payload.get('bootstrap', 20), max_edges=payload.get('max_edges', 64),
+            random_state=payload.get('random_state', 0),
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result,
+                                   'execution_policy': 'bounded_order_constrained_dag_hypothesis_not_causal_proof'}))
+
+
+@app.route('/api/research/evaluation-sources', methods=['GET'])
+def api_research_evaluation_sources():
+    """Expose the conservative source audit without downloading source content."""
+    try:
+        from core.evaluation_source_audit import EvaluationSourceRegistry
+        registry = EvaluationSourceRegistry.load(PROJECT_ROOT / 'examples' / 'evaluation_sources.json')
+        return jsonify(clean_for_json({'success': True, 'result': registry.public_metadata()}))
+    except (OSError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/research/external-data-benchmark', methods=['POST'])
+def api_research_external_data_benchmark():
+    """Run the pinned public external-data benchmark from the local catalog."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        seed = payload.get('seed', 20260910)
+        max_rows = payload.get('max_rows', 100_000)
+        if type(seed) is not int or not 0 <= seed < 2**32:
+            raise ValueError('seed 必须是 0 到 2^32-1 的整数')
+        if type(max_rows) is not int or not 1_000 <= max_rows <= 100_000:
+            raise ValueError('max_rows 必须是 1000 到 100000 的整数')
+        from core.external_data_benchmark import run_external_data_benchmark
+        result = run_external_data_benchmark(
+            PROJECT_ROOT / 'examples' / 'external_dataset_catalog.json',
+            PROJECT_ROOT / 'data' / 'external', seed=seed, max_rows=max_rows,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/holdout-intake', methods=['POST'])
+def api_research_holdout_intake():
+    """Validate metadata for an external unseen holdout without reading content."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from core.holdout_intake import validate_holdout_intake
+        result = validate_holdout_intake(
+            payload,
+            min_cases=payload.pop('_min_cases', 20) if isinstance(payload, dict) else 20,
+            min_families=payload.pop('_min_families', 4) if isinstance(payload, dict) else 4,
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/holdout-bind', methods=['POST'])
+def api_research_holdout_bind():
+    """Bind metadata-only intake commitments to a sealed blind manifest."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from core.holdout_binding import bind_holdout_intake
+        result = bind_holdout_intake(
+            payload.get('intake'), payload.get('manifest'),
+            min_cases=payload.get('min_cases', 20),
+            min_families=payload.get('min_families', 4),
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/method-execute', methods=['POST'])
+def api_research_method_execute():
+    """Execute one local, allow-listed method adapter with typed payload."""
+    payload = request.get_json(silent=True) or {}
+    method = payload.get('method')
+    method_payload = payload.get('payload', {})
+    try:
+        from core.external_method_runtime import execute_external_method
+        result = execute_external_method(method, method_payload)
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/method-cegis', methods=['POST'])
+def api_research_method_cegis():
+    """Run a bounded CEGIS loop over typed PDE/UDE/symbolic candidates."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from core.cegis_controller import CEGISConfig
+        from core.external_method_cegis import run_external_method_cegis
+        method = payload.get('method')
+        candidates = payload.get('candidates')
+        cases = payload.get('cases')
+        budget = payload.get('budget') or {}
+        config = CEGISConfig(
+            max_rounds=budget.get('max_rounds', 8),
+            max_candidates=budget.get('max_candidates', 24),
+            max_repairs=budget.get('max_repairs', 12),
+            max_counterexamples=budget.get('max_counterexamples', 32),
+            max_wall_seconds=budget.get('max_wall_seconds', 30.0),
+            max_cost_units=budget.get('max_cost_units', 256),
+        )
+        result = run_external_method_cegis(method, candidates, cases, config=config)
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/method-compare', methods=['POST'])
+def api_research_method_compare():
+    """Run a pre-registered local-method comparison on a supplied task grid."""
+    payload = request.get_json(silent=True) or {}
+    manifest = payload.get('manifest')
+    tasks = payload.get('tasks')
+    wall_seconds = payload.get('wall_seconds')
+    try:
+        from core.external_method_comparison import run_external_method_comparison
+        result = run_external_method_comparison(
+            manifest, tasks, wall_seconds=wall_seconds,
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/blind-accuracy', methods=['POST'])
+def api_research_blind_accuracy():
+    """Assess accuracy/significance only from an unlocked blind benchmark."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from core.blind_statistics import assess_blind_accuracy
+        result = assess_blind_accuracy(
+            payload.get('manifest'), payload.get('runs'), payload.get('scores'),
+            baseline_system=payload.get('baseline_system'),
+            treatment_system=payload.get('treatment_system'),
+            primary_score=payload.get('primary_score', 'numerically_correct'),
+            success_threshold=payload.get('success_threshold', 0.5),
+            min_cases=payload.get('min_cases', 20),
+            alpha=payload.get('alpha', 0.05),
+            bootstrap_replicates=payload.get('bootstrap_replicates', 2000),
+            seed=payload.get('seed', 20260910),
+            independent_evaluation_attested=payload.get('independent_evaluation_attested', False),
+            failure_as_incorrect=payload.get('failure_as_incorrect', True),
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/uncertainty-audit', methods=['POST'])
+def api_research_uncertainty_audit():
+    """Decompose supplied replicate outputs and optionally audit calibration."""
+    payload = request.get_json(silent=True) or {}
+    evaluations = payload.get('evaluations')
+    try:
+        from core.uncertainty_audit import build_uncertainty_audit
+        result = build_uncertainty_audit(
+            evaluations,
+            unit_signature=payload.get('unit_signature'),
+            interval=payload.get('interval'),
+            probability=payload.get('probability'),
+            calibration_min_points=payload.get('calibration_min_points', 10),
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result}))
+
+
+@app.route('/api/research/clarify', methods=['POST'])
+def api_research_clarify():
+    """Record one displayed clarification as a new immutable contract revision.
+
+    The question is selected by a server-validated index.  A caller therefore
+    cannot inject a different question into the fact ledger.  This endpoint
+    does not retain provider configuration or API keys; the browser explicitly
+    starts the subsequent research run with its current settings.
+    """
+    sdata = get_session()
+    result = sdata.get('research_result')
+    if not isinstance(result, dict):
+        return jsonify({'success': False, 'error': '当前没有可澄清的研究结果'}), 409
+    proposal = (result.get('specialized_results') or {}).get('model_hypotheses')
+    if not isinstance(proposal, dict):
+        return jsonify({'success': False, 'error': '当前结果没有候选机制澄清问题'}), 409
+    questions = proposal.get('questions')
+    if not isinstance(questions, list):
+        return jsonify({'success': False, 'error': '澄清问题格式无效'}), 409
+
+    data = request.get_json(silent=True) or {}
+    question_index = data.get('question_index')
+    if type(question_index) is not int or not 0 <= question_index < len(questions):
+        return jsonify({'success': False, 'error': '请选择当前结果中的澄清问题'}), 400
+    answer = data.get('answer')
+    if not isinstance(answer, str) or not answer.strip() or len(answer) > 4000:
+        return jsonify({'success': False, 'error': '回答不能为空且不能超过 4000 个字符'}), 400
+    hard_constraint = data.get('hard_constraint', False)
+    if type(hard_constraint) is not bool:
+        return jsonify({'success': False, 'error': '硬约束标记必须是布尔值'}), 400
+
+    current_payload = sdata.get('research_clarification_contract')
+    proposal_payload = proposal.get('problem_contract')
+    try:
+        from core.model_hypotheses import ProblemContract
+        if isinstance(current_payload, dict):
+            contract = ProblemContract.from_payload(current_payload)
+        elif isinstance(proposal_payload, dict):
+            contract = ProblemContract.from_payload(proposal_payload)
+        else:
+            return jsonify({'success': False, 'error': '原题意契约不可用'}), 409
+        question = questions[question_index]
+        if not isinstance(question, str) or not question.strip():
+            return jsonify({'success': False, 'error': '澄清问题格式无效'}), 409
+        revised = contract.record_confirmation(
+            question.strip(), answer.strip(), hard_constraint=hard_constraint,
+        )
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': '题意契约修订失败'}), 400
+
+    revised_payload = revised.public()
+    sdata['research_clarification_contract'] = revised_payload
+    return jsonify(clean_for_json({
+        'success': True,
+        'contract': revised_payload,
+        'contract_hash': revised.digest,
+        'revision': revised_payload['revision'],
+        'question_index': question_index,
+        'rerun_required': True,
+        'policy': {
+            'source': 'explicit_user_confirmation',
+            'previous_result_mutated': False,
+            'api_key_persisted': False,
+        },
+    }))
+
+
 @app.route('/api/research/status', methods=['GET'])
 def api_research_status():
     """Return the asynchronous research state without blocking a web worker."""
     sdata = get_session()
+    process_task_id = sdata.get('research_task_id')
+    if process_task_id and not app.config.get('TESTING', False):
+        try:
+            process_task = _research_process_service.status(session.get('sid', ''), process_task_id)
+            mapped = {'running': 'running', 'timeout': 'error', 'failed': 'error',
+                      'cancelled': 'cancelled', 'interrupted': 'error', 'completed': 'done'}
+            sdata['research_status'] = mapped.get(process_task['status'], process_task['status'])
+            sdata['research_error'] = process_task.get('error')
+            if process_task['status'] == 'completed' and isinstance(process_task.get('result'), dict):
+                sdata['research_result'] = process_task['result']
+        except (TypeError, ValueError):
+            pass
     status = sdata.get('research_status', 'idle')
     payload = {
         'success': status != 'error',
         'status': status,
         'error': sdata.get('research_error'),
+        'cancellation_requested': bool(
+            sdata.get('research_cancel_event') is not None
+            and sdata['research_cancel_event'].is_set()
+        ),
     }
     if status == 'done':
         payload['result'] = sdata.get('research_result')
     return jsonify(clean_for_json(payload)), 200 if status != 'error' else 500
+
+
+@app.route('/api/research/cancel', methods=['POST'])
+def api_research_cancel():
+    """Request cooperative cancellation of the current asynchronous run.
+
+    The endpoint only signals the worker; it does not terminate a Python
+    thread in the middle of a solver call.  The worker discards any result
+    produced after the signal and reports ``cancelled`` when it reaches a
+    safe checkpoint.
+    """
+    sdata = get_session()
+    process_task_id = sdata.get('research_task_id')
+    if process_task_id and not app.config.get('TESTING', False):
+        try:
+            task = _research_process_service.cancel(session.get('sid', ''), process_task_id)
+            sdata['research_status'] = 'cancelling'
+            return jsonify({'success': True, 'status': task['status'], 'cancellation_requested': True})
+        except (TypeError, ValueError) as exc:
+            return jsonify({'success': False, 'error': str(exc)}), 404
+    if sdata.get('research_status') not in {'running', 'cancelling'}:
+        return jsonify({'success': False, 'error': '当前没有可取消的研究任务'}), 409
+    cancel_event = sdata.get('research_cancel_event')
+    if cancel_event is None:
+        return jsonify({'success': False, 'error': '当前任务不支持取消'}), 409
+    cancel_event.set()
+    sdata['research_status'] = 'cancelling'
+    return jsonify({'success': True, 'status': 'cancelling', 'cancellation_requested': True})
 
 
 @app.route('/api/research/chart/<path:filename>', methods=['GET'])
@@ -929,6 +1954,139 @@ def api_research_manifest():
     )
 
 
+@app.route('/api/research/trace', methods=['GET'])
+def api_research_trace():
+    """Download one bounded trace bundle linking verdict, evidence and manifest."""
+    output_dir = get_session().get('research_output_dir')
+    if not output_dir:
+        return jsonify({'success': False, 'error': '尚未生成研究追溯包'}), 404
+    evidence_path = _resolve_research_artifact(
+        output_dir, 'evidence/evidence_bundle.json', 'evidence', suffix='.json'
+    )
+    manifest_path = _resolve_research_artifact(
+        output_dir, 'artifact_manifest.json', '.', suffix='.json'
+    )
+    if evidence_path is None or manifest_path is None or manifest_path.parent != Path(output_dir).resolve():
+        return jsonify({'success': False, 'error': '研究追溯所需产物不存在'}), 404
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        from core.verdict_export import build_trace_bundle
+        verdict = evidence.get('model_verdict', {}) if isinstance(evidence, dict) else {}
+        trace = build_trace_bundle(verdict=verdict if isinstance(verdict, dict) else {
+            'schema_version': 'mathmodel.model-verdict/v1', 'status': 'unresolved',
+            'evidence_refs': []}, evidence=[evidence] if isinstance(evidence, dict) else [], manifest=manifest)
+        payload = json.dumps(trace, ensure_ascii=False, indent=2).encode('utf-8')
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return jsonify({'success': False, 'error': f'研究追溯包生成失败：{exc}'}), 400
+    return send_file(io.BytesIO(payload), mimetype='application/json',
+                     as_attachment=True, download_name='trace_bundle.json')
+
+
+@app.route('/api/research/sensitivity', methods=['POST'])
+def api_research_sensitivity():
+    """Aggregate bounded slider what-if evaluations without executing user code.
+
+    The numerical evaluation is deliberately performed by the trusted model
+    layer. This endpoint only compares an already-produced base evaluation and
+    variant evaluations, so a browser cannot smuggle Python callbacks into the
+    server. Missing evaluations remain ``not_assessed``.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': '敏感性输入必须是对象'}), 400
+    base_evaluation = data.get('base_evaluation')
+    variants = data.get('variants')
+    if not isinstance(base_evaluation, dict) or not isinstance(variants, list):
+        return jsonify({'success': False, 'error': '需要 base_evaluation 与 variants'}), 400
+    if not 1 <= len(variants) <= 64:
+        return jsonify({'success': False, 'error': 'variants 数量必须在 1 到 64 之间'}), 400
+    normalized = []
+    for index, variant in enumerate(variants):
+        if not isinstance(variant, dict) or not isinstance(variant.get('overrides', {}), dict):
+            return jsonify({'success': False, 'error': f'variant_{index} 的 overrides 无效'}), 400
+        evaluation = variant.get('evaluation')
+        internal_overrides = dict(variant['overrides'])
+        internal_overrides['_evaluation'] = evaluation if isinstance(evaluation, dict) else None
+        normalized.append({
+            'id': str(variant.get('id', f'variant_{index}'))[:128],
+            'overrides': internal_overrides,
+        })
+    try:
+        from core.assumption_sensitivity import assess_assumption_sensitivity
+        result = assess_assumption_sensitivity(
+            {'_evaluation': base_evaluation}, normalized,
+            evaluate=lambda state: state.get('_evaluation') if isinstance(state.get('_evaluation'), dict) else (_ for _ in ()).throw(ValueError('evaluation_missing')),
+        )
+        for row in result.get('variants', []):
+            row.get('overrides', {}).pop('_evaluation', None)
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': f'敏感性评估输入无效：{exc}'}), 400
+    return jsonify(clean_for_json({'success': True, 'result': result,
+                                   'policy': 'aggregation_only_trusted_evaluator_required'}))
+
+
+@app.route('/api/research/hypothesis-plan', methods=['POST'])
+def api_research_hypothesis_plan():
+    """Validate slider controls and return an incremental recomputation plan.
+
+    This endpoint deliberately plans only.  Values are not trusted solver
+    results and no arbitrary callback/code can be supplied by the browser.
+    The caller must submit the plan to a trusted backend and compare the
+    affected-subgraph result with a full recomputation before publishing it.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': '输入必须是对象'}), 400
+    graph = data.get('graph')
+    raw = data.get('controls')
+    if not isinstance(graph, dict) or not isinstance(raw, dict):
+        return jsonify({'success': False, 'error': '需要 graph 与 controls'}), 400
+    try:
+        from core.hypothesis_controls import build_hypothesis_controls, affected_nodes_for_control
+        contract = build_hypothesis_controls(raw.get('controls', []), node_ids=raw.get('node_ids', []))
+        plans = []
+        for control in contract['controls']:
+            plans.append({
+                'control_id': control['id'],
+                **affected_nodes_for_control(graph, affected_nodes=control['affected_nodes']),
+            })
+    except (TypeError, ValueError) as exc:
+        return jsonify({'success': False, 'error': f'假设控件或图无效：{exc}'}), 400
+    return jsonify(clean_for_json({
+        'success': True, 'controls': contract, 'plans': plans,
+        'policy': 'plan_only; trusted_recompute_and_full_graph_comparison_required',
+    }))
+
+
+@app.route('/api/research/hypothesis-preview', methods=['POST'])
+def api_research_hypothesis_preview():
+    """Apply finite slider values and optionally recompute a typed graph."""
+    data = request.get_json(silent=True) or {}
+    controls_raw = data.get('controls')
+    values, bindings = data.get('values', {}), data.get('bindings', {})
+    graph = data.get('graph')
+    if not isinstance(controls_raw, list) or not isinstance(values, dict) or not isinstance(bindings, dict):
+        return jsonify({'success': False, 'error': 'controls、values 和 bindings 必须是 JSON 类型'}), 400
+    try:
+        from core.hypothesis_controls import apply_hypothesis_controls, build_hypothesis_controls
+        node_ids = [node.get('id') for node in (graph or {}).get('nodes', [])] if isinstance(graph, dict) else list(bindings)
+        contract = build_hypothesis_controls(controls_raw, node_ids=node_ids or list(bindings))
+        preview = apply_hypothesis_controls(contract, values, bindings, graph=graph if isinstance(graph, dict) else None)
+        execution = None
+        if isinstance(graph, dict):
+            from core.primitive_graph_runtime import execute_primitive_graph
+            output_ids = data.get('output_ids', graph.get('output_ids', []))
+            if not isinstance(output_ids, list):
+                raise ValueError('output_ids_invalid')
+            execution = execute_primitive_graph(graph.get('nodes', []), preview['bindings'], output_ids=output_ids)
+    except (TypeError, ValueError, KeyError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    return jsonify(clean_for_json({'success': True, 'controls': contract, 'preview': preview,
+                                   'execution': execution,
+                                   'policy': 'finite_control_values_recomputed_in_typed_runtime'}))
+
+
 @app.route('/api/research/cache', methods=['DELETE'])
 def api_research_cache_delete():
     """Delete only the disposable cache of the current research run."""
@@ -981,6 +2139,11 @@ def api_data_autofix():
     df = sdata.get('df')
     if df is None:
         return jsonify({'success': False, 'error': 'No data uploaded'}), 400
+    if df.attrs.get('bounded_representation') or df.attrs.get('research_representation') not in (None, 'complete_rows'):
+        return jsonify({
+            'success': False,
+            'error': '当前仅有受限预览，不能对未读取的源文件执行全量自动修复；请先缩小范围或转换为 CSV/Parquet。',
+        }), 400
     data = request.get_json() or {}
     try:
         from core.data_quality import generate_data_quality_report
@@ -1025,7 +2188,10 @@ def api_upload_select():
             available_sheets = list(file_info.get('sheets') or [])
             if sheet_name not in available_sheets:
                 return jsonify({'success': False, 'error': 'Sheet不存在'}), 400
-            df = pd.read_excel(file_info['path'], sheet_name=sheet_name)
+            if file_info.get('bounded_representation') and file_info['ext'] == '.xlsx':
+                df = _read_large_xlsx_representation(file_info['path'], sheet_name)
+            else:
+                df = pd.read_excel(file_info['path'], sheet_name=sheet_name)
         else:
             df, _ = _read_file_with_sheets(file_info['path'], file_info['ext'])
         
@@ -1164,6 +2330,8 @@ def api_upload_merge():
             ):
                 return jsonify({'success': False, 'error': '选择的文件不存在'}), 400
             fi = files[idx]
+            if fi.get('bounded_representation'):
+                return jsonify({'success': False, 'error': '该大文件当前仅加载了受限预览，不能直接合并；请先按键聚合或缩小范围'}), 400
             if fi['ext'] in ('.xls', '.xlsx'):
                 available_sheets = list(fi.get('sheets') or [])
                 if sheet not in available_sheets:
@@ -1237,6 +2405,8 @@ def _resolve_uploaded_source(files, source):
     if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(files):
         raise TableTransformError('选择的数据文件不存在')
     file_info = files[index]
+    if file_info.get('bounded_representation'):
+        raise TableTransformError('该大文件当前仅加载了受限预览，不能直接关联；请先按键聚合或缩小范围')
     if file_info.get('ext') in ('.xls', '.xlsx'):
         available = list(file_info.get('sheets') or [])
         if sheet not in available:
@@ -2536,6 +3706,37 @@ def api_model_train():
             sdata['train_config'] = config
             log_warning(f"[Web] 训练失败: {e}")
     
+    # Production training runs in a spawn child so CPU-heavy models cannot
+    # freeze Flask and can be hard-terminated on timeout/cancel. Tests retain
+    # the in-process path for deterministic monkeypatching.
+    if not app.config.get('TESTING', False):
+        try:
+            run_id = uuid.uuid4().hex
+            artifact_dir = PROJECT_ROOT / 'data' / 'runtime' / 'training' / run_id
+            payload = {
+                'records': json.loads(df.to_json(orient='records', date_format='iso')),
+                'columns': [str(c) for c in df.columns],
+                'target_cols': target_cols,
+                'config': config,
+                'options': {'strategy_preference': data.get('strategy_preference')},
+                'artifact_path': str(artifact_dir / 'result.joblib'),
+            }
+            task = _training_process_service.submit_training(
+                sid or '', payload, wall_seconds=min(float(data.get('wall_seconds', 1800)), 1800)
+            )
+            sdata['train_status'] = 'running'
+            sdata['train_task_id'] = task['task_id']
+            sdata['train_execution_mode'] = 'spawn_process'
+            sdata['train_error'] = None
+            sdata['pipeline_result'] = None
+            sdata['modeling_result'] = None
+            sdata['model_result'] = None
+            sdata['train_events'] = []
+            sdata['train_live_results'] = []
+            return jsonify({'success': True, 'status': 'running', 'task_id': task['task_id'], 'execution_mode': 'spawn_process'}), 202
+        except Exception as exc:
+            return jsonify({'success': False, 'error': str(exc)}), 503
+
     sdata['train_status'] = 'running'
     sdata['train_error'] = None
     sdata['pipeline_result'] = None
@@ -2553,10 +3754,62 @@ def api_model_train():
 def api_model_status():
     """查询训练状态"""
     sdata = get_session()
+    task_id = sdata.get('train_task_id')
+    if task_id and not app.config.get('TESTING', False):
+        try:
+            task = _training_process_service.status(session.get('sid', ''), task_id)
+            mapped = {'completed': 'done', 'timeout': 'error', 'failed': 'error', 'interrupted': 'error', 'cancelled': 'cancelled'}
+            if task['status'] in mapped and sdata.get('train_status') == 'running':
+                sdata['train_status'] = mapped[task['status']]
+                sdata['train_error'] = task.get('error')
+                if task['status'] == 'completed' and task.get('result'):
+                    import joblib
+                    artifact = Path(task['result'].get('artifact_path', ''))
+                    if artifact.is_file() and artifact.stat().st_size < 2_000_000_000:
+                        bundle = joblib.load(artifact)
+                        entries = bundle.get('results', [])
+                        if len(entries) == 1:
+                            result = entries[0]['result']
+                            sdata['pipeline_result'] = result
+                            sdata['modeling_result'] = result.modeling_result
+                            sdata['model_result'] = _extract_model_result(result, result.modeling_result)
+                            sdata['train_config'] = bundle.get('config', {})
+                        elif entries:
+                            multi = {}
+                            boards = []
+                            for entry in entries:
+                                result = entry['result']; target = entry.get('target')
+                                summary = _extract_model_result(result, result.modeling_result)
+                                summary['target_col'] = target
+                                multi[target] = {'pipeline_result': result, 'modeling_result': result.modeling_result, 'summary': summary}
+                                boards.append({'target': target, 'leaderboard': summary.get('leaderboard', []), 'best_model': summary.get('decision', {}).get('recommended_name', '')})
+                            sdata['multi_target_results'] = multi
+                            sdata['pipeline_result'] = entries[0]['result']
+                            sdata['modeling_result'] = entries[0]['result'].modeling_result
+                            sdata['model_result'] = {'multi_target': True, 'targets': list(multi), 'leaderboards': boards}
+        except Exception as exc:
+            sdata['train_error'] = str(exc)
     status = sdata.get('train_status', 'idle')
     error = sdata.get('train_error')
     progress = sdata.get('train_progress')
-    return jsonify({'success': True, 'status': status, 'error': error, 'progress': progress})
+    return jsonify({'success': True, 'status': status, 'error': error, 'progress': progress,
+                    'task_id': task_id, 'execution_mode': sdata.get('train_execution_mode', 'thread')})
+
+
+@app.route('/api/model/cancel', methods=['POST'])
+def api_model_cancel():
+    """Hard-cancel the current process-backed training job."""
+    sdata = get_session()
+    task_id = sdata.get('train_task_id')
+    if not task_id or app.config.get('TESTING', False):
+        return jsonify({'success': False, 'error': 'no_process_training_task'}), 404
+    try:
+        task = _training_process_service.cancel(session.get('sid', ''), task_id)
+        if task.get('status') in {'cancelled', 'cancelling'}:
+            sdata['train_status'] = 'cancelled' if task['status'] == 'cancelled' else 'cancelling'
+        return jsonify({'success': True, 'status': sdata.get('train_status'), 'task': task})
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 404
 
 
 @app.route('/api/model/train-events', methods=['GET'])

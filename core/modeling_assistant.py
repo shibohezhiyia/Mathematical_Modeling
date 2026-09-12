@@ -8,9 +8,11 @@ is not allowed to invent joins, variables or numerical conclusions.
 
 from __future__ import annotations
 
+import html
 import json
 import math
 import re
+from hashlib import sha256
 from itertools import combinations
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
@@ -24,12 +26,16 @@ from .problem_solver import analyze_problem
 from .mathematical_reasoning import MathematicalReasoningEngine
 from .mechanistic_modeling import MechanisticModelingEngine
 from .semantic_model_compiler import SemanticModelCompiler
+from .hypothesis_generator import HypothesisGenerator
 from .mathematical_data_compiler import MathematicalDataCompiler
 from .artifact_manager import (
     ARTIFACT_SCHEMA_VERSION,
     RunArtifactManager,
     create_run_id,
 )
+from .model_verdict import build_model_verdict
+from .model_competition import compete_models, ModelCompetitionError
+from .structure_candidates import build_structure_candidates
 
 
 _NON_NAME = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
@@ -421,6 +427,8 @@ class ResearchResult:
     capability_report: Dict[str, Any]
     mathematical_model_spec: Dict[str, Any] = field(default_factory=dict)
     evidence_bundle: Dict[str, Any] = field(default_factory=dict)
+    model_verdict: Dict[str, Any] = field(default_factory=dict)
+    model_competitions: List[Dict[str, Any]] = field(default_factory=list)
     charts: List[Dict[str, Any]] = field(default_factory=list)
     model_result: Optional[Dict[str, Any]] = None
     model_results: List[Dict[str, Any]] = field(default_factory=list)
@@ -464,6 +472,11 @@ class MathModelingAssistant:
         credibility_max_rows: int = 5_000,
         random_state: int = 42,
         semantic_compiler: Optional[SemanticModelCompiler] = None,
+        hypothesis_generator: Optional[HypothesisGenerator] = None,
+        max_input_rows: int = 250_000,
+        max_input_memory_mb: int = 512,
+        enable_gnn_screen: bool = False,
+        enable_graph_search: bool = False,
     ) -> None:
         if output_dir is None:
             self.run_id = create_run_id()
@@ -486,7 +499,20 @@ class MathModelingAssistant:
         self.credibility_iterations = max(50, min(int(credibility_iterations), 1_000))
         self.credibility_max_rows = max(200, min(int(credibility_max_rows), 20_000))
         self.random_state = random_state
+        if isinstance(max_input_rows, bool) or not isinstance(max_input_rows, (int, np.integer)):
+            raise ValueError("max_input_rows 必须是整数")
+        if not 1_000 <= int(max_input_rows) <= 5_000_000:
+            raise ValueError("max_input_rows 必须在1000到5000000之间")
+        if isinstance(max_input_memory_mb, bool) or not isinstance(max_input_memory_mb, (int, np.integer)):
+            raise ValueError("max_input_memory_mb 必须是整数")
+        if not 64 <= int(max_input_memory_mb) <= 16_384:
+            raise ValueError("max_input_memory_mb 必须在64到16384之间")
+        self.max_input_rows = int(max_input_rows)
+        self.max_input_memory_mb = int(max_input_memory_mb)
+        self.enable_gnn_screen = bool(enable_gnn_screen)
+        self.enable_graph_search = bool(enable_graph_search)
         self.semantic_compiler = semantic_compiler
+        self.hypothesis_generator = hypothesis_generator
         self._datasets: Dict[str, pd.DataFrame] = {}
         self._profiles: Dict[str, DatasetProfile] = {}
         self._relationships_cache: Optional[List[DatasetRelation]] = None
@@ -541,6 +567,39 @@ class MathModelingAssistant:
                 self._runtime_warnings.append(f"扩展分析器 {task_type!r} 失败，已隔离：{exc}")
         return results
 
+    def _external_method_profile(self, candidate_tasks: Iterable[str]) -> Dict[str, bool]:
+        """Infer only conservative evidence flags for external method routing.
+
+        These flags are routing hints, not semantic claims.  In particular, a
+        datetime column is not enough to assert a dynamical system and a pair
+        of coordinate-looking columns is not enough to assert a PDE grid.
+        """
+        profiles = list(self._profiles.values())
+        numeric_data = any(bool(profile.numeric_columns) for profile in profiles)
+        time_series = any(
+            bool(profile.datetime_columns) and bool(profile.numeric_columns)
+            and profile.n_rows >= 16
+            for profile in profiles
+        )
+        coordinate_words = {"x", "y", "z", "lat", "lon", "latitude", "longitude", "经度", "纬度"}
+        spatial_grid = any(
+            sum(str(column).strip().lower() in coordinate_words for column in profile.numeric_columns) >= 2
+            and profile.n_rows >= 16
+            for profile in profiles
+        )
+        task_set = {str(item) for item in candidate_tasks}
+        return {
+            "numeric_data": numeric_data,
+            "time_series": time_series,
+            "spatial_grid": spatial_grid,
+            "known_dynamics": "differential_equations" in task_set,
+            # Missingness is not noise.  Keep this false until a diagnostic
+            # establishes a noise model, preventing weak-form routing from
+            # being triggered by null values alone.
+            "noise_expected": False,
+            "interaction_graph": any(len(profile.numeric_columns) >= 3 for profile in profiles),
+        }
+
     def run(
         self,
         problem: str,
@@ -550,6 +609,7 @@ class MathModelingAssistant:
         generate_plots: bool = True,
         mechanistic_ir: Optional[Mapping[str, Any]] = None,
         problem_images: Optional[Sequence[Mapping[str, Any]]] = None,
+        problem_contract: Optional[Any] = None,
     ) -> ResearchResult:
         """Analyze the problem and datasets, execute safe analyses, and report."""
         if not problem or not str(problem).strip():
@@ -634,11 +694,164 @@ class MathModelingAssistant:
                 primary_target = f"{additive_primary[0]}.{additive_primary[1]}"
         if "evaluation_ranking" in candidate_tasks:
             ranking_result = self._run_entropy_topsis(primary_target)
-            if ranking_result is None:
+            if ranking_result is None and self._datasets:
                 warnings.append("评价排名任务缺少至少两个可用数值指标，未执行 TOPSIS。")
 
         specialized_results: Dict[str, Any] = {}
         specialized_results["mechanistic_model"] = mechanistic_result
+        try:
+            from .external_method_router import plan_external_methods
+            specialized_results["external_method_plan"] = plan_external_methods(
+                self._external_method_profile(candidate_tasks)
+            )
+        except (TypeError, ValueError) as exc:
+            # Planning is advisory and must never make the main research run
+            # fail; preserve a machine-readable blocked state instead.
+            specialized_results["external_method_plan"] = {
+                "schema_version": "mathmodel.external-method-plan/v1",
+                "status": "not_assessed",
+                "candidates": [],
+                "reason": type(exc).__name__,
+            }
+        # Multivariate interaction pre-screen: this is an association graph
+        # with finite-resampling stability, not a causal/GNN result.  Keep it
+        # bounded so large workbooks cannot turn the research request into an
+        # O(p^2 * n) unbounded computation.
+        if self._datasets:
+            try:
+                from .interaction_graph_screen import discover_interaction_graph
+                interaction_graphs: Dict[str, Any] = {}
+                for name, frame in list(self._datasets.items())[:8]:
+                    numeric_columns = [
+                        column for column in self._profiles[name].numeric_columns
+                        if column not in self._profiles[name].id_candidates
+                    ]
+                    if len(numeric_columns) < 3:
+                        continue
+                    interaction_graphs[name] = discover_interaction_graph(
+                        frame, numeric_columns, max_variables=24, max_rows=min(self.max_analysis_rows, 4_000),
+                        bootstrap=24, random_state=self.random_state,
+                    )
+                if interaction_graphs:
+                    specialized_results["interaction_graph_screen"] = interaction_graphs
+            except Exception as exc:
+                self._runtime_warnings.append(f"多变量交互图筛查已降级：{exc}")
+        if self._datasets and self.enable_gnn_screen and target:
+            try:
+                from .gnn_interaction_screen import discover_gnn_interactions
+                gnn_results: Dict[str, Any] = {}
+                target_specs = _split_target_spec(target)
+                for target_spec in target_specs[:4]:
+                    if "." in target_spec:
+                        dataset_name, target_column = target_spec.split(".", 1)
+                    elif len(self._datasets) == 1:
+                        dataset_name, target_column = next(iter(self._datasets)), target_spec
+                    else:
+                        continue
+                    if dataset_name not in self._datasets or target_column not in self._datasets[dataset_name].columns:
+                        continue
+                    frame = self._datasets[dataset_name]
+                    profile = self._profiles[dataset_name]
+                    numeric_columns = [
+                        column for column in profile.numeric_columns
+                        if column != target_column and column not in profile.id_candidates
+                    ]
+                    # The GNN screen must not silently fall back to row-random
+                    # validation when the profile already exposes a repeated
+                    # entity or a reliable time axis.  Only pass metadata
+                    # columns that are present and have enough support; the
+                    # GNN adapter removes them from numeric features itself.
+                    group_column = next((column for column in profile.id_candidates
+                                         if column in frame.columns
+                                         and 3 <= frame[column].nunique(dropna=True) < max(4, len(frame) * 0.8)), None)
+                    time_column = next((column for column in profile.datetime_columns
+                                        if column in frame.columns), None)
+                    gnn_results[f"{dataset_name}.{target_column}"] = discover_gnn_interactions(
+                        frame, target_column, numeric_columns, max_variables=min(24, self.max_numeric_columns),
+                        max_rows=min(self.max_analysis_rows, 2_000), epochs=80, restarts=2,
+                        random_state=self.random_state, group_column=group_column,
+                        time_column=time_column,
+                    )
+                if gnn_results:
+                    specialized_results["gnn_interaction_screen"] = gnn_results
+            except Exception as exc:
+                self._runtime_warnings.append(f"GNN交互筛查已安全降级：{exc}")
+        # Keep incomplete pure-text tasks moving with bounded, auditable search
+        # seeds.  These are not executable models and never replace facts or
+        # numerical evidence; solver gates still require full binding.
+        try:
+            specialized_results["structure_candidates"] = build_structure_candidates(
+                problem_analysis,
+                has_observations=bool(self._datasets),
+                max_candidates=3,
+            )
+        except (TypeError, ValueError) as exc:
+            self._runtime_warnings.append(f"候选结构提议未完成，已跳过：{exc}")
+        # A real execution bridge is available only when the caller explicitly
+        # opts in and names a target.  This prevents the generic assistant from
+        # guessing a target/causal direction while allowing an ordinary table
+        # task to enter the same typed graph-search worker as the dedicated API.
+        if self._datasets and self.enable_graph_search:
+            try:
+                explicit_target = target_specs[0] if target_specs else None
+                if not explicit_target:
+                    self._runtime_warnings.append(
+                        "图搜索未执行：必须显式提供 target，系统不会从列名猜目标。"
+                    )
+                else:
+                    dataset_name, target_column = (
+                        explicit_target.split(".", 1) if "." in explicit_target
+                        else (next(iter(self._datasets)), explicit_target)
+                    )
+                    if dataset_name not in self._datasets or target_column not in self._datasets[dataset_name].columns:
+                        raise ValueError("graph_search_target_not_found")
+                    profile = self._profiles[dataset_name]
+                    feature_columns = [
+                        column for column in profile.numeric_columns
+                        if column != target_column and column not in profile.id_candidates
+                    ][:4]
+                    if not feature_columns:
+                        raise ValueError("graph_search_requires_numeric_features")
+                    from .data_graph_bridge import build_tabular_graph_bundle
+                    from .graph_search_artifacts import run_search_bundle
+                    bundle, audit = build_tabular_graph_bundle(
+                        self._datasets[dataset_name], feature_columns, target_column,
+                        statement=str(problem), max_rows=min(384, self.max_analysis_rows),
+                        random_state=self.random_state,
+                    )
+                    search_result, search_directory = run_search_bundle(
+                        bundle, output_root=self.output_dir / "graph_search_runs",
+                    )
+                    specialized_results["data_graph_search"] = {
+                        "dataset": dataset_name, "target": target_column,
+                        "features": feature_columns, "audit": audit,
+                        "result": search_result, "run_directory": str(search_directory),
+                        "execution_policy": "explicit_target_typed_graph_search; exploratory_not_causal",
+                    }
+            except Exception as exc:
+                self._runtime_warnings.append(f"数据图搜索未完成：{exc}")
+        if self.hypothesis_generator is not None:
+            from .model_hypotheses import ProblemContract, HypothesisValidationError
+            try:
+                # Separate channel: no proposed node is inserted into the factual
+                # specification, executable relations or numerical evidence bundle.
+                if problem_contract is None:
+                    hypothesis_contract = ProblemContract.create(str(problem))
+                elif isinstance(problem_contract, ProblemContract):
+                    hypothesis_contract = problem_contract
+                    if hypothesis_contract.public()["statement"] != str(problem):
+                        raise HypothesisValidationError("problem_contract_statement_mismatch")
+                else:
+                    raise HypothesisValidationError("problem_contract_type_mismatch")
+                hypothesis_result = self.hypothesis_generator.propose(hypothesis_contract)
+                specialized_results["model_hypotheses"] = hypothesis_result
+                if hypothesis_result.get("status") == "failed_safe":
+                    self._runtime_warnings.append(
+                        "候选机制提议未完成，既有事实与求解不受影响："
+                        + str(hypothesis_result.get("error_code", "unknown_error"))
+                    )
+            except HypothesisValidationError as exc:
+                self._runtime_warnings.append("题面超出候选机制接口限制，已跳过：" + exc.code)
         if self._datasets:
             try:
                 selected_for_compiler = self._select_target(primary_target)
@@ -883,6 +1096,23 @@ class MathModelingAssistant:
         if custom_results:
             specialized_results["custom"] = custom_results
 
+        from .model_diagnostics import build_model_diagnostics
+        try:
+            diagnostic_specialized = dict(specialized_results)
+            if ranking_result is not None:
+                diagnostic_specialized["ranking_result"] = ranking_result
+            specialized_results["model_diagnostics"] = build_model_diagnostics(
+                mechanistic=specialized_results.get("mechanistic_model"),
+                proposals=specialized_results.get("model_hypotheses"),
+                dynamics=specialized_results.get("equation_discovery"),
+                prediction_results=model_results,
+                model_results=model_results,
+                structure_results=specialized_results.get("data_structure"),
+                specialized_results=diagnostic_specialized,
+            )
+        except Exception:
+            warnings.append("模型诊断暂不可用；未更改已有数值结果，也未执行自动修复。")
+
         model_result = model_results[0] if model_results else None
         problem_analysis["task_graph"] = self._resolve_task_graph(
             problem_analysis.get("task_graph", []),
@@ -957,6 +1187,25 @@ class MathModelingAssistant:
                 )
             except Exception as exc:
                 warnings.append(f"部分图表生成失败：{exc}")
+        model_competitions: List[Dict[str, Any]] = []
+        for current_model in model_results:
+            audit = current_model.get("credibility_audit", {})
+            hypothesis_check = next(
+                (item for item in audit.get("checks", [])
+                 if item.get("id") == "model_hypothesis_consistency"),
+                None,
+            )
+            competition = (
+                hypothesis_check.get("details", {}).get("competition")
+                if isinstance(hypothesis_check, Mapping) else None
+            )
+            if isinstance(competition, Mapping):
+                model_competitions.append({
+                    "dataset": current_model.get("dataset"),
+                    "target": current_model.get("target"),
+                    "task_type": current_model.get("task_type"),
+                    "competition": dict(competition),
+                })
         for current_model in model_results:
             # Validation vectors are private plot inputs, not report/API payloads.
             current_model.pop("actual", None)
@@ -970,6 +1219,8 @@ class MathModelingAssistant:
         equation_result = specialized_results.get("equation_discovery", {})
         equation_result.pop("validation_actual", None)
         equation_result.pop("validation_prediction", None)
+        equation_result.pop("test_rollout_actual", None)
+        equation_result.pop("test_rollout_prediction", None)
         warnings.extend(message for message in self._runtime_warnings if message not in warnings)
         capability_report = self._build_capability_report(
             problem_analysis, relationships, interactions, model_result, ranking_result,
@@ -1025,6 +1276,27 @@ class MathModelingAssistant:
             capability_report=capability_report,
             mathematical_model_spec=mathematical_spec.to_dict(),
             evidence_bundle=evidence_bundle.to_dict(),
+            model_verdict=build_model_verdict(
+                [
+                    {
+                        "id": f"model_{index}",
+                        "label": str(item.get("best_model", item.get("model", f"模型 {index}"))),
+                        "status": (
+                            "pass" if item.get("credibility_audit", {}).get("status") == "pass"
+                            else "not_assessed"
+                        ),
+                        "decision": item.get("best_model"),
+                        "evidence_refs": [f"model_results[{index - 1}]"],
+                        "failure_reasons": item.get("credibility_audit", {}).get("next_actions", []),
+                    }
+                    for index, item in enumerate(model_results, start=1)
+                ],
+                run_id=self.run_id,
+                evidence_refs=["evidence/evidence_bundle.json"],
+                numerical_stability=specialized_results.get("numerical_stability"),
+                uncertainty_propagation=specialized_results.get("uncertainty_propagation"),
+            ),
+            model_competitions=model_competitions,
             charts=charts,
             model_result=model_result,
             model_results=model_results,
@@ -1046,6 +1318,19 @@ class MathModelingAssistant:
             "evidence.bundle", "evidence", "evidence_bundle.json",
             result.evidence_bundle, format_version="1.0", required=True,
         )
+        self._artifact_manager.write_json(
+            "evidence.model_verdict", "evidence", "model_verdict.json",
+            result.model_verdict, format_version=str(result.model_verdict.get("schema_version", "1.0")),
+            required=True, metadata={"role": "conservative_verdict_boundary", "safe_to_delete_with_run": True},
+        )
+        if result.model_competitions:
+            self._artifact_manager.write_json(
+                "evidence.model_competitions", "evidence", "model_competitions.json",
+                {"schema_version": "mathmodel.model-competitions/v1",
+                 "items": result.model_competitions},
+                format_version="mathmodel.model-competitions/v1", required=False,
+                metadata={"role": "pareto_candidate_comparison", "safe_to_delete_with_run": True},
+            )
         if specialized_results.get("mathematical_data_compilation"):
             compilation_payload = specialized_results["mathematical_data_compilation"]
             self._artifact_manager.write_json(
@@ -1059,6 +1344,21 @@ class MathModelingAssistant:
                     "role": "estimand_and_view_stability_audit",
                     "safe_to_delete_with_run": True,
                 },
+            )
+        if specialized_results.get("model_hypotheses"):
+            self._artifact_manager.write_json(
+                "proposals.model_hypotheses", "evidence", "model_hypotheses.json",
+                specialized_results["model_hypotheses"],
+                format_version=HypothesisGenerator.schema_version, required=False,
+                metadata={"role": "unverified_hypotheses", "model_has_execution_authority": False},
+            )
+        if specialized_results.get("model_diagnostics"):
+            self._artifact_manager.write_json(
+                "diagnostics.model", "evidence", "model_diagnostics.json",
+                specialized_results["model_diagnostics"],
+                format_version=specialized_results["model_diagnostics"]["schema_version"], required=False,
+                metadata={"role": "diagnostic_not_proof", "may_execute_repairs": False,
+                          "safe_to_delete_with_run": True},
             )
         if specialized_results.get("mechanistic_model"):
             mechanistic_payload = specialized_results["mechanistic_model"]
@@ -1136,6 +1436,41 @@ class MathModelingAssistant:
                 df.columns = unique_columns
                 self._input_warnings.append(
                     f"数据集 {name!r} 的空白/重复/非字符串列名已规范化：{', '.join(changed[:8])}。"
+                )
+            source_rows = max(int(df.attrs.get("source_rows", len(df))), len(df))
+            current_rows = len(df)
+            estimated_bytes = int(df.memory_usage(deep=True).sum())
+            memory_budget_bytes = self.max_input_memory_mb * 1024 * 1024
+            rows_exceeded = current_rows > self.max_input_rows
+            memory_exceeded = estimated_bytes > memory_budget_bytes
+            if rows_exceeded or memory_exceeded:
+                # Keep the time/entity span visible without materialising a
+                # random permutation of a multi-million-row frame.  This is a
+                # deterministic bounded input view, not a complete-data claim.
+                row_bytes = float(estimated_bytes) / max(current_rows, 1)
+                memory_rows = int(memory_budget_bytes / max(row_bytes, 1.0))
+                target_rows = max(1, min(self.max_input_rows, memory_rows))
+                positions = np.linspace(0, current_rows - 1, target_rows, dtype=np.int64)
+                positions = np.unique(positions)
+                original_attrs = dict(df.attrs)
+                df = df.iloc[positions].copy()
+                df.attrs.update(original_attrs)
+                df.attrs.update({
+                    "source_rows": source_rows,
+                    "materialized_rows": int(len(df)),
+                    "sampling_policy": "deterministic_even_row_span",
+                    "sampling_complete": False,
+                    "sampling_memory_budget_mb": self.max_input_memory_mb,
+                })
+                reasons = []
+                if rows_exceeded:
+                    reasons.append("行数")
+                if memory_exceeded:
+                    reasons.append("估算内存")
+                self._input_warnings.append(
+                    f"数据集 {name!r} 的{'和'.join(reasons)}超过输入上限，原始 {current_rows:,} 行已保留 "
+                    f"{len(df):,} 行均匀跨度样本；"
+                    "后续结论不代表完整数据扫描。"
                 )
             if df.empty:
                 self._input_warnings.append(f"数据集 {name!r} 为空，将保留画像但跳过关系与模型分析。")
@@ -2350,7 +2685,7 @@ class MathModelingAssistant:
                 equation = specialized_results.get("equation_discovery")
                 status = "partial" if equation or specialized_results.get("time_dynamics") else "needs_input"
                 evidence = (
-                    "已发现并外推验证积分弱形式稀疏候选方程；机理含义仍需领域验证"
+                    "已搜索积分弱形式候选方程，并分别检查锁定测试段积分一致性与独立轨迹；通过情况见审计"
                     if equation else
                     ("已计算经验动力特征；尚未虚构未知机理方程" if status == "partial" else "缺少状态变量和初边值条件")
                 )
@@ -2599,7 +2934,7 @@ class MathModelingAssistant:
                 equation = specialized_results.get("equation_discovery")
                 if equation:
                     status = "partial"
-                    evidence = "已执行积分弱形式稀疏方程发现和末段外推验证"
+                    evidence = "已分离训练、选参与锁定测试，分别检查积分一致性和独立轨迹；通过情况见审计"
                     requirement = "候选方程仍需单位、守恒律、初边值条件和领域机理确认"
                 elif specialized_results.get("time_dynamics"):
                     status = "partial"
@@ -2634,7 +2969,7 @@ class MathModelingAssistant:
             "重复实体自动隔离验证且实体键不进入模型",
             "近优模型集合比较不同算法假设的结论分歧",
             "潜在结构与异常名单执行分半和扰动稳定性复核",
-            "动力方程使用积分弱形式候选库并通过末段外推反证",
+            "动力方程分离训练/选参/测试，并区分积分一致性与独立轨迹检查",
             "因果效应只在显式角色下使用交叉拟合正交化估计",
             "回归预测输出保序区间并单独审计经验覆盖率",
             "综合评价同时保留无权重的 Pareto 非支配方案",
@@ -3154,6 +3489,262 @@ class MathModelingAssistant:
     def _is_identifier_name(column: str) -> bool:
         """Return True only for explicit entity/key names, not broad substrings."""
         return _is_explicit_identifier_name(column)
+
+    @staticmethod
+    def _is_row_index_like(series: pd.Series, column_name: Optional[str] = None) -> bool:
+        """Detect an export row counter while preserving explicit time axes.
+
+        A consecutive integer column is not sufficient evidence by itself:
+        ``t``, ``period`` and ``year`` are often legitimate predictors or
+        state coordinates.  The nameless helper retains its conservative
+        legacy behaviour for callers that only have a series; the modeling
+        path supplies the column name and uses semantic exceptions.
+        """
+        if not pd.api.types.is_numeric_dtype(series):
+            return False
+        values = pd.to_numeric(series, errors="coerce").dropna().to_numpy(dtype=float)
+        if values.size < 20 or np.unique(values).size / values.size < 0.98:
+            return False
+        ordered = np.sort(values)
+        differences = np.diff(ordered)
+        if differences.size == 0 or not np.isfinite(differences).all():
+            return False
+        # Consecutive integer counters (0..n or 1..n) are common export/index
+        # artefacts.  A continuous measurement with irregular spacing is kept.
+        integer_like = np.all(np.isclose(ordered, np.round(ordered), atol=1e-9))
+        consecutive = bool(integer_like and np.mean(np.isclose(differences, 1.0, atol=1e-9)) >= 0.98)
+        if not consecutive or column_name is None:
+            return consecutive
+        normalized = _normalise_name(column_name)
+        # Time/coordinate semantics are not row IDs merely because the export
+        # happened to use unit increments.  Explicit index-like names remain
+        # removable (Bike Sharing's ``instant`` is a known example).
+        time_tokens = ("time", "timestamp", "date", "datetime", "period", "step", "year", "month", "day", "week", "hour")
+        index_tokens = ("index", "row", "record", "instant", "sequence", "serial")
+        if any(token in normalized for token in time_tokens):
+            return False
+        return any(token in normalized for token in index_tokens) or normalized in {"id", "uid"}
+
+    @staticmethod
+    def _select_supervised_model_keys(
+        task: Any,
+        available: Mapping[str, Any],
+        *,
+        n_samples: int,
+        n_features: int,
+        temporal: bool = False,
+        diagnostic_signals: Mapping[str, Any] | None = None,
+    ) -> List[str]:
+        """Choose a bounded, data-size-aware model portfolio.
+
+        The former implementation always ran the first three registry entries,
+        leaving most registered models permanently dormant.  This selector keeps
+        a small deterministic portfolio for tiny data, and progressively admits
+        tree ensembles/robust/structured estimators when the sample budget can
+        support them.  It is a routing policy, not a claim that every estimator
+        is appropriate for every task; each admitted candidate remains subject to
+        the same CV and credibility checks.
+        """
+        return list(MathModelingAssistant._select_supervised_model_portfolio(
+            task, available, n_samples=n_samples, n_features=n_features, temporal=temporal,
+            diagnostic_signals=diagnostic_signals,
+        )["selected"])
+
+    @staticmethod
+    def _select_supervised_model_portfolio(
+        task: Any,
+        available: Mapping[str, Any],
+        *,
+        n_samples: int,
+        n_features: int,
+        temporal: bool = False,
+        diagnostic_signals: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Return selected models together with auditable slot decisions.
+
+        The old selector returned only a list, which made it impossible to tell
+        whether a model was absent because it was unsuitable, over budget, or
+        simply not registered.  This companion keeps routing deterministic but
+        preserves those reasons for the research evidence and UI.
+        """
+        task_value = getattr(task, "value", task)
+        signals = dict(diagnostic_signals or {})
+        if task_value == "regression":
+            ordered = [
+                "ridge", "hist_gb", "et", "rf", "xgb", "lgb", "residual_stack",
+                "piecewise", "graph_decomp", "hierarchical", "constrained", "huber",
+                "pls", "bayesian_ridge", "ransac", "prophet",
+            ]
+        else:
+            ordered = ["lr", "hist_gb", "et", "rf", "xgb", "lgb", "svm", "mlp", "nb", "qda"]
+        # Keep time-ordered tasks conservative: models that require long history
+        # or external trend assumptions are admitted only after a tree/linear
+        # baseline, and never exceed the global portfolio budget.
+        budget = 3 if n_samples < 120 else (4 if n_samples < 500 else 6)
+        if temporal:
+            budget = min(budget, 4)
+        if n_features > 40 and n_samples >= 200:
+            budget = min(budget + 1, 6)
+        selected = [key for key in ordered if key in available][:budget]
+        reasons: Dict[str, str] = {}
+        for key in ordered:
+            if key not in available:
+                reasons[key] = "not_available"
+            elif key in selected:
+                reasons[key] = "selected_by_task_and_budget"
+            else:
+                reasons[key] = "excluded_by_portfolio_budget"
+        # Reserve one slot for a structurally different estimator on larger
+        # regression tasks.  Otherwise optional lgb/xgb entries can crowd out
+        # piecewise, residual, hierarchical or constrained candidates forever.
+        structural = [
+            key for key in ("residual_stack", "piecewise", "graph_decomp", "hierarchical", "constrained")
+            if key in available
+        ]
+        preferred_structural = []
+        if signals.get("repeated_entities") and "hierarchical" in structural:
+            preferred_structural.append("hierarchical")
+        if signals.get("piecewise_signal") and "piecewise" in structural:
+            preferred_structural.append("piecewise")
+        if signals.get("residual_signal") and "residual_stack" in structural:
+            preferred_structural.append("residual_stack")
+        structural = preferred_structural + [key for key in structural if key not in preferred_structural]
+        if task_value == "regression" and n_samples >= 500 and structural and not any(
+            key in structural for key in selected
+        ):
+            if len(selected) >= budget:
+                replaced = selected[-1]
+                selected[-1] = structural[0]
+                reasons[replaced] = "replaced_to_reserve_structural_slot"
+            else:
+                selected.append(structural[0])
+            reasons[structural[0]] = "selected_structural_reserve"
+        if task_value == "regression" and signals.get("collinearity_signal") and "pls" in available and "pls" not in selected:
+            if len(selected) >= budget:
+                replaced = selected[-1]
+                selected[-1] = "pls"
+                reasons[replaced] = "replaced_for_collinearity_diagnostic"
+            else:
+                selected.append("pls")
+            reasons["pls"] = "selected_for_collinearity_diagnostic"
+        if not selected:
+            selected = list(available)[: min(2, len(available))]
+            for key in selected:
+                reasons[key] = "fallback_first_available"
+        return {
+            "selected": selected,
+            "budget": int(budget),
+            "task": str(task_value),
+            "n_samples": int(n_samples),
+            "n_features": int(n_features),
+            "temporal": bool(temporal),
+            "reasons": reasons,
+            "diagnostic_signals": signals,
+            "policy": "bounded_portfolio_with_structural_reserve_and_diagnostic_hints",
+        }
+
+    def _filter_target_derived_features(
+        self,
+        features: pd.DataFrame,
+        target_values: pd.Series,
+        target: str,
+        protected_columns: Optional[Sequence[str]] = None,
+    ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """Remove only *provably* post-outcome decompositions before fitting.
+
+        A highly correlated predictor can be a legitimate signal, so correlation
+        alone never removes a feature.  Exact copies are *flagged* for the
+        credibility audit (preserving the existing diagnostic behaviour), while
+        near-exact additive decompositions are removed because their components
+        are mathematically defined by the target (for example ``cnt = casual +
+        registered`` in Bike Sharing).  Keeping the evidence in the returned
+        audit makes the decision reproducible and reviewable.
+        """
+        if features.empty:
+            return features, {"status": "not_assessed", "dropped_columns": [], "rules": []}
+        protected = {str(column) for column in (protected_columns or ())}
+        y = pd.Series(target_values, index=features.index)
+        target_norm = _normalise_name(target)
+        dropped: List[Dict[str, Any]] = []
+        drop_names: set[str] = set()
+        sample_limit = min(len(features), 5_000)
+        positions = np.arange(len(features)) if len(features) <= sample_limit else np.sort(
+            np.random.default_rng(self.random_state + 1703).choice(
+                len(features), size=sample_limit, replace=False
+            )
+        )
+        sampled_y = y.iloc[positions].reset_index(drop=True)
+
+        # Exact value copies are unambiguous leakage, irrespective of the
+        # column name (e.g. ``target_copy`` or an encoded duplicate).
+        for column in features.columns:
+            name = str(column)
+            if name in protected:
+                continue
+            feature = features[name].iloc[positions].reset_index(drop=True)
+            try:
+                left = feature.map(_normalise_value)
+                right = sampled_y.map(_normalise_value)
+                valid = left.ne("") & right.ne("")
+                exact_rate = float((left[valid] == right[valid]).mean()) if int(valid.sum()) >= 20 else 0.0
+            except Exception:
+                exact_rate = 0.0
+            if exact_rate >= 0.995:
+                dropped.append({
+                    "column": name,
+                    "rule": "exact_target_copy",
+                    "match_rate": exact_rate,
+                    "action": "flag_only",
+                })
+
+        # If the target is an exact sum of two observed columns, both addends
+        # are post-outcome components rather than independent predictors.
+        numeric_columns = [
+            str(column) for column in features.columns
+            if str(column) not in protected
+            and str(column) not in drop_names
+            and pd.api.types.is_numeric_dtype(features[column])
+        ][:40]
+        y_numeric = pd.to_numeric(sampled_y, errors="coerce").to_numpy(dtype=float)
+        if len(numeric_columns) >= 2 and np.isfinite(y_numeric).sum() >= 20:
+            values: Dict[str, np.ndarray] = {}
+            for column in numeric_columns:
+                values[column] = pd.to_numeric(
+                    features[column].iloc[positions], errors="coerce"
+                ).to_numpy(dtype=float)
+            for left_index, left_name in enumerate(numeric_columns):
+                for right_name in numeric_columns[left_index + 1:]:
+                    if left_name in drop_names or right_name in drop_names:
+                        continue
+                    left_values, right_values = values[left_name], values[right_name]
+                    valid = np.isfinite(y_numeric) & np.isfinite(left_values) & np.isfinite(right_values)
+                    if int(valid.sum()) < 20:
+                        continue
+                    residual = y_numeric[valid] - left_values[valid] - right_values[valid]
+                    scale = max(float(np.nanmedian(np.abs(y_numeric[valid]))), 1.0)
+                    relative_error = float(np.nanmax(np.abs(residual)) / scale)
+                    if relative_error <= 1e-9:
+                        drop_names.update({left_name, right_name})
+                        dropped.append({
+                            "columns": [left_name, right_name],
+                            "rule": "exact_additive_target_decomposition",
+                            "max_relative_error": relative_error,
+                            "rows_checked": int(valid.sum()),
+                        })
+
+        filtered = features.drop(columns=sorted(drop_names), errors="ignore")
+        status = "pass" if not dropped else (
+            "filtered" if drop_names else "flagged"
+        )
+        return filtered, {
+            "status": status,
+            "target": str(target),
+            "target_normalized": target_norm,
+            "dropped_columns": sorted(drop_names),
+            "findings": dropped,
+            "sample_rows": int(sample_limit),
+            "policy": "flag_exact_copy_remove_exact_additive_decomposition_only",
+        }
 
     def _select_validation_group(self, frame: pd.DataFrame, target: str) -> Optional[str]:
         """Select a repeated entity key whose rows must stay in the same fold."""
@@ -3751,7 +4342,15 @@ class MathModelingAssistant:
                 continue
             predicted = np.asarray(prediction)
             candidate_actual = actual_values
-            if time_ordered and len(predicted):
+            oof_mask = getattr(result, "oof_mask", None)
+            if len(predicted) == len(candidate_actual) and oof_mask is not None \
+                    and len(oof_mask) == len(predicted):
+                valid_oof = np.asarray(oof_mask, dtype=bool)
+                predicted = predicted[valid_oof]
+                candidate_actual = candidate_actual[valid_oof]
+            elif time_ordered and len(predicted):
+                # Compatibility for old serialized CV results without an OOF
+                # mask; current runs use exact validation positions.
                 fold_count = len(next(iter(result.fold_scores.values()), []))
                 initial_window = max(1, len(predicted) // (fold_count + 1))
                 predicted = predicted[initial_window:]
@@ -3760,6 +4359,12 @@ class MathModelingAssistant:
                 continue
             key = str(getattr(result, "model_key", "unknown"))
             spec = specifications.get(key)
+            fold_values = result.fold_scores.get(primary_metric, [])
+            fold_values = [float(value) for value in fold_values if np.isfinite(float(value))]
+            instability = (
+                float(np.std(fold_values, ddof=1)) / max(abs(float(score)), 1e-12)
+                if len(fold_values) >= 2 else 0.0
+            )
             candidates.append({
                 "key": key,
                 "name": str(getattr(result, "model_name", key)),
@@ -3767,13 +4372,17 @@ class MathModelingAssistant:
                 "score": float(score),
                 "prediction": predicted,
                 "actual": candidate_actual,
+                "complexity": self._model_complexity_proxy(result),
+                "instability": instability,
+                "compute_cost": max(0.0, float(getattr(result, "train_time", 0.0) or 0.0)),
             })
+        competition = self._build_prediction_competition(candidates, task_value)
         if len(candidates) < 2:
             return self._credibility_check(
                 "model_hypothesis_consistency", "近优模型一致性", "not_assessed",
                 "只有一个模型假设具有可比较的 OOF 预测。",
                 "增加不同机理和模型族的候选，而不是只在同一算法内调参。",
-                {"candidate_count": len(candidates)},
+                {"candidate_count": len(candidates), "competition": competition},
             )
         scores = [item["score"] for item in candidates]
         best_score = min(scores) if task_value == "regression" else max(scores)
@@ -3794,7 +4403,8 @@ class MathModelingAssistant:
                 f"测试了 {len(candidates)} 个模型，但只有 {near[0]['name']} 落入 10%/5% 近优范围。",
                 "补充不同模型族或外部验证，确认结论不是单一算法特有。",
                 {"near_optimal_models": public_candidates, "tested_models": len(candidates),
-                 "primary_metric": primary_metric, "tolerance": tolerance},
+                 "primary_metric": primary_metric, "tolerance": tolerance,
+                 "competition": competition},
             )
         pairwise: List[Dict[str, Any]] = []
         if task_value == "regression":
@@ -3867,9 +4477,157 @@ class MathModelingAssistant:
                 "primary_metric": primary_metric,
                 "tolerance": tolerance,
                 "pairwise": pairwise[:20],
+                "competition": competition,
                 **details_metric,
             },
         )
+
+    @staticmethod
+    def _model_complexity_proxy(cv_result: Any) -> float:
+        """Estimate realised fitted size without serialising estimator objects."""
+        values: List[float] = []
+        for raw_model in list(getattr(cv_result, "fitted_models", []) or [])[:8]:
+            model = raw_model
+            named_steps = getattr(model, "named_steps", None)
+            if isinstance(named_steps, Mapping) and named_steps:
+                model = list(named_steps.values())[-1]
+            size = 0.0
+            coefficient = getattr(model, "coef_", None)
+            if coefficient is not None:
+                try:
+                    size = float(np.count_nonzero(np.asarray(coefficient)))
+                except Exception:
+                    size = 0.0
+            tree = getattr(model, "tree_", None)
+            if tree is not None:
+                size = max(size, float(getattr(tree, "node_count", 0) or 0))
+            centers = getattr(model, "cluster_centers_", None)
+            if centers is not None:
+                try:
+                    size = max(size, float(np.asarray(centers).size))
+                except Exception:
+                    pass
+            estimators = getattr(model, "estimators_", None)
+            if estimators is not None:
+                try:
+                    flat = np.asarray(estimators, dtype=object).ravel()[:512]
+                    nodes = sum(float(getattr(getattr(item, "tree_", None), "node_count", 1) or 1)
+                                for item in flat)
+                    size = max(size, nodes)
+                except Exception:
+                    pass
+            values.append(max(1.0, size))
+        return float(np.median(values)) if values else 1.0
+
+    @staticmethod
+    def _build_prediction_competition(
+        candidates: Sequence[Mapping[str, Any]], task_value: str,
+    ) -> Dict[str, Any]:
+        """Build a bounded Pareto comparison from OOF/development predictions."""
+        if not candidates:
+            return {"schema_version": "mathmodel.model-competition/v1",
+                    "status": "candidate_set_inadequate", "candidate_count": 0}
+        maximum_points = 512
+        competition_candidates = []
+        if task_value == "regression" and candidates:
+            # A simple mean predictor is a required sanity baseline.  It is
+            # built only from the same OOF/development target slice as the
+            # candidates; it never consumes locked-test values.
+            try:
+                baseline_actual = np.asarray(candidates[0].get("actual"), dtype=float)
+                if baseline_actual.ndim == 1 and baseline_actual.size and np.isfinite(baseline_actual).all():
+                    if len(baseline_actual) > maximum_points:
+                        positions = np.linspace(0, len(baseline_actual) - 1, maximum_points, dtype=np.int64)
+                        baseline_actual = baseline_actual[np.unique(positions)]
+                    baseline_value = float(np.mean(baseline_actual))
+                    baseline_loss = float(np.sqrt(np.mean((baseline_actual - baseline_value) ** 2)))
+                    competition_candidates.append({
+                        "id": "baseline_mean", "status": "candidate_evaluated",
+                        "predictions": [baseline_value] * len(baseline_actual),
+                        "metrics": {"validation_loss": max(0.0, baseline_loss), "complexity": 0.0,
+                                    "constraint_violation": 0.0, "instability": 0.0, "compute_cost": 0.0},
+                        "decision": None, "evidence_refs": ["cross_validation/baseline_mean"],
+                    })
+            except (TypeError, ValueError, OverflowError):
+                # A non-numeric target belongs to the classification route;
+                # silently omitting this regression-only baseline is safer than
+                # coercing labels or changing the task semantics.
+                pass
+        if task_value == "classification" and candidates:
+            try:
+                from sklearn.metrics import f1_score
+                baseline_actual = np.asarray(candidates[0].get("actual"), dtype=float)
+                if baseline_actual.ndim == 1 and baseline_actual.size and np.isfinite(baseline_actual).all():
+                    if len(baseline_actual) > maximum_points:
+                        positions = np.linspace(0, len(baseline_actual) - 1, maximum_points, dtype=np.int64)
+                        baseline_actual = baseline_actual[np.unique(positions)]
+                    labels, counts = np.unique(baseline_actual, return_counts=True)
+                    baseline_label = float(labels[int(np.argmax(counts))])
+                    baseline_prediction = [baseline_label] * len(baseline_actual)
+                    baseline_f1 = float(f1_score(baseline_actual, baseline_prediction,
+                                                  average="weighted", zero_division=0))
+                    competition_candidates.append({
+                        "id": "baseline_majority", "status": "candidate_evaluated",
+                        "predictions": baseline_prediction,
+                        "metrics": {"validation_loss": max(0.0, 1.0 - baseline_f1), "complexity": 0.0,
+                                    "constraint_violation": 0.0, "instability": 0.0, "compute_cost": 0.0},
+                        "decision": None, "evidence_refs": ["cross_validation/baseline_majority"],
+                    })
+            except (TypeError, ValueError, OverflowError):
+                # Non-numeric labels are not coerced in this evidence channel.
+                pass
+        for item in candidates:
+            prediction = np.asarray(item["prediction"])
+            if len(prediction) > maximum_points:
+                positions = np.linspace(0, len(prediction) - 1, maximum_points, dtype=np.int64)
+                prediction = prediction[np.unique(positions)]
+            try:
+                prediction_values = prediction.astype(float).tolist()
+            except (TypeError, ValueError, OverflowError):
+                continue
+            score = float(item["score"])
+            loss = score if task_value == "regression" else max(0.0, 1.0 - score)
+            competition_candidates.append({
+                "id": str(item["key"]), "status": "candidate_evaluated",
+                "predictions": prediction_values,
+                "metrics": {
+                    "validation_loss": max(0.0, loss),
+                    "complexity": max(0.0, float(item["complexity"])),
+                    "constraint_violation": 0.0,
+                    "instability": max(0.0, float(item["instability"])),
+                    "compute_cost": max(0.0, float(item["compute_cost"])),
+                },
+                "decision": None,
+                "evidence_refs": [f"cross_validation/{item['key']}"],
+            })
+        if not competition_candidates:
+            return {"schema_version": "mathmodel.model-competition/v1",
+                    "status": "candidate_set_inadequate", "candidate_count": 0}
+        try:
+            result = compete_models(competition_candidates)
+            from .baseline_registry import default_baseline_registry
+
+            registry = default_baseline_registry()
+            baseline_spec = registry.for_task(task_value)
+            result["baseline_registry"] = {
+                "schema_version": registry.public()["schema_version"],
+                "revision": registry.public()["revision"],
+                "digest": registry.digest,
+                "selected": baseline_spec.public() if baseline_spec else None,
+            }
+            result["metric_provenance"] = {
+                "validation_loss": "OOF/开发验证主指标，分类转换为 1-F1",
+                "complexity": "各折已拟合模型的非零系数、树节点或中心数量中位数代理",
+                "constraint_violation": "本预测任务未声明数学硬约束，统一为零且不代表现实约束已验证",
+                "instability": "各折主指标标准差除以绝对均值",
+                "compute_cost": "交叉验证记录的训练墙钟时间",
+                "baseline": "回归均值或分类多数类，仅使用同一 OOF/开发目标切片",
+                "prediction_points": f"确定性等距截取至多 {maximum_points} 点，仅用于有界比较",
+            }
+            return result
+        except ModelCompetitionError as exc:
+            return {"schema_version": "mathmodel.model-competition/v1",
+                    "status": "not_assessed", "error_code": str(exc)[:160]}
 
     def _conformal_prediction_summary(
         self,
@@ -3892,7 +4650,14 @@ class MathModelingAssistant:
             return None
         calibration_prediction = np.asarray(calibration_prediction, dtype=float)
         calibration_actual = pd.to_numeric(pd.Series(y_fit), errors="coerce").to_numpy(dtype=float)
-        if use_time_validation and len(calibration_prediction):
+        oof_mask = getattr(best_cv, "oof_mask", None)
+        if len(calibration_prediction) == len(calibration_actual) and oof_mask is not None \
+                and len(oof_mask) == len(calibration_prediction):
+            calibration_prediction = calibration_prediction[np.asarray(oof_mask, dtype=bool)]
+            calibration_actual = calibration_actual[np.asarray(oof_mask, dtype=bool)]
+        elif use_time_validation and len(calibration_prediction):
+            # Compatibility for old serialized CV results without an explicit
+            # mask; current runs never use this approximate inference.
             fold_count = len(next(iter(getattr(best_cv, "fold_scores", {}).values()), []))
             initial_window = max(1, len(calibration_prediction) // (fold_count + 1))
             calibration_prediction = calibration_prediction[initial_window:]
@@ -4118,11 +4883,21 @@ class MathModelingAssistant:
         }
         predictions = np.asarray(cv_result.oof_pred) if cv_result.oof_pred is not None else np.array([])
         actual_values = np.asarray(actual)
-        if time_ordered and len(predictions):
-            # TimeSeriesSplit has no OOF prediction for its initial training window.
-            initial_window = max(1, len(predictions) // (len(next(iter(cv_result.fold_scores.values()), [])) + 1))
-            predictions = predictions[initial_window:]
-            actual_values = actual_values[initial_window:]
+        if len(predictions) and len(predictions) == len(actual_values):
+            # TimeSeriesSplit leaves an explicit non-OOF prefix.  Use the mask
+            # emitted by CrossValidator; inferring the prefix from fold counts
+            # is wrong when expanding folds have different lengths.
+            oof_mask = getattr(cv_result, "oof_mask", None)
+            if oof_mask is not None and len(oof_mask) == len(predictions):
+                predictions = predictions[np.asarray(oof_mask, dtype=bool)]
+                actual_values = actual_values[np.asarray(oof_mask, dtype=bool)]
+            elif time_ordered:
+                # Compatibility for serialized CV results produced before the
+                # mask was introduced.  This fallback is explicitly legacy and
+                # never used for current in-memory results.
+                initial_window = max(1, len(predictions) // (len(next(iter(cv_result.fold_scores.values()), [])) + 1))
+                predictions = predictions[initial_window:]
+                actual_values = actual_values[initial_window:]
         if len(predictions) != len(actual_values) or not len(predictions):
             return diagnostics
         if getattr(task, "value", task) == "regression":
@@ -4402,6 +5177,13 @@ class MathModelingAssistant:
         group_column = None if use_time_validation else self._select_validation_group(view, target)
         y = view.pop(target)
         view = view.drop(columns=list(excluded_targets or []), errors="ignore")
+        view, feature_leakage_filter = self._filter_target_derived_features(
+            view, y, target, protected_columns=[group_column] if group_column else None
+        )
+        if feature_leakage_filter.get("dropped_columns"):
+            self._runtime_warnings.append(
+                f"{dataset_name}.{target} 已删除 {len(feature_leakage_filter['dropped_columns'])} 个可证明由目标派生的特征，避免目标泄漏。"
+            )
         task = TaskTypeDetector.detect(y)
         if task not in {TaskType.CLASSIFICATION, TaskType.REGRESSION}:
             raise ValueError("目标列类型无法用于监督学习")
@@ -4416,6 +5198,7 @@ class MathModelingAssistant:
                 series.nunique(dropna=True) <= 1
                 or (kind == "text" and unique_ratio > 0.5)
                 or (explicit_identifier and col != group_column)
+                or (self._is_row_index_like(series, str(col)) and col != group_column)
             ):
                 drop_columns.append(col)
         X = view.drop(columns=drop_columns, errors="ignore")
@@ -4424,19 +5207,33 @@ class MathModelingAssistant:
         for col in X.columns:
             if pd.api.types.is_numeric_dtype(X[col]):
                 X[col] = X[col].replace([np.inf, -np.inf], np.nan)
-                X[col] = X[col].fillna(X[col].median())
             elif not pd.api.types.is_datetime64_any_dtype(X[col]):
                 X[col] = X[col].fillna("__MISSING__").astype(str)
 
         available = ModelLibrary.get_models(task)
-        preferences = (
-            ["ridge", "hist_gb", "xgb", "lgb", "rf"]
-            if task == TaskType.REGRESSION
-            else ["lr", "hist_gb", "xgb", "lgb", "rf"]
+        diagnostic_signals: Dict[str, Any] = {}
+        if group_column and group_column in X.columns:
+            diagnostic_signals["repeated_entities"] = bool(X[group_column].nunique(dropna=True) >= 5)
+        numeric_preview = X.select_dtypes(include=[np.number])
+        if numeric_preview.shape[1] >= 2:
+            try:
+                corr = numeric_preview.corr(method="spearman").abs().to_numpy(dtype=float)
+                np.fill_diagonal(corr, 0.0)
+                diagnostic_signals["collinearity_signal"] = bool(np.nanmax(corr) >= 0.9)
+            except (TypeError, ValueError):
+                diagnostic_signals["collinearity_signal"] = False
+        diagnostic_signals["piecewise_signal"] = bool(
+            task == TaskType.REGRESSION and len(y) >= 80 and np.unique(pd.to_numeric(y, errors="coerce").dropna()).size >= 12
         )
-        model_keys = [key for key in preferences if key in available][:3]
-        if not model_keys:
-            model_keys = list(available)[:2]
+        portfolio_audit = self._select_supervised_model_portfolio(
+            task,
+            available,
+            n_samples=len(X),
+            n_features=X.shape[1],
+            temporal=use_time_validation,
+            diagnostic_signals=diagnostic_signals,
+        )
+        model_keys = list(portfolio_audit["selected"])
         X_fit, y_fit = X, y
         X_confirmation: Optional[pd.DataFrame] = None
         y_confirmation: Optional[pd.Series] = None
@@ -4477,11 +5274,8 @@ class MathModelingAssistant:
                         stratify = y
                 try:
                     X_fit, X_confirmation, y_fit, y_confirmation = train_test_split(
-                        X,
-                        y,
-                        test_size=confirmation_size,
-                        random_state=self.random_state,
-                        stratify=stratify,
+                        X, y, test_size=confirmation_size,
+                        random_state=self.random_state, stratify=stratify,
                     )
                 except ValueError as exc:
                     self._runtime_warnings.append(
@@ -4489,6 +5283,25 @@ class MathModelingAssistant:
                     )
                     X_fit, y_fit = X, y
                     X_confirmation = y_confirmation = None
+
+        # Estimate numeric imputations after the confirmation split.  This
+        # prevents the independent confirmation block from changing the
+        # development preprocessing statistics.  ModelingEngine still owns
+        # its internal CV transforms; this boundary is the outer split guard.
+        numeric_imputation: Dict[str, float] = {}
+        for col in X_fit.columns:
+            if not pd.api.types.is_numeric_dtype(X_fit[col]):
+                continue
+            values = pd.to_numeric(X_fit[col], errors="coerce")
+            median = float(values.median()) if values.notna().any() else 0.0
+            if not math.isfinite(median):
+                median = 0.0
+            numeric_imputation[str(col)] = median
+            X_fit[col] = values.fillna(median)
+            if X_confirmation is not None and col in X_confirmation.columns:
+                X_confirmation[col] = pd.to_numeric(
+                    X_confirmation[col], errors="coerce"
+                ).fillna(median)
 
         engine = ModelingEngine(
             task_type=task.value,
@@ -4505,6 +5318,25 @@ class MathModelingAssistant:
             verbose=False,
             random_state=self.random_state,
         )
+        partition_descriptor = {
+            "strategy": "time_tail" if use_time_validation else (
+                "entity_group" if group_column else ("stratified_random" if task == TaskType.CLASSIFICATION else "random")
+            ),
+            "fit_rows": int(len(X_fit)),
+            "confirmation_rows": int(len(X_confirmation)) if X_confirmation is not None else 0,
+            "fit_index_sha256": sha256(json.dumps([str(value) for value in X_fit.index],
+                                                    ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "confirmation_index_sha256": sha256(json.dumps(
+                [str(value) for value in X_confirmation.index] if X_confirmation is not None else [],
+                ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")).hexdigest(),
+            "final_test_included": False,
+            "numeric_imputation_fit_only": True,
+            "numeric_imputation_column_count": len(numeric_imputation),
+        }
+        partition_descriptor["partition_fingerprint"] = sha256(json.dumps(
+            partition_descriptor, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
         result = engine.fit(X_fit, y_fit)
         diagnostic_actual = y_fit
         if task == TaskType.CLASSIFICATION and getattr(engine, "_label_encoder", None) is not None:
@@ -4576,7 +5408,15 @@ class MathModelingAssistant:
             predictions = np.asarray(result.best_cv_result.oof_pred)
             if task == TaskType.CLASSIFICATION and getattr(engine, "_label_encoder", None) is not None:
                 actual_for_plot = engine._label_encoder.transform(pd.Series(y_fit).astype(str))
-            if use_time_validation:
+            oof_mask = getattr(result.best_cv_result, "oof_mask", None)
+            if len(predictions) == len(actual_for_plot) and oof_mask is not None \
+                    and len(oof_mask) == len(predictions):
+                valid_oof = np.asarray(oof_mask, dtype=bool)
+                predictions = predictions[valid_oof]
+                actual_for_plot = actual_for_plot[valid_oof]
+                evaluation_features = X_fit.iloc[np.flatnonzero(valid_oof)]
+            elif use_time_validation:
+                # Compatibility for old serialized CV results without a mask.
                 fold_count = len(next(iter(result.best_cv_result.fold_scores.values()), []))
                 initial_window = max(1, len(predictions) // (fold_count + 1))
                 predictions = predictions[initial_window:]
@@ -4620,13 +5460,18 @@ class MathModelingAssistant:
             "n_samples": len(X),
             "fit_samples": len(X_fit),
             "confirmation_samples": len(y_confirmation) if y_confirmation is not None else 0,
+            "data_split": partition_descriptor,
             "n_features": X.shape[1],
+            "model_portfolio": model_keys,
+            "model_portfolio_audit": portfolio_audit,
             "best_model": result.best_model_key,
             "validation": validation,
             "validation_group": group_column,
             "metrics": metrics,
             "leaderboard": leaderboard,
             "feature_importance": feature_importance,
+            "feature_leakage_filter": feature_leakage_filter,
+            "dropped_feature_columns": drop_columns,
             "feature_join_audit": join_audit,
             "feedback_optimization": feedback_optimization,
             "prediction_interval": prediction_interval,
@@ -4637,6 +5482,10 @@ class MathModelingAssistant:
         })
 
     def _run_entropy_topsis(self, target: Optional[str]) -> Optional[Dict[str, Any]]:
+        # 纯题面/无数据任务仍可进入机理数学链路；评价排名只是观测数据
+        # 的附加分析，不能在空数据集上调用 ``max`` 造成整条研究链路崩溃。
+        if not self._datasets:
+            return None
         selected: Optional[Tuple[str, pd.DataFrame]] = None
         if target and "." in target:
             name = target.rsplit(".", 1)[0]
@@ -4889,6 +5738,39 @@ class MathModelingAssistant:
             # dress an ordinary bivariate scatter as a "stable structure".
             if len(numeric) < 3 or len(source) < 20:
                 continue
+            temporal_structure = None
+            datetime_columns = self._profiles[dataset_name].datetime_columns
+            if datetime_columns:
+                try:
+                    from .structure_diagnostics import diagnose_series_structure
+
+                    time_column = datetime_columns[0]
+                    temporal = source[[time_column, *numeric[:8]]].copy()
+                    temporal[time_column] = pd.to_datetime(temporal[time_column], errors="coerce")
+                    temporal = temporal.dropna(subset=[time_column]).groupby(
+                        time_column, as_index=False, sort=True
+                    )[numeric[:8]].mean()
+                    temporal = temporal.dropna(subset=numeric[:8], how="all")
+                    if len(temporal) > 5_000:
+                        positions = np.linspace(0, len(temporal) - 1, 5_000, dtype=np.int64)
+                        temporal = temporal.iloc[np.unique(positions)]
+                    values = temporal[numeric[:8]].apply(pd.to_numeric, errors="coerce")
+                    valid = values.notna().all(axis=1)
+                    ordered_values = values.loc[valid]
+                    ordered_times = temporal.loc[valid, time_column]
+                    if len(ordered_values) >= 8:
+                        time_seconds = (
+                            ordered_times.astype("int64").to_numpy(dtype=np.float64) / 1e9
+                        )
+                        temporal_structure = diagnose_series_structure(
+                            time_seconds, ordered_values.to_numpy(dtype=float),
+                            series_names=[str(column) for column in ordered_values.columns],
+                            max_lag=64,
+                        )
+                except Exception:
+                    # This auxiliary signal must never prevent the robust PCA
+                    # result from being returned.
+                    temporal_structure = None
             sample_limit = min(self.max_analysis_rows, 5_000)
             sampled = _sample_frame(source[numeric], sample_limit, self.random_state).copy()
             values = sampled.replace([np.inf, -np.inf], np.nan)
@@ -5106,6 +5988,7 @@ class MathModelingAssistant:
                 "anomaly_perturbation_jaccard": anomaly_jaccard,
                 "top_anomalies": top_anomalies,
                 "projection": projection,
+                "temporal_structure": temporal_structure,
                 "credibility_audit": {
                     "status": audit_status,
                     "label": audit_label,
@@ -7366,279 +8249,35 @@ class MathModelingAssistant:
     def _run_integral_equation_discovery(
         self, target: Optional[str]
     ) -> Optional[Dict[str, Any]]:
-        """Discover a sparse derivative-free candidate ODE on a time holdout.
+        """Fit on training data, select on search data, then audit a locked test."""
+        from .integral_dynamics import discover_integral_dynamics
 
-        This is an integral/weak-form-inspired system identification stage: over
-        each window, y(t1)-y(t0) is regressed on integrals of candidate library
-        terms. It deliberately returns a falsifiable candidate equation, not a
-        claim that the data-generating mechanism has been proven.
-        """
-        from sklearn.linear_model import Lasso
-        from sklearn.metrics import mean_squared_error, r2_score
-
-        explicit = self._numeric_subject(target)
-        selected = None
+        # Explicit targets must not be replaced by a numeric column in an earlier
+        # dataset. Automatic fallback is schema-ordered, not ranked on test values.
+        explicit = self._select_target(target) if target else None
         for dataset_name, profile in self._profiles.items():
+            if explicit and explicit[0] != dataset_name:
+                continue
             if not profile.datetime_columns:
                 continue
+            source = self._datasets[dataset_name]
             numeric = [
-                column for column in profile.numeric_columns
-                if column not in profile.id_candidates
-                and self._datasets[dataset_name][column].nunique(dropna=True) > 2
+                column for column in source
+                if pd.api.types.is_numeric_dtype(source[column])
+                and not pd.api.types.is_bool_dtype(source[column])
+                and not self._is_identifier_name(str(column))
             ]
-            if explicit and explicit[0] == dataset_name and explicit[1] in numeric:
-                selected = dataset_name, profile.datetime_columns[0], explicit[1], numeric
-                break
-            if numeric:
-                selected = dataset_name, profile.datetime_columns[0], numeric[0], numeric
-                break
-        if selected is None:
-            return None
-        dataset_name, time_column, target_column, numeric_columns = selected
-        source = self._datasets[dataset_name]
-        working_columns = [time_column] + numeric_columns[:min(8, len(numeric_columns))]
-        frame = source[working_columns].copy()
-        frame[time_column] = pd.to_datetime(frame[time_column], errors="coerce")
-        for column in working_columns[1:]:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        frame = (
-            frame.dropna(subset=[time_column, target_column])
-            .groupby(time_column, as_index=False)[working_columns[1:]].mean()
-            .sort_values(time_column)
-        )
-        if len(frame) > 5_000:
-            positions = np.linspace(0, len(frame) - 1, 5_000, dtype=int)
-            frame = frame.iloc[np.unique(positions)].reset_index(drop=True)
-        if len(frame) < 50:
-            return None
-        elapsed = (
-            frame[time_column] - frame[time_column].iloc[0]
-        ).dt.total_seconds().to_numpy(dtype=float) / 86_400.0
-        positive_intervals = np.diff(elapsed)
-        if not len(positive_intervals) or np.any(positive_intervals <= 0):
-            return None
-        available_states = [
-            column for column in working_columns[1:]
-            if frame[column].notna().sum() >= max(30, int(0.8 * len(frame)))
-            and frame[column].nunique(dropna=True) > 2
-        ]
-        if target_column not in available_states:
-            return None
-        correlations = frame[available_states].corr(method="spearman")[target_column].abs()
-        state_columns = [target_column] + [
-            column for column in correlations.sort_values(ascending=False).index
-            if column != target_column
-        ][:3]
-        state_frame = frame[state_columns].interpolate(limit_direction="both")
-        matrix = state_frame.to_numpy(dtype=float)
-        state_center = np.median(matrix, axis=0)
-        state_mad = np.median(np.abs(matrix - state_center), axis=0)
-        state_scale = np.where(
-            1.4826 * state_mad > 1e-12, 1.4826 * state_mad,
-            np.where(np.std(matrix, axis=0) > 1e-12, np.std(matrix, axis=0), 1.0),
-        )
-        states = (matrix - state_center) / state_scale
-        library_columns = [np.ones(len(states))]
-        term_names = ["1"]
-        for index, column in enumerate(state_columns):
-            library_columns.append(states[:, index])
-            term_names.append(f"z({column})")
-        for index, column in enumerate(state_columns):
-            library_columns.append(states[:, index] ** 2)
-            term_names.append(f"z({column})²")
-        for left, right in combinations(range(len(state_columns)), 2):
-            library_columns.append(states[:, left] * states[:, right])
-            term_names.append(f"z({state_columns[left]})·z({state_columns[right]})")
-        library = np.column_stack(library_columns)
-        window = max(3, min(12, len(frame) // 30))
-        integrated_rows: List[np.ndarray] = []
-        deltas: List[float] = []
-        starts: List[int] = []
-        target_index = state_columns.index(target_column)
-        for start in range(0, len(frame) - window):
-            stop = start + window
-            local_dt = np.diff(elapsed[start:stop + 1])
-            integral = np.sum(
-                0.5 * (library[start:stop] + library[start + 1:stop + 1])
-                * local_dt[:, None],
-                axis=0,
-            )
-            integrated_rows.append(integral)
-            deltas.append(float(states[stop, target_index] - states[start, target_index]))
-            starts.append(start)
-        design = np.asarray(integrated_rows, dtype=float)
-        response = np.asarray(deltas, dtype=float)
-        starts_array = np.asarray(starts)
-        split_point = int(len(frame) * 0.70)
-        train_mask = starts_array + window < split_point
-        validation_mask = starts_array >= split_point
-        if int(train_mask.sum()) < 30 or int(validation_mask.sum()) < 12:
-            return None
-        feature_scale = np.std(design[train_mask], axis=0)
-        feature_scale = np.where(feature_scale > 1e-12, feature_scale, 1.0)
-        scaled_design = design / feature_scale
-        response_scale = max(float(np.std(response[train_mask])), 1e-12)
-        alpha_grid = response_scale * np.logspace(-4, -0.7, 16)
-        candidates: List[Dict[str, Any]] = []
-        best = None
-        for alpha in alpha_grid:
-            model = Lasso(
-                alpha=float(alpha), fit_intercept=False,
-                max_iter=20_000, random_state=self.random_state,
-            )
-            model.fit(scaled_design[train_mask], response[train_mask])
-            validation_prediction = model.predict(scaled_design[validation_mask])
-            rmse = float(np.sqrt(mean_squared_error(
-                response[validation_mask], validation_prediction
-            )))
-            nonzero = int(np.sum(np.abs(model.coef_) > 1e-8))
-            objective = rmse / response_scale + 0.005 * nonzero
-            candidate = {
-                "alpha": float(alpha), "validation_rmse": rmse,
-                "nonzero_terms": nonzero, "selection_objective": objective,
-            }
-            candidates.append(candidate)
-            if best is None or objective < best[0]:
-                best = objective, model, validation_prediction, candidate
-        if best is None:
-            return None
-        _, selected_model, validation_prediction, selected_candidate = best
-        validation_actual = response[validation_mask]
-        # Persistence is the correct derivative-free baseline: over a window it
-        # predicts no state change. A training-period mean delta can be badly
-        # biased when the process moves into a new regime.
-        baseline_prediction = np.zeros_like(validation_actual)
-        validation_rmse = float(np.sqrt(mean_squared_error(
-            validation_actual, validation_prediction
-        )))
-        baseline_rmse = float(np.sqrt(mean_squared_error(
-            validation_actual, baseline_prediction
-        )))
-        validation_r2 = float(r2_score(validation_actual, validation_prediction))
-        coefficients = selected_model.coef_ / feature_scale
-        active = [
-            {
-                "term": term, "coefficient": float(coefficient),
-                "absolute_coefficient": float(abs(coefficient)),
-            }
-            for term, coefficient in zip(term_names, coefficients)
-            if abs(coefficient) > 1e-8
-        ]
-        active.sort(key=lambda item: item["absolute_coefficient"], reverse=True)
-
-        midpoint = int(train_mask.sum()) // 2
-        train_indices = np.flatnonzero(train_mask)
-        supports: List[set] = []
-        for subset in (train_indices[:midpoint], train_indices[midpoint:]):
-            if len(subset) < 15:
+            target_column = explicit[1] if explicit else (numeric[0] if numeric else None)
+            if target_column is None:
                 continue
-            model = Lasso(
-                alpha=float(selected_candidate["alpha"]), fit_intercept=False,
-                max_iter=20_000, random_state=self.random_state,
-            ).fit(scaled_design[subset], response[subset])
-            supports.append({
-                term_names[index] for index, coefficient in enumerate(model.coef_)
-                if abs(coefficient) > 1e-8
-            })
-        if len(supports) == 2:
-            support_union = supports[0] | supports[1]
-            support_jaccard = (
-                len(supports[0] & supports[1]) / len(support_union)
-                if support_union else 1.0
+            result = discover_integral_dynamics(
+                source, time_column=profile.datetime_columns[0],
+                target_column=target_column, candidate_columns=numeric,
+                random_state=self.random_state,
             )
-        else:
-            support_jaccard = None
-        residual = validation_actual - validation_prediction
-        residual_autocorrelation = (
-            float(pd.Series(residual).autocorr(lag=1)) if len(residual) > 5 else None
-        )
-        if residual_autocorrelation is not None and not np.isfinite(residual_autocorrelation):
-            residual_autocorrelation = None
-        checks = [
-            self._credibility_check(
-                "dynamics_holdout", "时间外推验证",
-                "pass" if validation_rmse < baseline_rmse * 0.90 and validation_r2 >= 0.25 else (
-                    "warning" if validation_rmse < baseline_rmse and validation_r2 > 0 else "fail"
-                ),
-                f"末段时间留出 RMSE={validation_rmse:.4g}，零变化基线={baseline_rmse:.4g}，R²={validation_r2:.3f}。",
-                "候选方程未稳定优于简单变化基线，不能作为机理解释。"
-                if validation_rmse >= baseline_rmse * 0.90 or validation_r2 < 0.25 else "",
-            ),
-            self._credibility_check(
-                "equation_support_stability", "方程项稳定性",
-                "not_assessed" if support_jaccard is None else (
-                    "pass" if support_jaccard >= 0.70 else (
-                        "warning" if support_jaccard >= 0.40 else "fail"
-                    )
-                ),
-                "样本不足，未执行分段项集复核。" if support_jaccard is None else
-                f"前后两段训练窗口的非零项 Jaccard={support_jaccard:.1%}。",
-                "方程项随时间段改变，可能存在状态切换或伪相关。"
-                if support_jaccard is not None and support_jaccard < 0.70 else "",
-            ),
-            self._credibility_check(
-                "dynamics_residual_memory", "动力残差记忆",
-                "not_assessed" if residual_autocorrelation is None else (
-                    "pass" if abs(residual_autocorrelation) < 0.30 else (
-                        "warning" if abs(residual_autocorrelation) < 0.60 else "fail"
-                    )
-                ),
-                "残差长度不足。" if residual_autocorrelation is None else
-                f"末段残差一阶自相关={residual_autocorrelation:.3f}。",
-                "残差仍有明显时间结构，候选库遗漏了状态、滞后或外生驱动。"
-                if residual_autocorrelation is not None and abs(residual_autocorrelation) >= 0.30 else "",
-            ),
-        ]
-        failed = any(check["status"] == "fail" for check in checks)
-        warned = any(check["status"] in {"warning", "not_assessed"} for check in checks)
-        audit_status = "fail" if failed else ("warning" if warned else "pass")
-        audit_label = {"pass": "可信候选", "warning": "谨慎候选", "fail": "未通过"}[audit_status]
-        equation_terms = " + ".join(
-            f"{item['coefficient']:.5g}·{item['term']}" for item in active
-        ) or "0"
-        return _plain({
-            "dataset": dataset_name,
-            "time_column": time_column,
-            "target": target_column,
-            "state_columns": state_columns,
-            "method": "derivative_free_integral_sparse_dynamics",
-            "equation": f"d z({target_column}) / d day = {equation_terms}",
-            "standardization": {
-                column: {"center": float(center), "scale": float(scale)}
-                for column, center, scale in zip(state_columns, state_center, state_scale)
-            },
-            "window_points": window,
-            "n_time_points": len(frame),
-            "training_windows": int(train_mask.sum()),
-            "validation_windows": int(validation_mask.sum()),
-            "selected_alpha": selected_candidate["alpha"],
-            "active_terms": active,
-            "candidate_search": candidates,
-            "validation_actual": validation_actual,
-            "validation_prediction": validation_prediction,
-            "metrics": {
-                "validation_rmse": validation_rmse,
-                "baseline_rmse": baseline_rmse,
-                "validation_r2": validation_r2,
-                "support_jaccard": support_jaccard,
-                "residual_autocorrelation": residual_autocorrelation,
-            },
-            "credibility_audit": {
-                "status": audit_status,
-                "label": audit_label,
-                "checks": checks,
-                "decision": (
-                    "候选动力方程通过当前外推和稳定性检查"
-                    if audit_status == "pass" else
-                    "该方程只能作为待验证假设，不能宣称为真实控制方程"
-                ),
-            },
-            "literature_basis": {
-                "idea": "weak/integral sparse identification avoids pointwise derivative estimation",
-                "doi": "10.1137/20M1343166",
-            },
-            "note": "方程建立在标准化状态和观测时间尺度上；统计可辨识不等于机理正确。",
-        })
+            if result is not None:
+                return _plain({"dataset": dataset_name, **result})
+        return None
 
     @staticmethod
     def _relationship_backbone(
@@ -8335,22 +8974,35 @@ class MathModelingAssistant:
         if equation and equation.get("validation_actual") is not None:
             actual = np.asarray(equation["validation_actual"], dtype=float)
             prediction = np.asarray(equation["validation_prediction"], dtype=float)
-            fig, ax = plt.subplots(figsize=(10, 5.2))
+            fig, axes = plt.subplots(2, 1, figsize=(10, 8.0))
+            ax = axes[0]
             ax.plot(actual, color="#2E86AB", linewidth=1.5, label="观测窗口变化")
-            ax.plot(prediction, color="#C73E1D", linewidth=1.2, label="候选方程预测")
+            ax.plot(prediction, color="#C73E1D", linewidth=1.2, label="基于观测轨迹的积分估计")
             ax.axhline(0, color="#64748b", linewidth=0.8, alpha=0.5)
-            ax.set_xlabel("末段验证窗口")
+            ax.set_xlabel("锁定测试段窗口")
             ax.set_ylabel("标准化状态变化")
             ax.set_title(
-                f"{equation['target']} · 积分弱形式候选方程外推验证"
+                f"{equation['target']} · 积分一致性（不是独立预测）"
             )
             ax.legend()
+            rollout_actual = np.asarray(equation.get("test_rollout_actual", []), dtype=float)
+            rollout_prediction = np.asarray(equation.get("test_rollout_prediction", []), dtype=float)
+            ax = axes[1]
+            if len(rollout_actual) and len(rollout_prediction) == len(rollout_actual) and np.isfinite(rollout_prediction).any():
+                ax.plot(rollout_actual, color="#2E86AB", linewidth=1.5, label="测试观测（仅用于评分）")
+                ax.plot(rollout_prediction, color="#C73E1D", linewidth=1.2, label="从测试前初值独立预测")
+                ax.legend()
+            else:
+                ax.text(0.5, 0.5, "独立轨迹未取得有效结果，不能用积分分数替代", ha="center", transform=ax.transAxes)
+            ax.set_xlabel("锁定测试段时间点")
+            ax.set_ylabel("原始状态值")
+            ax.set_title("联合状态独立轨迹（不读取未来状态）")
             fig.tight_layout()
             path = self._artifact_path("charts", "71_equation_discovery_validation.png")
             fig.savefig(path, dpi=160, bbox_inches="tight")
             plt.close(fig)
             charts.append({
-                "title": "积分弱形式候选方程验证",
+                "title": "候选方程：积分一致性与独立轨迹",
                 "type": "equation_discovery",
                 "path": str(path),
                 "datasets": [equation["dataset"]],
@@ -8676,6 +9328,53 @@ class MathModelingAssistant:
                 lines.append(f"- [{item.method}] {item.interpretation} 样本数={item.sample_size}{significance}{q_value}{fdr_decision}{interval}{conditional}{stability}{controls}")
             if not result.interactions:
                 lines.append("- 未发现达到当前阈值的跨表数值交互。")
+        verdict = result.model_verdict or {}
+        if verdict:
+            lines.extend(["", "## 模型判决书", "",
+                          f"- 总状态：**{verdict.get('status', 'unresolved')}**",
+                          f"- 候选数：{verdict.get('candidate_count', 0)}；显式获准：{', '.join(verdict.get('approved_candidate_ids', [])) or '无'}",
+                          f"- 未决候选：{', '.join(verdict.get('unresolved_candidate_ids', [])) or '无'}",
+                          "- 该判决层不会把分数或有限测试自动解释为概率或数学证明。"])
+            minimum = verdict.get("minimum_common_conclusion", {})
+            lines.append(f"- 最小共同结论：{minimum.get('interpretation', '未建立')}" )
+            uncertainty_layers = verdict.get("uncertainty", {})
+            if isinstance(uncertainty_layers, Mapping):
+                lines.extend([
+                    "", "### 四层不确定性摘要", "",
+                    "| 层级 | 状态 | 证据 |", "|---|---|---|",
+                ])
+                layer_labels = {
+                    "semantic": "题意", "structural": "结构",
+                    "parameter": "参数", "numerical": "数值",
+                }
+                for layer in ("semantic", "structural", "parameter", "numerical"):
+                    item = uncertainty_layers.get(layer, {})
+                    if not isinstance(item, Mapping):
+                        item = {}
+                    evidence = "、".join(str(ref) for ref in item.get("evidence", [])[:4]) or "-"
+                    lines.append(
+                        f"| {layer_labels[layer]} | {item.get('status', 'not_assessed')} | {evidence} |"
+                    )
+            if verdict.get("warnings"):
+                lines.append("- 警告：" + "；".join(str(item) for item in verdict["warnings"][:8]))
+        if result.model_competitions:
+            lines.extend(["", "## 候选模型 Pareto 竞争", "",
+                          "| 数据集.目标 | 状态 | 可比较候选 | Pareto 候选 | 决策状态 |",
+                          "|---|---|---:|---|---|"])
+            for item in result.model_competitions:
+                competition = item.get("competition", {})
+                comparison = competition.get("comparison", {})
+                subject = f"{item.get('dataset', '-')}.{item.get('target', '-')}"
+                pareto = "、".join(competition.get("pareto_candidate_ids", [])) or "无"
+                decision_state = (
+                    "一致" if comparison.get("decision_consensus") else
+                    ("分歧" if comparison.get("decision_assessed") else "未评估")
+                )
+                lines.append(
+                    f"| {subject} | {competition.get('status', 'not_assessed')} | "
+                    f"{comparison.get('candidate_count', 0)} | {pareto} | {decision_state} |"
+                )
+            lines.append("\nPareto 非支配不等于模型获准；预测任务没有声明的数学硬约束时，约束轴不构成现实约束验证。")
         lines.extend(["", "## 执行计划", ""])
         for index, step in enumerate(result.analysis_plan, 1):
             lines.append(f"{index}. **{step['phase']}**：{step['action']}（{step['method']}）")
@@ -8812,6 +9511,138 @@ class MathModelingAssistant:
         )
         if has_mechanistic_preview or has_other_specialized:
             lines.extend(["", "## 专项数学分析", ""])
+            def diagnostic_text(value):
+                escaped = html.escape(str(value).replace("\n", " ").replace("\r", " "))
+                return re.sub(r"([\\`*_{}\[\]()#+.!|])", r"\\\1", escaped)
+
+            diagnostics = result.specialized_results.get("model_diagnostics")
+            if diagnostics:
+                lines.extend([
+                    "### 诊断与修复方向", "",
+                    "本轮仅生成建议，未自动改模型。筛查阈值不是显著性检验；运行失败或残差较大不证明存在隐变量。",
+                    "开发段反馈与最终审计隔离：锁定测试不回传搜索；据此改模后须另设未使用的确认数据。", "",
+                    "| 范围 | 发现及边界 | 下一步建议 |", "|---|---|---|",
+                ])
+                phases = {"development": "训练/选参", "execution": "执行", "preflight": "编译前", "final_test": "最终测试（只读）"}
+                for diagnostic in diagnostics.get("records", [])[:64]:
+                    actions = [action for action in diagnostics.get("proposed_actions", [])
+                               if action["diagnostic_id"] == diagnostic["id"]]
+                    advice = "；".join(action["label"] + "：" + action["guard"] for action in actions) or "保留未评估状态"
+                    cells = (phases.get(diagnostic.get("context", {}).get("phase"), "未定位"), diagnostic["summary"], advice)
+                    lines.append("| " + " | ".join(diagnostic_text(cell) for cell in cells) + " |")
+                if not diagnostics.get("records"):
+                    lines.append("当前接入范围未发现可定位问题，不代表模型正确，尚未覆盖全部模型。")
+                if any(item.get("pattern_status") == "insufficient_disjoint_windows"
+                       for item in diagnostics.get("development_checks", {}).get("residuals", [])):
+                    lines.extend(["", "部分状态的非重叠选参窗口不足，残差模式暂不判定。"])
+                unclosed = diagnostics.get("development_checks", {}).get("unclosed_state_competition", {})
+                candidates = unclosed.get("candidate_explanations", []) if isinstance(unclosed, dict) else []
+                if unclosed.get("status") == "screening_only" and candidates:
+                    lines.extend([
+                        "", "### 未闭合系统竞争筛查", "",
+                        "以下分数仅是开发段筛查信号，不是概率、因果结论或隐状态证明；必须继续做独立轨迹、观测模型和可辨识性检查。", "",
+                        "| 候选解释 | 状态 | 筛查分数 | 不代表 |", "|---|---|---:|---|",
+                    ])
+                    for candidate in candidates[:8]:
+                        lines.append("| " + " | ".join(diagnostic_text(value) for value in (
+                            f"{candidate.get('id', '-')} · {candidate.get('state', '-')}",
+                            candidate.get("status", "candidate"),
+                            f"{float(candidate.get('score', 0.0)):.3f}",
+                            "、".join(candidate.get("not_claimed", [])) or "-",
+                        )) + " |")
+                prediction_checks = diagnostics.get("prediction_checks", [])
+                if prediction_checks:
+                    lines.extend([
+                        "", "### 预测模型开发段检查", "",
+                        "以下只汇总 OOF/内层交叉验证标量，不含原始标签、预测数组、确认集或锁定测试；它们是搜索提示，不是最终正确性证明。", "",
+                        "| 目标 | 任务 | 诊断摘要 |", "|---|---|---|",
+                    ])
+                    for check in prediction_checks[:32]:
+                        evidence = check.get("evidence", {})
+                        summary = "；".join(
+                            f"{key}={value:.4g}" if isinstance(value, (int, float)) and not isinstance(value, bool)
+                            else f"{key}={value}"
+                            for key, value in evidence.items()
+                        ) or "无可报告标量"
+                        lines.append("| " + " | ".join(diagnostic_text(value) for value in (
+                            check.get("subject", "-"), check.get("task_type", "-"), summary
+                        )) + " |")
+                clustering_checks = diagnostics.get("clustering_checks", [])
+                if clustering_checks:
+                    lines.extend([
+                        "", "### 聚类可信度筛查", "",
+                        "聚类标签只表示当前距离与初始化假设下的分组；警告不能证明存在自然类别，也不会把簇标签当作真值。", "",
+                        "| 数据集 | 检查 | 状态 |", "|---|---|---|",
+                    ])
+                    for check in clustering_checks[:32]:
+                        lines.append("| " + " | ".join(diagnostic_text(value) for value in (
+                            check.get("subject", "-"), check.get("check_id", "-"), check.get("status", "-")
+                        )) + " |")
+                structure_checks = diagnostics.get("structure_checks", [])
+                if structure_checks:
+                    lines.extend([
+                        "", "### 时序结构候选信号", "",
+                        "周期、变点和单调性仅由有序开发段筛查得到；它们不证明机制切换、因果关系或未来外推成立。", "",
+                        "| 序列 | 信号 |", "|---|---|",
+                    ])
+                    for check in structure_checks[:32]:
+                        lines.append("| " + " | ".join(diagnostic_text(value) for value in (
+                            check.get("subject", "-"), check.get("signal", "-")
+                        )) + " |")
+                lines.append("")
+            proposals = result.specialized_results.get("model_hypotheses")
+            if proposals:
+                from html import escape as escape_html
+
+                def proposal_text(value: str) -> str:
+                    escaped = escape_html(value.replace("\n", " ").replace("\r", " "))
+                    return re.sub(r"([\\`*_{}\[\]()#+.!|])", r"\\\1", escaped)
+
+                lines.extend([
+                    "### 候选机制提议（尚未求解，不是事实或数值证据）", "",
+                    f"- 状态：{proposals.get('status', '-')}；契约版本：{proposals.get('contract_revision', '-')}。",
+                    "- 此入口只读取题面文字；模型提出假设，确定性检查器核验图类型和来源引用，不授予求解或证明权限。",
+                ])
+                for hypothesis in proposals.get("hypotheses", []):
+                    lines.append(
+                        f"- 候选 `{hypothesis['id']}`：{len(hypothesis['nodes'])} 个原语节点；"
+                        f"{len(hypothesis['unknown_mechanisms'])} 个待发现机制；未执行数值验证。"
+                    )
+                    for assumption in hypothesis["assumptions"]:
+                        lines.append(f"  - 待检验假设：{proposal_text(assumption['text'])}")
+                for question in proposals.get("questions", []):
+                    lines.append(f"- 待澄清：{proposal_text(question)}")
+                possible_repeats = proposals.get("possible_repeated_questions", [])
+                if possible_repeats:
+                    lines.append(f"- 可能重复问题：发现 {len(possible_repeats)} 个，仅作提示，未自动删除。")
+                if proposals.get("error_code"):
+                    lines.append(f"- 提议未完成：`{proposals['error_code']}`；没有以该结果替代既有事实和数值证据。")
+                lines.append("")
+            structure_candidates = result.specialized_results.get("structure_candidates")
+            if structure_candidates:
+                lines.extend([
+                    "### 通用结构候选（未执行）", "",
+                    f"- 状态：**{structure_candidates.get('status', '-')}**；候选数：{structure_candidates.get('candidate_count', 0)}。",
+                    "- 这些候选只是由基础数学原语组成的搜索种子，不是事实、数值答案、证明或已获准求解器。",
+                    "", "| 候选 | 任务 | 原语骨架 | 未知机制 | 图状态 | 数值状态 |", "|---|---|---|---|---|---|",
+                ])
+                for candidate in structure_candidates.get("candidates", [])[:6]:
+                    graph_validation = (candidate.get("primitive_graph") or {}).get("validation", {})
+                    lines.append(
+                        "| " + " | ".join(
+                            diagnostic_text(value) for value in (
+                                candidate.get("id", "-"),
+                                candidate.get("task_type", "-"),
+                                " → ".join(candidate.get("operators", [])),
+                                "、".join(candidate.get("unknown_mechanisms", [])) or "-",
+                                graph_validation.get("status", "not_assessed"),
+                                candidate.get("numeric_execution", "-"),
+                            )
+                        ) + " |"
+                    )
+                for question in structure_candidates.get("clarification_questions", [])[:3]:
+                    lines.append(f"- 待确认：{diagnostic_text(question)}")
+                lines.append("")
             data_compilation = result.specialized_results.get(
                 "mathematical_data_compilation"
             )
@@ -8970,6 +9801,9 @@ class MathModelingAssistant:
                     ])
                     for plan_node in solver_plan.get("nodes", [])[:40]:
                         budget = plan_node.get("resource_budget", {})
+                        supervised = budget.get("wall_time_enforcement") == "parent_process_deadline"
+                        time_label = "独立进程强制时限" if supervised else "软墙钟预算"
+                        memory_label = f"；内存≤{budget.get('memory_limit_mb')}MB" if supervised else ""
                         lines.append(
                             f"| {plan_node.get('ir_node_id', '-')} | "
                             f"{plan_node.get('mathematical_form', '-')} | "
@@ -8977,7 +9811,7 @@ class MathModelingAssistant:
                             f"{plan_node.get('status', '-')} | "
                             f"变量≤{budget.get('max_variables', '-')}；"
                             f"评估≤{budget.get('max_evaluations', '-')}；"
-                            f"软墙钟预算 {budget.get('wall_time_budget_seconds', '-')}s |"
+                            f"{time_label} {budget.get('wall_time_budget_seconds', '-')}s{memory_label} |"
                         )
                     if structure_catalog:
                         lines.extend([
@@ -9007,13 +9841,20 @@ class MathModelingAssistant:
                             )
                     if independent_audit.get("execution_failures"):
                         lines.extend([
-                            "", "#### 隔离的执行失败", "", "```json",
-                            json.dumps(
-                                independent_audit.get("execution_failures", []),
-                                ensure_ascii=False, indent=2,
-                            ),
-                            "```",
+                            "", "#### 隔离的执行失败", "",
+                            "运行失败不等于数学反例；其下游不会使用占位结果继续计算。", "",
+                            "| 节点 | 原因 | 建议处理 |", "|---|---|---|",
                         ])
+                        for failure in independent_audit.get("execution_failures", [])[:40]:
+                            cells = (
+                                failure.get("relation_id") or failure.get("ir_node_id") or "-",
+                                failure.get("failure_label") or failure.get("error_type") or "计算未完成",
+                                failure.get("next_action") or failure.get("message") or "检查执行契约。",
+                            )
+                            lines.append("| " + " | ".join(
+                                html.escape(str(cell)).replace("|", "\\|").replace("\n", " ")
+                                for cell in cells
+                            ) + " |")
                 lines.extend([
                     "### 纯题面通用数学 IR", "",
                     f"- IR 版本：{mechanistic.get('schema_version', '-')}",
@@ -9384,9 +10225,11 @@ class MathModelingAssistant:
                     "", "### 积分弱形式稀疏动力方程", "",
                     f"- 候选方程：`{equation['equation']}`",
                     f"- 状态变量：{equation['state_columns']}",
-                    f"- 时间点/训练窗口/验证窗口：{equation['n_time_points']}/"
-                    f"{equation['training_windows']}/{equation['validation_windows']}",
-                    f"- 验证指标：`{json.dumps(equation['metrics'], ensure_ascii=False)}`",
+                    f"- 时间点/训练窗口/选参窗口/锁定测试窗口：{equation['n_time_points']}/"
+                    f"{equation['training_windows']}/{equation.get('selection_windows', '-')}/{equation['validation_windows']}",
+                    f"- 划分协议：`{equation.get('evaluation_protocol', 'legacy')}`；预处理只拟合训练段。",
+                    f"- 锁定测试积分一致性（使用观测轨迹，不是独立预测）：`{json.dumps(equation.get('test_integral_metrics', {}), ensure_ascii=False)}`",
+                    f"- 独立轨迹（不读取未来状态）：`{json.dumps(equation.get('trajectory_test', {}), ensure_ascii=False)}`",
                     f"- 可信度：**{audit.get('label', '-')}**；{audit.get('decision', '-')}",
                     f"- 边界：{equation.get('note', '-')}",
                 ])

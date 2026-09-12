@@ -51,6 +51,46 @@ def test_discovers_one_to_many_relation_and_cross_table_interaction(tmp_path):
     assert Path(result.report_path).is_file()
 
 
+def test_explicit_graph_search_opt_in_executes_typed_bridge(monkeypatch, tmp_path):
+    frame = pd.DataFrame({
+        "x1": np.linspace(0.0, 1.0, 40),
+        "x2": np.linspace(1.0, 2.0, 40),
+    })
+    frame["target"] = 2.0 * frame["x1"] - frame["x2"]
+    fake_result = {"schema_version": "mathmodel.graph-search-result/v1", "termination": "candidate_pool_exhausted"}
+    monkeypatch.setattr(
+        "core.graph_search_artifacts.run_search_bundle",
+        lambda bundle, output_root: (fake_result, Path(output_root) / "run-1"),
+    )
+    assistant = MathModelingAssistant(
+        output_dir=str(tmp_path), enable_graph_search=True, feedback_optimization=False,
+    )
+    result = assistant.run(
+        "根据 x1 和 x2 预测 target", {"data": frame}, target="data.target",
+        run_modeling=False, generate_plots=False,
+    )
+    bridge = result.specialized_results["data_graph_search"]
+    assert bridge["target"] == "target"
+    assert bridge["features"] == ["x1", "x2"]
+    assert bridge["audit"]["causal_status"] == "not_assessed"
+
+
+def test_research_result_includes_conservative_external_method_plan(tmp_path):
+    frame = pd.DataFrame({
+        "date": pd.date_range("2024-01-01", periods=24, freq="D"),
+        "value": np.linspace(1.0, 3.0, 24),
+        "other": np.linspace(4.0, 2.0, 24),
+    })
+    result = MathModelingAssistant(output_dir=str(tmp_path)).run(
+        "分析时间序列并预测未来变化", {"series": frame},
+        run_modeling=False, generate_plots=False,
+    )
+    plan = result.specialized_results["external_method_plan"]
+    methods = {row["method"] for row in plan["candidates"]}
+    assert "sindy" in methods
+    assert all(row["dependency_status"] == "not_assessed" for row in plan["candidates"])
+
+
 def test_many_to_many_relation_is_flagged_before_join(tmp_path):
     left = pd.DataFrame({"group_id": np.repeat(np.arange(20), 5), "x": np.arange(100)})
     right = pd.DataFrame({"group_id": np.repeat(np.arange(20), 7), "y": np.arange(140)})
@@ -134,6 +174,74 @@ def test_automatic_supervised_model_uses_cross_table_features(tmp_path):
         "prediction_interval_coverage",
     }
     assert model["prediction_interval"]["target_coverage"] == 0.9
+    assert model["data_split"]["final_test_included"] is False
+    assert len(model["data_split"]["partition_fingerprint"]) == 64
+
+
+def test_supervised_model_filters_exact_target_decomposition(tmp_path):
+    rng = np.random.default_rng(42)
+    frame = pd.DataFrame({
+        "instant": np.arange(120),
+        "casual": rng.integers(10, 80, 120),
+        "registered": rng.integers(50, 180, 120),
+        "temperature": rng.normal(20, 3, 120),
+    })
+    frame["cnt"] = frame["casual"] + frame["registered"]
+    assistant = MathModelingAssistant(output_dir=str(tmp_path), max_analysis_rows=2_000, feedback_optimization=False)
+    filtered, audit = assistant._filter_target_derived_features(
+        frame.drop(columns=["cnt"]), frame["cnt"], "cnt"
+    )
+    assert set(audit["dropped_columns"]) == {"casual", "registered"}
+    assert "temperature" in filtered.columns
+    assert "instant" in filtered.columns
+
+
+def test_row_counter_is_removed_but_real_numeric_feature_is_kept(tmp_path):
+    assistant = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False)
+    assert assistant._is_row_index_like(pd.Series(np.arange(100)))
+    assert not assistant._is_row_index_like(pd.Series(np.arange(100) ** 2))
+    assert not assistant._is_row_index_like(pd.Series(np.arange(100)), "time")
+    assert assistant._is_row_index_like(pd.Series(np.arange(100)), "row_index")
+
+
+def test_supervised_portfolio_admits_registered_models_with_bounded_budget():
+    available = {key: object() for key in ["ridge", "hist_gb", "et", "rf", "xgb", "lgb", "piecewise"]}
+    small = MathModelingAssistant._select_supervised_model_keys(
+        "regression", available, n_samples=80, n_features=4
+    )
+    large = MathModelingAssistant._select_supervised_model_keys(
+        "regression", available, n_samples=1_000, n_features=12
+    )
+    assert len(small) == 3
+    assert len(large) == 6
+    assert "et" in large and "piecewise" in large
+    crowded = MathModelingAssistant._select_supervised_model_keys(
+        "regression",
+        {key: object() for key in ["ridge", "hist_gb", "et", "rf", "xgb", "lgb", "piecewise"]},
+        n_samples=2_000,
+        n_features=12,
+    )
+    assert "piecewise" in crowded
+
+
+def test_supervised_portfolio_exposes_selection_reasons():
+    available = {key: object() for key in ["ridge", "hist_gb", "et", "rf", "xgb", "lgb", "piecewise"]}
+    audit = MathModelingAssistant._select_supervised_model_portfolio(
+        "regression", available, n_samples=1_000, n_features=12
+    )
+    assert audit["selected"]
+    assert audit["reasons"]["piecewise"] == "selected_structural_reserve"
+    assert audit["policy"] == "bounded_portfolio_with_structural_reserve_and_diagnostic_hints"
+
+
+def test_supervised_portfolio_uses_collinearity_hint_for_pls():
+    available = {key: object() for key in ["ridge", "hist_gb", "et", "rf", "xgb", "lgb", "pls"]}
+    audit = MathModelingAssistant._select_supervised_model_portfolio(
+        "regression", available, n_samples=1_000, n_features=12,
+        diagnostic_signals={"collinearity_signal": True},
+    )
+    assert "pls" in audit["selected"]
+    assert audit["reasons"]["pls"] == "selected_for_collinearity_diagnostic"
 
 
 def test_generates_relationship_and_interaction_charts(tmp_path):
@@ -173,6 +281,7 @@ def test_clustering_problem_runs_without_target_and_selects_k(tmp_path):
     assert {check["id"] for check in result.model_result["credibility_audit"]["checks"]} == {
         "cluster_separation", "cluster_seed_stability", "cluster_size_balance",
     }
+    assert result.specialized_results["model_diagnostics"]["coverage"]["clustering_models_checked"] == 1
     assert any(chart["type"] == "clustering" for chart in result.charts)
 
 
@@ -271,6 +380,13 @@ def test_integral_sparse_dynamics_recovers_known_driver_without_differentiation(
     assert equation["metrics"]["validation_rmse"] < equation["metrics"]["baseline_rmse"] * 0.1
     assert equation["active_terms"][0]["term"] == "z(driver)"
     assert "validation_actual" not in equation
+    assert "test_rollout_actual" not in equation
+    assert "test_rollout_prediction" not in equation
+    assert equation["evaluation_protocol"] == "train_search_locked_test"
+    assert equation["trajectory_test"]["uses_future_observations"] is False
+    report = Path(result.report_path).read_text(encoding="utf-8")
+    assert "不是独立预测" in report
+    assert "独立轨迹（不读取未来状态）" in report
     assert any(chart["type"] == "equation_discovery" for chart in result.charts)
     assert result.problem_analysis["task_graph"][0]["status"] == "partial"
 
@@ -292,6 +408,21 @@ def test_integral_sparse_dynamics_rejects_structureless_noise(tmp_path):
     equation = result.specialized_results["equation_discovery"]
     assert equation["credibility_audit"]["status"] == "fail"
     assert equation["metrics"]["validation_rmse"] >= equation["metrics"]["baseline_rmse"] * 0.99
+
+
+def test_integral_dynamics_respects_explicit_dataset_and_late_target(tmp_path):
+    time = np.arange(300) * 0.2
+    first = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=300), "noise": np.sin(time)})
+    second = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=300),
+                           **{f"extra{i}": np.cos(time + i) for i in range(10)},
+                           "requested": np.sin(time)})
+    assistant = MathModelingAssistant(output_dir=str(tmp_path))
+    assistant._datasets = {"first": first, "second": second}
+    assistant.profile_datasets("发现动力学方程")
+    result = assistant._run_integral_equation_discovery("second.requested")
+    assert result["dataset"] == "second"
+    assert result["target"] == "requested"
+    assert result["state_columns"][0] == "requested"
 
 
 def test_cross_fitted_causal_effect_recovers_known_effect_and_keeps_assumption_warning(tmp_path):
@@ -507,9 +638,41 @@ def test_multiple_targets_are_modeled_independently(tmp_path):
     assert [model["target"] for model in result.model_results] == ["sales", "profit"]
     assert result.model_result == result.model_results[0]
     assert all(model["best_model"] for model in result.model_results)
+    assert {item["target"] for item in result.model_competitions} == {"sales", "profit"}
+    assert all(
+        item["competition"]["policy"]["pareto_is_not_approval"]
+        for item in result.model_competitions
+    )
+    assert all(
+        "compute_cost" in item["competition"]["comparison"]["comparison_axes"]
+        for item in result.model_competitions
+    )
+    assert all(
+        "baseline_mean" in item["competition"]["comparison"]["pareto_candidate_ids"]
+        or item["competition"]["comparison"]["candidate_count"] >= 3
+        for item in result.model_competitions
+    )
+    assert (Path(result.output_dir) / "evidence" / "model_competitions.json").is_file()
+    assert "候选模型 Pareto 竞争" in Path(result.report_path).read_text(encoding="utf-8")
     assert sum("完成自动regression" in conclusion for conclusion in result.conclusions) == 2
     validation_charts = [chart for chart in result.charts if chart["type"] == "model_validation"]
     assert {chart["target"] for chart in validation_charts} == {"sales", "profit"}
+
+
+def test_prediction_competition_includes_majority_baseline_for_numeric_labels(tmp_path):
+    assistant = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False)
+    actual = np.asarray([0, 0, 0, 1, 1, 0], dtype=float)
+    candidates = [
+        {"key": "model_a", "prediction": np.asarray([0, 0, 1, 1, 1, 0], dtype=float),
+         "actual": actual, "score": 0.5, "complexity": 2, "instability": 0.1, "compute_cost": 1},
+        {"key": "model_b", "prediction": np.asarray([0, 0, 0, 1, 0, 0], dtype=float),
+         "actual": actual, "score": 0.4, "complexity": 3, "instability": 0.2, "compute_cost": 1},
+    ]
+    result = assistant._build_prediction_competition(candidates, "classification")
+    assert result["comparison"]["candidate_count"] == 3
+    assert result["baseline_registry"]["selected"]["id"] == "classification_majority"
+    assert len(result["baseline_registry"]["digest"]) == 64
+    assert "baseline_majority" in result["comparison"].get("pareto_candidate_ids", []) or result["comparison"]["candidate_count"] == 3
 
 
 def test_auto_target_context_does_not_model_mentioned_predictors(tmp_path):

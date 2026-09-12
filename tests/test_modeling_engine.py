@@ -200,6 +200,24 @@ class TestCrossValidator(unittest.TestCase):
         self.assertIn('rmse', result.mean_scores)
         self.assertEqual(len(result.oof_pred), 50)
 
+    def test_time_cv_exposes_exact_oof_mask(self):
+        """TimeSeriesSplit 的未验证前缀不能靠折数反推。"""
+        X = pd.DataFrame({'x': np.arange(20, dtype=float)})
+        y = pd.Series(2.0 * X['x'] + 1.0)
+        from sklearn.linear_model import Ridge
+
+        result = CrossValidator(
+            n_splits=4, fold_type='time', verbose=False
+        ).cross_validate(
+            Ridge(), X, y, TaskType.REGRESSION
+        )
+
+        self.assertIsNotNone(result.oof_mask)
+        mask = np.asarray(result.oof_mask, dtype=bool)
+        self.assertEqual(mask.shape, (len(X),))
+        self.assertEqual(int(mask.sum()), 16)
+        self.assertTrue(np.array_equal(np.flatnonzero(mask), np.arange(4, 20)))
+
 
 class TestEnsembleBuilder(unittest.TestCase):
     """测试模型融合"""

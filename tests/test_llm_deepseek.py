@@ -74,6 +74,32 @@ def test_deepseek_connection_test_uses_models_endpoint(monkeypatch):
     assert captured["allow_redirects"] is False
 
 
+def test_llm_client_enforces_call_and_prompt_budgets_before_network(monkeypatch):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _FakeResponse({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("extensions.llm_analyzer.requests.post", fake_post)
+    client = LLMClient(LLMConfig(
+        provider="deepseek", base_url="https://api.deepseek.com", api_key="secret",
+        model_name="deepseek-v4-pro", max_calls=1, max_prompt_chars=1024,
+    ))
+    assert client.chat_completion([{"role": "user", "content": "small"}]) == "ok"
+    with pytest.raises(ValueError, match="调用预算"):
+        client.chat_completion([{"role": "user", "content": "again"}])
+    assert len(calls) == 1
+
+    limited = LLMClient(LLMConfig(
+        provider="deepseek", base_url="https://api.deepseek.com", api_key="secret",
+        model_name="deepseek-v4-pro", max_prompt_chars=1024,
+    ))
+    with pytest.raises(ValueError, match="提示体积"):
+        limited.chat_completion([{"role": "user", "content": "x" * 2000}])
+    assert len(calls) == 1
+
+
 def test_deepseek_validation_requires_key_and_official_host():
     with pytest.raises(ValueError, match="API Key"):
         LLMConfig(

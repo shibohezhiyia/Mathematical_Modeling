@@ -155,6 +155,14 @@ class UniversalRelationValidator:
         "bipartite_matching_problem": "_bipartite_matching",
         "markov_chain": "_markov_chain",
         "sample_expectation": "_sample_expectation",
+        "distance": "_distance",
+        "interval_union": "_interval_union",
+        "region_membership": "_region_membership",
+        "segment_intersection": "_segment_intersection",
+        "line_of_sight": "_line_of_sight",
+        "normal_log_likelihood": "_normal_log_likelihood",
+        "bootstrap_mean": "_bootstrap_mean",
+        "permutation_test": "_permutation_test",
     }
 
     @classmethod
@@ -649,9 +657,150 @@ class UniversalRelationValidator:
         })
         return payload
 
+    @staticmethod
+    def _distance(payload: Dict[str, Any]) -> Dict[str, Any]:
+        left = _finite_array(payload.get("left"), "left", dimensions=1, max_cells=128)
+        right = _finite_array(payload.get("right"), "right", dimensions=1, max_cells=128)
+        if left.shape != right.shape:
+            raise ValueError("distance_vectors_must_have_matching_shapes")
+        metric = str(payload.get("metric", "euclidean"))
+        if metric not in {"euclidean", "manhattan", "haversine"}:
+            raise ValueError("unsupported_distance_metric")
+        if metric == "haversine" and left.size != 2:
+            raise ValueError("haversine_requires_latitude_longitude")
+        payload.update({"left": left.tolist(), "right": right.tolist(), "metric": metric})
+        return payload
+
+    @staticmethod
+    def _interval_union(payload: Dict[str, Any]) -> Dict[str, Any]:
+        intervals = payload.get("intervals")
+        if not isinstance(intervals, list) or not 1 <= len(intervals) <= 100_000:
+            raise ValueError("intervals_must_be_a_bounded_nonempty_list")
+        normalized = []
+        for index, item in enumerate(intervals):
+            if not isinstance(item, Sequence) or isinstance(item, (str, bytes)) or len(item) != 2:
+                raise ValueError(f"invalid_interval:{index}")
+            start, end = float(item[0]), float(item[1])
+            if not math.isfinite(start) or not math.isfinite(end) or start > end:
+                raise ValueError(f"invalid_interval:{index}")
+            normalized.append([start, end])
+        payload["intervals"] = normalized
+        return payload
+
+    @staticmethod
+    def _region_membership(payload: Dict[str, Any]) -> Dict[str, Any]:
+        point = _finite_array(payload.get("point"), "point", dimensions=1, max_cells=16)
+        region = payload.get("region")
+        if isinstance(region, Mapping) and "lower" in region and "upper" in region:
+            lower = _finite_array(region["lower"], "region_lower", dimensions=1, max_cells=16)
+            upper = _finite_array(region["upper"], "region_upper", dimensions=1, max_cells=16)
+            if lower.shape != point.shape or upper.shape != point.shape or np.any(lower > upper):
+                raise ValueError("region_bounds_shape_or_order_invalid")
+            payload["region"] = {"lower": lower.tolist(), "upper": upper.tolist()}
+        elif isinstance(region, list):
+            polygon = _finite_array(region, "region_polygon", dimensions=2, max_cells=20_000)
+            if point.size != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+                raise ValueError("region_polygon_must_be_2d_with_at_least_3_vertices")
+            payload["region"] = polygon.tolist()
+        else:
+            raise ValueError("region_must_be_box_or_polygon")
+        payload["point"] = point.tolist()
+        return payload
+
+    @staticmethod
+    def _segment_intersection(payload: Dict[str, Any]) -> Dict[str, Any]:
+        first = _finite_array(payload.get("first"), "first_segment", dimensions=2, max_cells=4)
+        second = _finite_array(payload.get("second"), "second_segment", dimensions=2, max_cells=4)
+        if first.shape != (2, 2) or second.shape != (2, 2):
+            raise ValueError("segments_must_be_two_2d_endpoints")
+        payload.update({"first": first.tolist(), "second": second.tolist()})
+        return payload
+
+    @staticmethod
+    def _line_of_sight(payload: Dict[str, Any]) -> Dict[str, Any]:
+        source = _finite_array(payload.get("source"), "source", dimensions=1, max_cells=2)
+        target = _finite_array(payload.get("target"), "target", dimensions=1, max_cells=2)
+        if source.size != 2 or target.size != 2 or np.array_equal(source, target):
+            raise ValueError("line_of_sight_requires_distinct_2d_points")
+        obstacles = payload.get("obstacles", [])
+        if not isinstance(obstacles, list) or len(obstacles) > 1_000:
+            raise ValueError("obstacles_must_be_a_bounded_list")
+        normalized = []
+        for index, obstacle in enumerate(obstacles):
+            polygon = _finite_array(obstacle, f"obstacle_{index}", dimensions=2, max_cells=20_000)
+            if polygon.shape[1] != 2 or polygon.shape[0] < 3:
+                raise ValueError(f"obstacle_{index}_must_be_a_2d_polygon")
+            normalized.append(polygon.tolist())
+        payload.update({"source": source.tolist(), "target": target.tolist(), "obstacles": normalized})
+        return payload
+
+    @staticmethod
+    def _normal_log_likelihood(payload: Dict[str, Any]) -> Dict[str, Any]:
+        observations = _finite_array(payload.get("observations"), "observations", dimensions=1, max_cells=1_000_000)
+        mean, standard_deviation = float(payload.get("mean")), float(payload.get("standard_deviation"))
+        if not math.isfinite(mean) or not math.isfinite(standard_deviation) or standard_deviation <= 0:
+            raise ValueError("normal_distribution_parameters_invalid")
+        payload.update({"observations": observations.tolist(), "mean": mean, "standard_deviation": standard_deviation})
+        return payload
+
+    @staticmethod
+    def _bootstrap_mean(payload: Dict[str, Any]) -> Dict[str, Any]:
+        values = _finite_array(payload.get("values"), "values", dimensions=1, max_cells=1_000_000)
+        resamples, seed = payload.get("resamples", 2_000), payload.get("seed", 0)
+        if values.size < 2 or type(resamples) is not int or not 100 <= resamples <= 20_000 or resamples * values.size > 5_000_000 or type(seed) is not int:
+            raise ValueError("bootstrap_budget_or_seed_invalid")
+        payload.update({"values": values.tolist(), "resamples": resamples, "seed": seed})
+        return payload
+
+    @staticmethod
+    def _permutation_test(payload: Dict[str, Any]) -> Dict[str, Any]:
+        first = _finite_array(payload.get("first"), "first", dimensions=1, max_cells=200_000)
+        second = _finite_array(payload.get("second"), "second", dimensions=1, max_cells=200_000)
+        permutations, seed = payload.get("permutations", 2_000), payload.get("seed", 0)
+        if first.size < 2 or second.size < 2 or first.size + second.size > 200_000 or type(permutations) is not int or not 100 <= permutations <= 20_000 or permutations * (first.size + second.size) > 10_000_000 or type(seed) is not int:
+            raise ValueError("permutation_budget_or_seed_invalid")
+        payload.update({"first": first.tolist(), "second": second.tolist(), "permutations": permutations, "seed": seed})
+        return payload
+
 
 class UniversalSolverRegistry:
     """Extensible executor registry keyed by mathematical contract version."""
+
+    CAPABILITY_SCHEMA = "mathmodel.solver-capability/v1"
+
+    # This metadata is deliberately descriptive rather than a second dispatch
+    # table.  The executor remains the source of runtime behavior; these
+    # records tell the compiler what a backend accepts and how expensive it is
+    # expected to be before any user payload reaches it.
+    _BUILTIN_CAPABILITIES = {
+        "linear_system/v1": ("algebra", "finite dense coefficient matrix and RHS", "O(n^3)", "numpy.solve_or_lstsq"),
+        "polynomial_root/v1": ("algebra", "finite polynomial coefficients and bounded root domain", "O(d^3) typical", "numpy.roots"),
+        "linear_least_squares/v1": ("algebra", "finite design matrix and target with matching rows", "O(n p^2)", "numpy.linalg.lstsq"),
+        "linear_program/v1": ("optimization", "linear objective, bounds and linear constraints", "solver-dependent", "scipy.optimize.linprog"),
+        "mixed_integer_linear_program/v1": ("optimization", "linear objective, bounds, constraints and integrality", "solver-dependent", "scipy.optimize.milp"),
+        "hierarchical_finite_action/v1": ("optimization", "finite actions, coverage rules and optional scenarios", "solver-dependent", "scipy.milp"),
+        "quadratic_program/v1": ("optimization", "convex quadratic objective with linear constraints", "solver-dependent", "scipy.optimize"),
+        "multiobjective/v1": ("optimization", "finite objective vector and explicit preference policy", "solver-dependent", "pareto/enumeration"),
+        "robust_program/v1": ("optimization", "uncertainty set plus worst-case linear relation", "solver-dependent", "scipy.optimize"),
+        "stochastic_program/v1": ("optimization", "finite scenarios with validated probabilities", "solver-dependent", "scipy.optimize"),
+        "dynamic_program/v1": ("optimization", "finite state/action transition and horizon", "O(HSA)", "bellman recursion"),
+        "shortest_path/v1": ("graph", "finite weighted graph with source and target", "O(E log V) typical", "networkx.dijkstra_or_bellman_ford"),
+        "maximum_flow/v1": ("graph", "finite directed capacity graph with source and sink", "solver-dependent", "networkx.preflow_push"),
+        "minimum_cost_flow/v1": ("graph", "finite capacity graph with node demands and costs", "solver-dependent", "networkx.network_simplex"),
+        "bipartite_matching/v1": ("graph", "finite bipartite edge set with optional weights", "O(V^3) typical", "networkx.bipartite_matching"),
+        "markov_chain/v1": ("probability", "row-stochastic transition matrix and distribution", "O(n^3 + k n^2)", "numpy.matrix_power+eigendecomposition"),
+        "sample_expectation/v1": ("statistics", "finite weighted sample with named quantities", "O(n p)", "weighted_sample_moments"),
+        "linear_ode/v1": ("dynamics", "finite matrix, initial state and strictly increasing time grid", "O(k n^3)", "scipy.linalg.expm"),
+        "threshold_event/v1": ("event", "finite monotone time series and threshold", "O(k)", "piecewise_linear_crossing"),
+        "distance/v1": ("geometry", "finite coordinate vectors and an allow-listed metric", "O(d)", "numpy.vectorized_distance"),
+        "interval_union/v1": ("event", "bounded finite closed intervals", "O(n log n)", "sorted_sweep_union"),
+        "region_membership/v1": ("geometry", "finite point and box or polygon region", "O(v)", "ray_casting_or_box_check"),
+        "segment_intersection/v1": ("geometry", "two finite two-dimensional line segments", "O(1)", "orientation_predicate"),
+        "line_of_sight/v1": ("geometry", "finite source, target and polygon obstacles", "O(total obstacle vertices)", "segment_polygon_intersection"),
+        "normal_log_likelihood/v1": ("probability", "finite observations and normal distribution parameters", "O(n)", "numpy.log_likelihood"),
+        "bootstrap_mean/v1": ("statistics", "finite sample, seeded bounded resampling budget", "O(Bn)", "numpy.default_rng_bootstrap"),
+        "permutation_test/v1": ("statistics", "two finite samples and seeded permutation budget", "O(Bn)", "numpy.default_rng_permutation"),
+    }
 
     def __init__(self) -> None:
         self._executors: Dict[str, Callable[[Mapping[str, Any]], Dict[str, Any]]] = {
@@ -672,11 +821,23 @@ class UniversalSolverRegistry:
             "bipartite_matching/v1": self._solve_bipartite_matching,
             "markov_chain/v1": self._solve_markov_chain,
             "sample_expectation/v1": self._solve_sample_expectation,
+            "linear_ode/v1": self._solve_linear_ode,
+            "threshold_event/v1": self._solve_threshold_event,
+            "distance/v1": self._solve_distance,
+            "interval_union/v1": self._solve_interval_union,
+            "region_membership/v1": self._solve_region_membership,
+            "segment_intersection/v1": self._solve_segment_intersection,
+            "line_of_sight/v1": self._solve_line_of_sight,
+            "normal_log_likelihood/v1": self._solve_normal_log_likelihood,
+            "bootstrap_mean/v1": self._solve_bootstrap_mean,
+            "permutation_test/v1": self._solve_permutation_test,
         }
+        self._custom_capabilities: Dict[str, Dict[str, Any]] = {}
 
     def register(
         self, executor_key: str,
         executor: Callable[[Mapping[str, Any]], Dict[str, Any]],
+        capability: Mapping[str, Any] | None = None,
     ) -> None:
         key = str(executor_key).strip()
         if not key or key in self._executors:
@@ -684,6 +845,39 @@ class UniversalSolverRegistry:
         if not callable(executor):
             raise TypeError("executor must be callable")
         self._executors[key] = executor
+        if capability is not None:
+            self._custom_capabilities[key] = self._normalize_capability(key, capability)
+
+    @classmethod
+    def _normalize_capability(cls, key: str, capability: Mapping[str, Any]) -> Dict[str, Any]:
+        if not isinstance(capability, Mapping):
+            raise TypeError("capability must be a mapping")
+        required = {"family", "input_contract", "complexity", "backend"}
+        if set(capability) != required:
+            raise ValueError("capability_must_contain_family_input_contract_complexity_backend")
+        values = {name: str(capability[name]).strip() for name in required}
+        if any(not value for value in values.values()):
+            raise ValueError("capability_fields_must_be_nonempty")
+        return {"schema_version": cls.CAPABILITY_SCHEMA, "key": key, **values}
+
+    def describe(self, executor_key: str | None = None) -> Dict[str, Any] | List[Dict[str, Any]]:
+        """Return stable, non-executable capability metadata for planning."""
+        capabilities = {
+            key: self._normalize_capability(key, {
+                "family": values[0], "input_contract": values[1],
+                "complexity": values[2], "backend": values[3],
+            }) for key, values in self._BUILTIN_CAPABILITIES.items()
+        }
+        capabilities.update(self._custom_capabilities)
+        if executor_key is not None:
+            key = str(executor_key)
+            if key not in self._executors:
+                raise KeyError(f"no universal executor registered for {executor_key}")
+            return dict(capabilities.get(key, self._normalize_capability(key, {
+                "family": "custom", "input_contract": "executor-defined mapping",
+                "complexity": "unknown", "backend": "custom",
+            })))
+        return [dict(capabilities[key]) for key in sorted(self._executors)]
 
     def has(self, executor_key: str) -> bool:
         return str(executor_key) in self._executors
@@ -694,6 +888,67 @@ class UniversalSolverRegistry:
         except KeyError as exc:
             raise KeyError(f"no universal executor registered for {executor_key}") from exc
         return executor(contract)
+
+    @staticmethod
+    def _solve_linear_ode(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("linear_ode", relation)
+
+    @staticmethod
+    def _solve_threshold_event(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("threshold_event", relation)
+
+    @staticmethod
+    def _solve_distance(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("distance", relation)
+
+    @staticmethod
+    def _solve_interval_union(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("interval_union", relation)
+
+    @staticmethod
+    def _solve_region_membership(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("region_membership", relation)
+
+    @staticmethod
+    def _solve_segment_intersection(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("segment_intersection", relation)
+
+    @staticmethod
+    def _solve_line_of_sight(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("line_of_sight", relation)
+
+    @staticmethod
+    def _solve_normal_log_likelihood(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("normal_log_likelihood", relation)
+
+    @staticmethod
+    def _solve_bootstrap_mean(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("bootstrap_mean", relation)
+
+    @staticmethod
+    def _solve_permutation_test(relation: Mapping[str, Any]) -> Dict[str, Any]:
+        from .primitive_runtime import PrimitiveRuntime
+
+        return PrimitiveRuntime().execute("permutation_test", relation)
+
 
     @staticmethod
     def _solve_hierarchical_finite_action(

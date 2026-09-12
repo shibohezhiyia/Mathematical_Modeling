@@ -1532,6 +1532,11 @@ class CVResult:
     mean_scores: Dict[str, float] = field(default_factory=dict)
     std_scores: Dict[str, float] = field(default_factory=dict)
     oof_pred: Optional[np.ndarray] = None
+    # True exactly at rows that received a validation prediction.  TimeSeriesSplit
+    # intentionally leaves the initial training window without OOF predictions;
+    # callers must use this mask instead of inferring the window size from fold
+    # counts (folds are not generally equal length).
+    oof_mask: Optional[np.ndarray] = None
     oof_proba: Optional[np.ndarray] = None
     fitted_models: List[Any] = field(default_factory=list)
     feature_importance: Optional[pd.DataFrame] = None
@@ -1799,6 +1804,7 @@ class CrossValidator:
         # 初始化结果容器
         fold_scores = {name: [] for name in metrics.keys()}
         oof_pred = np.zeros(len(y))
+        oof_mask = np.zeros(len(y), dtype=bool)
         oof_proba = None
         # n_classes 仅分类任务有意义，回归等非分类任务初始化为0，
         # 避免下方无条件传给 _run_single_fold 时触发 UnboundLocalError
@@ -1841,6 +1847,7 @@ class CrossValidator:
                 for res in fold_results:
                     fitted_models.append(res['fitted_model'])
                     oof_pred[res['val_idx']] = res['pred']
+                    oof_mask[res['val_idx']] = True
                     if res['proba'] is not None:
                         if n_classes == 2:
                             oof_proba[res['val_idx']] = res['proba']
@@ -1894,6 +1901,7 @@ class CrossValidator:
                 )
                 fitted_models.append(res['fitted_model'])
                 oof_pred[res['val_idx']] = res['pred']
+                oof_mask[res['val_idx']] = True
                 if res['proba'] is not None:
                     if n_classes == 2:
                         oof_proba[res['val_idx']] = res['proba']
@@ -1932,6 +1940,7 @@ class CrossValidator:
             mean_scores=mean_scores,
             std_scores=std_scores,
             oof_pred=oof_pred,
+            oof_mask=oof_mask,
             oof_proba=oof_proba,
             fitted_models=fitted_models,
             feature_importance=fi_df,
@@ -1978,7 +1987,8 @@ class EnsembleBuilder:
             return {
                 'oof': best.oof_pred,
                 'test': None,
-                'weights': {best.model_key: 1.0}
+                'weights': {best.model_key: 1.0},
+                'oof_mask': getattr(best, 'oof_mask', None),
             }
         
         # 收集OOF预测
@@ -1994,6 +2004,15 @@ class EnsembleBuilder:
             log_warning(f"[EnsembleBuilder] {len(cv_results) - len(valid_cv)} 个 CVResult 缺 oof_pred，已过滤")
         cv_results = valid_cv
         oof_preds = np.column_stack([r.oof_pred for r in cv_results])
+        # A model group is only jointly OOF-evaluable where every arm has a
+        # validation prediction.  TimeSeriesSplit can leave the same prefix
+        # empty; preserve the vector shape for compatibility but expose the
+        # exact common mask and mark non-evaluable rows as NaN below.
+        common_oof_mask = np.ones(oof_preds.shape[0], dtype=bool)
+        for result in cv_results:
+            mask = getattr(result, 'oof_mask', None)
+            if mask is not None and len(mask) == len(common_oof_mask):
+                common_oof_mask &= np.asarray(mask, dtype=bool)
         
         # Stacking 分支
         if self.method == EnsembleMethod.STACKING:
@@ -2020,7 +2039,8 @@ class EnsembleBuilder:
                 'oof': oof_blend,
                 'test': test_blend,
                 'weights': weight_dict,
-                'meta_model': self.meta_model.__class__.__name__ if self.meta_model else None
+                'meta_model': self.meta_model.__class__.__name__ if self.meta_model else None,
+                'oof_mask': common_oof_mask,
             }
         
         # 计算权重
@@ -2052,6 +2072,16 @@ class EnsembleBuilder:
             except ValueError as e:
                 log_warning(f"[EnsembleBuilder] 融合失败: {e}，回退到最佳单模型")
                 oof_blend = oof_preds[:, 0] if oof_preds.ndim > 1 else oof_preds
+
+        if not bool(np.all(common_oof_mask)):
+            # Classification votes are integer arrays; cast before using NaN
+            # as the explicit marker for rows without a joint OOF prediction.
+            oof_blend = np.asarray(oof_blend, dtype=float).copy()
+            if oof_blend.ndim == 1:
+                oof_blend[~common_oof_mask] = np.nan
+            if oof_proba is not None:
+                oof_proba = np.asarray(oof_proba).copy()
+                oof_proba[~common_oof_mask] = np.nan
         
         # 测试集融合（如果提供了X_test）
         test_blend = None
@@ -2064,7 +2094,8 @@ class EnsembleBuilder:
             'oof': oof_blend,
             'oof_proba': oof_proba,
             'test': test_blend,
-            'weights': weight_dict
+            'weights': weight_dict,
+            'oof_mask': common_oof_mask,
         }
 
     @staticmethod
@@ -3061,7 +3092,14 @@ class ModelingEngine:
                 oof_pred = best_result.oof_pred
                 if oof_pred is not None and len(oof_pred) == len(y):
                     # Split Conformal: 用 OOF 预测作为校准集
-                    residuals = np.abs(np.array(y).ravel() - oof_pred)
+                    calibration_actual = np.asarray(y).ravel()
+                    calibration_prediction = np.asarray(oof_pred)
+                    oof_mask = getattr(best_result, "oof_mask", None)
+                    if oof_mask is not None and len(oof_mask) == len(calibration_prediction):
+                        valid_oof = np.asarray(oof_mask, dtype=bool)
+                        calibration_actual = calibration_actual[valid_oof]
+                        calibration_prediction = calibration_prediction[valid_oof]
+                    residuals = np.abs(calibration_actual - calibration_prediction)
                     n_calib = len(residuals)
                     q_level = np.ceil((n_calib + 1) * 0.9) / n_calib
                     q_hat = float(np.quantile(residuals, min(q_level, 1.0)))

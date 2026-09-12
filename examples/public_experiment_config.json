@@ -1,0 +1,23 @@
+{
+  "schema_version": "mathmodel.public-experiment-config/v1",
+  "catalog_digest": "198778541eebd246b0c27f0fc5ec94b5aec1170598653bd8d8f0ac180e82ca8f",
+  "benchmark_name": "official-modeling-problem-sources",
+  "revision": 1,
+  "seed": 20260909,
+  "budget": {
+    "max_seconds": 600,
+    "max_memory_mb": 2048,
+    "max_api_calls": 24,
+    "max_candidates": 96,
+    "max_cases": 64,
+    "max_repeats": 3
+  },
+  "selection_splits": ["development", "structure_transform"],
+  "evaluation_splits": ["unseen", "adversarial"],
+  "methods": ["baseline", "diagnostic_search", "counterexample_repair"],
+  "policy": {
+    "no_selection_on_evaluation": true,
+    "no_problem_text_in_config": true,
+    "fixed_budget_required": true
+  }
+}

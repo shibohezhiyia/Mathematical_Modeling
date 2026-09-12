@@ -1,0 +1,77 @@
+{
+  "schema_version": "mathmodel.scalar-holdout/v1",
+  "cases": [
+    {
+      "id": "heldout_0",
+      "bindings": {
+        "x": -2.5
+      },
+      "expected": {
+        "y": 6.25
+      }
+    },
+    {
+      "id": "heldout_1",
+      "bindings": {
+        "x": -0.75
+      },
+      "expected": {
+        "y": 0.5625
+      }
+    },
+    {
+      "id": "heldout_2",
+      "bindings": {
+        "x": 0.25
+      },
+      "expected": {
+        "y": 0.0625
+      }
+    },
+    {
+      "id": "heldout_3",
+      "bindings": {
+        "x": 0.75
+      },
+      "expected": {
+        "y": 0.5625
+      }
+    },
+    {
+      "id": "heldout_4",
+      "bindings": {
+        "x": 1.25
+      },
+      "expected": {
+        "y": 1.5625
+      }
+    },
+    {
+      "id": "heldout_5",
+      "bindings": {
+        "x": 1.5
+      },
+      "expected": {
+        "y": 2.25
+      }
+    },
+    {
+      "id": "heldout_6",
+      "bindings": {
+        "x": 2.25
+      },
+      "expected": {
+        "y": 5.0625
+      }
+    },
+    {
+      "id": "heldout_7",
+      "bindings": {
+        "x": 2.5
+      },
+      "expected": {
+        "y": 6.25
+      }
+    }
+  ]
+}

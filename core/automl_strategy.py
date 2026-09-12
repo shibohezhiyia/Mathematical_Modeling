@@ -189,6 +189,16 @@ class AutoMLStrategy:
                 if 'linear_svr' not in base_models:
                     base_models.append('linear_svr')
 
+            # Reserve a structural slot when the metadata actually supports
+            # it.  Previously the first four tree/linear entries made
+            # ResidualStack, Piecewise and PLS unreachable through the
+            # automatic path even though they were registered and tested.
+            if meta.n_samples >= 120:
+                if meta.feature_correlation_max >= 0.85 and 'pls' not in base_models:
+                    base_models.append('pls')
+                if meta.complexity_score >= _MEDIUM_COMPLEXITY:
+                    base_models.extend(['residual_stack', 'piecewise'])
+
             return base_models[:5]
     
     @staticmethod

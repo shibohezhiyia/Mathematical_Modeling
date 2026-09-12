@@ -354,6 +354,12 @@ body {
     background: rgba(46, 134, 171, 0.055);
 }
 .research-section > :not(summary) { margin: 12px 14px; }
+.hypothesis-control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.hypothesis-control { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted, #f7f9fb); }
+.hypothesis-control span { font-weight: 600; color: var(--text); }
+.hypothesis-control output { color: var(--primary); font-variant-numeric: tabular-nums; }
+.hypothesis-control input[type="range"] { width: 100%; accent-color: var(--primary); }
+.hypothesis-control small { color: var(--text-light); }
 .research-relation-list { display: grid; gap: 8px; }
 .research-relation {
     padding: 10px 12px;
@@ -381,6 +387,57 @@ body {
 .research-findings li { margin-bottom: 7px; }
 .research-findings small { color: var(--text-light); }
 .research-warning { color: var(--danger); }
+.research-clarification {
+    display: grid;
+    gap: 9px;
+    margin: 12px 0;
+    padding: 14px;
+    border: 1px solid rgba(46, 134, 171, 0.24);
+    border-radius: var(--radius);
+    background: rgba(46, 134, 171, 0.045);
+}
+.research-clarification > label:first-child {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+}
+.research-clarification textarea {
+    width: 100%;
+    min-height: 68px;
+    resize: vertical;
+}
+.research-clarification-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+}
+.research-clarification-caption {
+    grid-column: 1 / -1;
+    color: var(--text-light);
+    font-size: 12px;
+}
+.research-clarification-option {
+    display: grid;
+    gap: 4px;
+    padding: 9px 10px;
+    border: 1px solid rgba(46, 134, 171, 0.28);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+.research-clarification-option:hover,
+.research-clarification-option:focus-visible {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(46, 134, 171, 0.12);
+}
+.research-clarification-option small {
+    color: var(--text-light);
+    line-height: 1.45;
+}
+.research-clarification .research-checkbox { min-height: auto; }
+.research-clarification .btn { justify-self: start; }
 .capability-status {
     display: inline-block;
     padding: 2px 7px;
@@ -1889,6 +1946,11 @@ h3 { font-size: 16px; margin-bottom: 12px; color: var(--text); }
     font-size: 11px;
     font-weight: 600;
     white-space: nowrap;
+}
+.merge-bounded-badge {
+    color: #a15c00;
+    font-size: 11px;
+    font-weight: 600;
 }
 .merge-sheet-actions {
     display: flex;

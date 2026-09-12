@@ -1,0 +1,14 @@
+{
+  "schema_version": "mathmodel.system-comparison-record/v1",
+  "date": "2026-09-11",
+  "protocol_id": "external-data-v1",
+  "freeze_digest": "d87704112e75060d05f9b517d494debac8faf99561579c66c3316a9e026c287d",
+  "cases": 6,
+  "completed_cases": 6,
+  "arms": ["ridge_baseline", "current_modeling_engine"],
+  "current_system_model_keys": ["ridge", "hist_gb", "et", "residual_stack"],
+  "relative_rmse_effect_mean_current_minus_baseline": -0.23791644222896977,
+  "relative_rmse_effects": [-0.16343147540842562, 0.009186384854737994, -0.6137764637306271, -0.21425020498404312, 0.17691994110277331, -0.622146835208234],
+  "evaluation_status": "descriptive_public_labels",
+  "policy": "paired_frozen_split; no_independent_expert_review; no_real_unseen_claim"
+}

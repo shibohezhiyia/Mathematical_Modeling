@@ -83,3 +83,30 @@ def test_paths_and_cleanup_cannot_escape_or_delete_durable_results(tmp_path):
         manager.write_json(
             "bad.cache", "cache", "entry.json", {}, disposable=False
         )
+
+
+def test_active_run_cache_is_protected(tmp_path):
+    manager = RunArtifactManager(tmp_path, run_id="active_run")
+    manager.write_cache("preview", {"x": 1}, {"value": 1})
+    with pytest.raises(ValueError, match="运行仍在进行"):
+        manager.clear_cache()
+
+
+def test_artifact_contract_rejects_boolean_and_ttl_coercion(tmp_path):
+    manager = RunArtifactManager(tmp_path)
+    with pytest.raises(ValueError, match="布尔"):
+        manager.write_json("evidence.bad", "evidence", "bad.json", {}, required="yes")
+    with pytest.raises(ValueError, match="ttl_seconds"):
+        manager.write_cache("preview", {"x": 1}, {}, ttl_seconds="60")
+
+
+def test_cache_cleanup_supports_expiry_and_quota(tmp_path):
+    manager = RunArtifactManager(tmp_path, run_id="quota_run")
+    first = manager.write_cache("preview", {"x": 1}, {"value": "a"}, ttl_seconds=0)
+    second = manager.write_cache("preview", {"x": 2}, {"value": "b"}, ttl_seconds=3600)
+    manager.finalize()
+    preview = manager.cleanup_disposable(("cache",), dry_run=True, expired_only=True, max_files=1)
+    assert preview["deleted_files"] == 1
+    assert first.is_file() and second.is_file()
+    manager.cleanup_disposable(("cache",), expired_only=True, max_files=1)
+    assert not first.exists() and second.exists()

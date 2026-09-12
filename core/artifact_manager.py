@@ -14,7 +14,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -189,11 +189,13 @@ class RunArtifactManager:
         disposable: bool = False,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        if not _ARTIFACT_ID.fullmatch(str(artifact_id)):
+        if type(artifact_id) is not str or not _ARTIFACT_ID.fullmatch(artifact_id):
             raise ValueError(f"非法 artifact_id: {artifact_id!r}")
-        if category not in _DIRECTORIES:
+        if type(category) is not str or category not in _DIRECTORIES:
             raise ValueError(f"未知产物类别: {category}")
-        if bool(disposable) != (category in _DISPOSABLE_CATEGORIES):
+        if type(required) is not bool or type(disposable) is not bool:
+            raise ValueError("required/disposable 必须是布尔值")
+        if disposable != (category in _DISPOSABLE_CATEGORIES):
             if disposable:
                 raise ValueError("只有 cache/temp 产物可以标记为可删除")
             if category in _DISPOSABLE_CATEGORIES:
@@ -207,15 +209,15 @@ class RunArtifactManager:
         if not target.is_file():
             raise FileNotFoundError(target)
         record: Dict[str, Any] = {
-            "id": str(artifact_id),
+            "id": artifact_id,
             "category": category,
             "relative_path": self.relative_path(target),
             "media_type": str(media_type),
             "format_version": str(format_version),
             "sha256": self._sha256(target),
             "size_bytes": target.stat().st_size,
-            "required": bool(required),
-            "disposable": bool(disposable),
+            "required": required,
+            "disposable": disposable,
             "created_at": _utc_now(),
         }
         if metadata:
@@ -238,6 +240,9 @@ class RunArtifactManager:
         ttl_seconds: Optional[int] = None,
     ) -> Path:
         """Write a disposable JSON cache entry with deterministic naming."""
+        if ttl_seconds is not None and (
+                type(ttl_seconds) is not int or not 0 <= ttl_seconds <= 31_536_000):
+            raise ValueError("ttl_seconds 必须是 0 到 31536000 的整数")
         self._validate_namespace(namespace)
         key = self.cache_key(namespace, inputs, version)
         relative_name = f"{namespace}/{key[:2]}/{key}.json"
@@ -253,7 +258,7 @@ class RunArtifactManager:
             "sha256": self._sha256(target),
             "size_bytes": target.stat().st_size,
             "created_at": now,
-            "ttl_seconds": None if ttl_seconds is None else max(0, int(ttl_seconds)),
+            "ttl_seconds": ttl_seconds,
             "disposable": True,
         }
         self._write_cache_manifest()
@@ -264,11 +269,20 @@ class RunArtifactManager:
         categories: Sequence[str] = ("cache", "temp"),
         *,
         dry_run: bool = False,
+        allow_active: bool = False,
+        max_files: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+        expired_only: bool = False,
     ) -> Dict[str, Any]:
         """Delete only files below exact disposable directories.
 
         Directories remain in place, so the layout is stable after cleanup.
         """
+        if not allow_active and self._current_status() == "running":
+            raise ValueError("运行仍在进行，禁止清理其缓存")
+        for value, name in ((max_files, "max_files"), (max_bytes, "max_bytes")):
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"{name} 必须是正整数")
         requested = tuple(dict.fromkeys(str(item) for item in categories))
         invalid = [item for item in requested if item not in _DISPOSABLE_CATEGORIES]
         if invalid:
@@ -286,10 +300,35 @@ class RunArtifactManager:
                 if path.is_file() and path.resolve() != control_file
             )
         unique_files = sorted(set(files), key=lambda item: item.as_posix())
-        size_bytes = sum(path.stat().st_size for path in unique_files if path.exists())
-        deleted_paths = [self.relative_path(path) for path in unique_files]
+        if expired_only and "cache" in requested:
+            now = datetime.now(timezone.utc)
+            valid_cache_paths = set()
+            for entry in self._cache_entries.values():
+                ttl = entry.get("ttl_seconds")
+                created = entry.get("created_at")
+                try:
+                    expires = datetime.fromisoformat(str(created).replace("Z", "+00:00")) + timedelta(seconds=int(ttl))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if ttl is not None and expires <= now:
+                    valid_cache_paths.add(str(entry.get("relative_path", "")))
+            unique_files = [path for path in unique_files if self.relative_path(path) in valid_cache_paths]
+        selected = []
+        selected_bytes = 0
+        for path in unique_files:
+            if not path.exists():
+                continue
+            size = path.stat().st_size
+            if max_files is not None and len(selected) >= max_files:
+                break
+            if max_bytes is not None and selected and selected_bytes + size > max_bytes:
+                break
+            selected.append(path)
+            selected_bytes += size
+        size_bytes = selected_bytes
+        deleted_paths = [self.relative_path(path) for path in selected]
         if not dry_run:
-            for path in unique_files:
+            for path in selected:
                 path.unlink(missing_ok=True)
             for category in requested:
                 base = (self.root / _DIRECTORIES[category]).resolve()
@@ -303,26 +342,33 @@ class RunArtifactManager:
                     except OSError:
                         pass
                 base.mkdir(parents=True, exist_ok=True)
+            selected_relative = set(deleted_paths)
             removed = {
                 artifact_id for artifact_id, record in self._artifacts.items()
-                if record["category"] in requested
+                if record["category"] in requested and record.get("relative_path") in selected_relative
             }
             for artifact_id in removed:
                 self._artifacts.pop(artifact_id, None)
             if "cache" in requested:
-                self._cache_entries.clear()
+                self._cache_entries = {
+                    key: entry for key, entry in self._cache_entries.items()
+                    if entry.get("relative_path") not in selected_relative
+                }
                 self._write_cache_manifest()
             event = {
                 "at": _utc_now(), "categories": list(requested),
-                "deleted_files": len(unique_files), "deleted_bytes": size_bytes,
+                "deleted_files": len(selected), "matched_files": len(unique_files), "deleted_bytes": size_bytes,
+                "expired_only": bool(expired_only), "max_files": max_files, "max_bytes": max_bytes,
             }
             self._cleanup_history.append(event)
             self._write_manifest(status=self._current_status())
         return {
             "dry_run": bool(dry_run),
             "categories": list(requested),
-            "deleted_files": len(unique_files),
+            "deleted_files": len(selected),
+            "matched_files": len(unique_files),
             "deleted_bytes": size_bytes,
+            "expired_only": bool(expired_only), "max_files": max_files, "max_bytes": max_bytes,
             "relative_paths": deleted_paths,
         }
 

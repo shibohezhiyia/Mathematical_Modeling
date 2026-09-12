@@ -58,6 +58,78 @@ class TestDataLoader(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.loader.load('test.xyz')
 
+    def test_iter_chunks_does_not_concat_and_preserves_order(self):
+        rows = pd.DataFrame({
+            'value': np.arange(2105),
+            'group': np.where(np.arange(2105) % 2, 'odd', 'even'),
+        })
+        path = self._create_test_csv('stream.csv', rows)
+        chunks = list(self.loader.iter_chunks(path, chunk_size=1000))
+        self.assertEqual([len(chunk) for chunk in chunks], [1000, 1000, 105])
+        self.assertEqual(pd.concat(chunks, ignore_index=True).equals(rows), True)
+
+    def test_iter_chunks_supports_common_columns_projection(self):
+        rows = pd.DataFrame({'keep': np.arange(1200), 'drop': np.arange(1200) * 2})
+        path = self._create_test_csv('stream_projection.csv', rows)
+        chunks = list(self.loader.iter_chunks(path, chunk_size=500, columns=['keep']))
+        self.assertEqual([list(chunk.columns) for chunk in chunks], [['keep'], ['keep'], ['keep']])
+        self.assertEqual(pd.concat(chunks, ignore_index=True)['keep'].tolist(), rows['keep'].tolist())
+
+    def test_stream_profile_reports_exact_additive_stats_and_limits_unique_state(self):
+        rows = pd.DataFrame({
+            'value': np.arange(2105, dtype=float),
+            'group': np.where(np.arange(2105) % 2, 'odd', 'even'),
+            'missing': [None if i % 3 == 0 else i for i in range(2105)],
+        })
+        path = self._create_test_csv('stream_profile.csv', rows)
+        profile = self.loader.profile_chunks(
+            path, chunk_size=1000, max_unique_per_column=10
+        )
+        self.assertEqual(profile['n_rows'], len(rows))
+        self.assertEqual(profile['columns']['value']['null_count'], 0)
+        self.assertEqual(profile['columns']['value']['numeric_stats']['count'], len(rows))
+        self.assertAlmostEqual(profile['columns']['value']['numeric_stats']['mean'], rows['value'].mean())
+        self.assertFalse(profile['columns']['value']['unique_exact'])
+        self.assertGreaterEqual(profile['columns']['value']['unique_lower_bound'], 10)
+        self.assertTrue(profile['columns']['group']['unique_exact'])
+        self.assertEqual(profile['columns']['missing']['null_count'], 702)
+
+    def test_stream_profile_does_not_treat_datetime_as_numeric(self):
+        rows = pd.DataFrame({'when': pd.date_range('2024-01-01', periods=3)})
+        path = self._create_test_csv('stream_dates.csv', rows)
+        profile = self.loader.profile_chunks(path, chunk_size=2)
+        self.assertEqual(profile['columns']['when']['numeric_stats'], {})
+
+    def test_iter_parquet_chunks(self):
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        rows = pd.DataFrame({'value': np.arange(2105), 'label': ['a', 'b'] * 1052 + ['a']})
+        path = os.path.join(self.test_dir, 'stream.parquet')
+        rows.to_parquet(path, index=False)
+        chunks = list(self.loader.iter_chunks(path, chunk_size=1000))
+        self.assertEqual(sum(len(chunk) for chunk in chunks), len(rows))
+        self.assertEqual(pd.concat(chunks, ignore_index=True).equals(rows), True)
+
+    def test_iter_xlsx_chunks_is_read_only_and_supports_sheet_projection(self):
+        rows = pd.DataFrame({'keep': np.arange(1205), 'drop': np.arange(1205) * 2})
+        path = os.path.join(self.test_dir, 'stream.xlsx')
+        with pd.ExcelWriter(path, engine='openpyxl') as writer:
+            rows.to_excel(writer, sheet_name='observations', index=False)
+        chunks = list(self.loader.iter_chunks(
+            path, chunk_size=500, sheet_name='observations', columns=['keep']
+        ))
+        self.assertEqual([len(chunk) for chunk in chunks], [500, 500, 205])
+        self.assertEqual(list(chunks[0].columns), ['keep'])
+        self.assertEqual(pd.concat(chunks, ignore_index=True)['keep'].tolist(), rows['keep'].tolist())
+
+    def test_iter_xlsx_rejects_unknown_sheet(self):
+        path = os.path.join(self.test_dir, 'one_sheet.xlsx')
+        pd.DataFrame({'x': [1]}).to_excel(path, index=False)
+        with self.assertRaisesRegex(ValueError, 'Sheet不存在'):
+            list(self.loader.iter_chunks(path, sheet_name='missing'))
+
 
 class TestTypeDetector(unittest.TestCase):
     """测试类型检测器"""

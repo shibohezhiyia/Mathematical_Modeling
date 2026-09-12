@@ -1,0 +1,10 @@
+# Deny by default, including local keys, datasets, reports and .git.
+**
+!core/
+!core/*.py
+!utils/
+!utils/*.py
+!deploy/
+!deploy/solver/
+!deploy/solver/Dockerfile
+!deploy/solver/requirements.txt

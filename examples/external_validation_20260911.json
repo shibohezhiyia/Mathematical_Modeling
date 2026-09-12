@@ -1,0 +1,41 @@
+{
+  "schema_version": "mathmodel.external-validation-record/v1",
+  "run_date": "2026-09-11",
+  "catalog": "examples/external_dataset_catalog.json",
+  "freeze": {
+    "path": "data/reports/external_data_freeze.json",
+    "protocol_id": "external-data-v1",
+    "digest": "24ecde9fdf20bc3def69e8fdc2c60f05737fcf2dd6bbcb6dcf449fb6455d24c5"
+  },
+  "source_policy": "public_external_data; not_sealed_competition_scoring",
+  "protocol": {
+    "seed": 20260910,
+    "split": "80/20; ordered for time series, fixed random otherwise",
+    "baseline": "Ridge(alpha=1.0)",
+    "treatment": "ExtraTreesRegressor(n_estimators=120,min_samples_leaf=2)",
+    "scorer": "independent_holdout_scorer_v1",
+    "leakage_guards": ["bike-sharing: drop casual, registered, instant"]
+  },
+  "cases": 6,
+  "completed": 6,
+  "failed": 0,
+  "relative_rmse_treatment_minus_baseline": -0.2637713418212164,
+  "median_relative_rmse_treatment_minus_baseline": -0.1638484078308764,
+  "bootstrap_ci_95": [-0.43103442073010867, -0.0982815783467866],
+  "exact_two_sided_sign_flip_p": 0.0625,
+  "case_relative_rmse": {
+    "uci-wine-quality-red": -0.1534817836795257,
+    "uci-wine-quality-white": -0.1691167312640649,
+    "uci-concrete-strength": -0.5640323688359767,
+    "uci-bike-sharing": -0.1585800843976879,
+    "uci-air-quality": 0.022485456470042298,
+    "uci-airfoil-self-noise": -0.5599025392200856
+  },
+  "interpretation": {
+    "status": "descriptive_public_labels",
+    "supports": ["external data ingestion", "fixed holdout execution", "independent scoring", "counterexample retention"],
+    "does_not_support": ["real unseen contest accuracy", "expert rubric score", "p<0.05 statistical significance", "universal model superiority"],
+    "counterexample": "uci-air-quality treatment RMSE increased relative to Ridge"
+  },
+  "reproduce": "python scripts/fetch_external_datasets.py --extract && python scripts/run_external_data_benchmark.py"
+}

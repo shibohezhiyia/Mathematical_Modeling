@@ -1,0 +1,3 @@
+# Only the allow-listed numeric worker, not the web/LLM/training environment.
+numpy==2.2.6
+scipy==1.15.3

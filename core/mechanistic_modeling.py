@@ -26,6 +26,10 @@ from .four_layer_modeling import (
 )
 from .universal_math_solvers import UniversalRelationValidator, UniversalSolverRegistry
 from .semantic_model_compiler import SemanticModelCompiler
+from .safe_expression import SafeNumericExpression as _SafeNumericExpression
+from .solver_runtime import (
+    EvaluationCounter, SolverLimits, SolverProcessRunner, SolverRuntimeError, failure_details,
+)
 
 
 _NUMBER = r"[-+−]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+−]?\d+)?"
@@ -305,93 +309,6 @@ class MechanisticOperatorRegistry:
         return [definition.public() for definition in self._definitions]
 
 
-class _SafeNumericExpression(ast.NodeVisitor):
-    """Compile a small numeric AST; never call eval or execute user code."""
-
-    _functions = {
-        "abs": abs,
-        "min": min,
-        "max": max,
-        "sqrt": math.sqrt,
-        "exp": math.exp,
-        "log": math.log,
-        "sin": math.sin,
-        "cos": math.cos,
-        "tan": math.tan,
-        "tanh": math.tanh,
-    }
-
-    def __init__(self, symbols: Iterable[str]) -> None:
-        self.symbols = set(symbols)
-
-    def compile(self, expression: str) -> ast.AST:
-        tree = ast.parse(str(expression), mode="eval")
-        self.visit(tree)
-        return tree.body
-
-    def visit_Name(self, node: ast.Name) -> None:
-        if node.id not in self.symbols and node.id not in self._functions:
-            raise ValueError(f"unknown symbol: {node.id}")
-
-    def visit_Constant(self, node: ast.Constant) -> None:
-        if not isinstance(node.value, (int, float)) or isinstance(node.value, bool):
-            raise ValueError("only finite numeric constants are allowed")
-        if not math.isfinite(float(node.value)):
-            raise ValueError("numeric constants must be finite")
-
-    def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
-        if not isinstance(node.op, (ast.UAdd, ast.USub)):
-            raise ValueError("unsupported unary operator")
-        self.visit(node.operand)
-
-    def visit_BinOp(self, node: ast.BinOp) -> None:
-        if not isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
-            raise ValueError("unsupported binary operator")
-        self.visit(node.left)
-        self.visit(node.right)
-
-    def visit_Call(self, node: ast.Call) -> None:
-        if not isinstance(node.func, ast.Name) or node.func.id not in self._functions:
-            raise ValueError("function is not allow-listed")
-        if node.keywords:
-            raise ValueError("keyword arguments are not allowed")
-        for argument in node.args:
-            self.visit(argument)
-
-    def generic_visit(self, node: ast.AST) -> None:
-        if isinstance(node, (ast.Expression, ast.Load)):
-            super().generic_visit(node)
-            return
-        raise ValueError(f"unsupported expression node: {type(node).__name__}")
-
-    @classmethod
-    def evaluate(cls, node: ast.AST, values: Mapping[str, float]) -> float:
-        if isinstance(node, ast.Constant):
-            return float(node.value)
-        if isinstance(node, ast.Name):
-            if node.id not in values:
-                raise ValueError(f"unbound symbol: {node.id}")
-            return float(values[node.id])
-        if isinstance(node, ast.UnaryOp):
-            value = cls.evaluate(node.operand, values)
-            return value if isinstance(node.op, ast.UAdd) else -value
-        if isinstance(node, ast.BinOp):
-            left, right = cls.evaluate(node.left, values), cls.evaluate(node.right, values)
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            if isinstance(node.op, ast.Div):
-                return left / right
-            return left ** right
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            function = cls._functions[node.func.id]
-            return float(function(*(cls.evaluate(argument, values) for argument in node.args)))
-        raise ValueError(f"unsupported expression node: {type(node).__name__}")
-
-
 class MechanisticModelingEngine:
     """Compile a no-dataset statement into a safe, auditable mathematical IR."""
 
@@ -651,9 +568,7 @@ class MechanisticModelingEngine:
                     source_relation_id = str(binding.get("source_relation_id"))
                     upstream = results_by_relation.get(source_relation_id)
                     if upstream is None:
-                        raise RuntimeError(
-                            f"upstream relation did not produce a result: {source_relation_id}"
-                        )
+                        raise SolverRuntimeError("upstream_failed")
                     bound_value = MechanisticModelingEngine._read_contract_path(
                         upstream, str(binding.get("source_path"))
                     )
@@ -668,10 +583,19 @@ class MechanisticModelingEngine:
                             + ";".join(reverified.get("validation_errors", []))
                         )
                     contract = reverified
-                result = dict(
-                    universal_executors.execute(executor_key, contract)
-                    if universal_executor_available else executor(contract)
-                )
+                if executor_key in {"adaptive_ode/v1", "bounded_nlp/v1"}:
+                    budget = plan_node.get("resource_budget", {})
+                    result = SolverProcessRunner().execute(
+                        executor_key, contract, limits=SolverLimits(
+                            wall_seconds=budget.get("wall_time_budget_seconds", 30),
+                            max_evaluations=budget.get("max_evaluations", 250_000),
+                        ),
+                    )
+                else:
+                    result = dict(
+                        universal_executors.execute(executor_key, contract)
+                        if universal_executor_available else executor(contract)
+                    )
                 result.setdefault("relation_id", ir_node.get("relation_id"))
                 result.setdefault("subproblem_id", ir_node.get("subproblem_id"))
                 result["ir_node_id"] = ir_node.get("id")
@@ -690,6 +614,9 @@ class MechanisticModelingEngine:
                     "subproblem_id": ir_node.get("subproblem_id"),
                     "error_type": type(exc).__name__,
                     "message": str(exc)[:1000],
+                    **({"failure_code": exc.code, "execution_supervision": exc.metadata}
+                       if isinstance(exc, SolverRuntimeError) else {}),
+                    **(failure_details(exc.code) if isinstance(exc, SolverRuntimeError) else {}),
                 })
         validation_failed = any(
             result.get("credibility_audit", {}).get("status") == "fail" for result in results
@@ -1586,7 +1513,9 @@ class MechanisticModelingEngine:
         }
 
     @staticmethod
-    def _solve_ode_system(relation: Mapping[str, Any]) -> Dict[str, Any]:
+    def _solve_ode_system(
+        relation: Mapping[str, Any], *, max_evaluations: int = 250_000,
+    ) -> Dict[str, Any]:
         import numpy as np
         from scipy.integrate import solve_ivp
 
@@ -1600,8 +1529,10 @@ class MechanisticModelingEngine:
         start, end = (float(value) for value in relation["time_span"])
         points = int(relation.get("output_points", 300))
         times = np.linspace(start, end, points)
+        evaluations = EvaluationCounter(max_evaluations)
 
         def derivative(current_time: float, current_state: Any) -> Any:
+            evaluations.consume()
             values = dict(parameters)
             values[time_name] = float(current_time)
             values.update({name: float(current_state[index]) for index, name in enumerate(states)})
@@ -1644,6 +1575,8 @@ class MechanisticModelingEngine:
             "relation_id": relation.get("id"), "solver": "scipy.solve_ivp.DOP853",
             "state_variables": states, "time_variable": time_name,
             "time_span": [start, end], "output_points": points,
+            "evaluation_usage": {"used": evaluations.used, "maximum": max_evaluations,
+                                 "unit": "rhs_vector_call_including_confirmation"},
             "summary": summary,
             "convergence": {
                 "status": convergence_status,
@@ -1670,7 +1603,9 @@ class MechanisticModelingEngine:
         }
 
     @staticmethod
-    def _solve_optimization_problem(relation: Mapping[str, Any]) -> Dict[str, Any]:
+    def _solve_optimization_problem(
+        relation: Mapping[str, Any], *, max_evaluations: int = 50_000,
+    ) -> Dict[str, Any]:
         import numpy as np
         from scipy.optimize import minimize
 
@@ -1688,6 +1623,7 @@ class MechanisticModelingEngine:
         bounds = [tuple(float(value) for value in relation["bounds"][name]) for name in variables]
         initial = np.asarray([relation["initial_values"][name] for name in variables], dtype=float)
         maximize = relation.get("direction") == "maximize"
+        evaluations = EvaluationCounter(max_evaluations)
 
         def value_map(vector: Any) -> Dict[str, float]:
             values = dict(parameters)
@@ -1695,6 +1631,7 @@ class MechanisticModelingEngine:
             return values
 
         def raw_objective(vector: Any) -> float:
+            evaluations.consume()
             return _SafeNumericExpression.evaluate(objective_node, value_map(vector))
 
         def solver_objective(vector: Any) -> float:
@@ -1704,6 +1641,7 @@ class MechanisticModelingEngine:
         scipy_constraints = []
         for lhs_node, sense, rhs_node in constraint_nodes:
             def residual(vector: Any, left: ast.AST = lhs_node, right: ast.AST = rhs_node) -> float:
+                evaluations.consume()
                 values = value_map(vector)
                 return (
                     _SafeNumericExpression.evaluate(left, values)
@@ -1720,6 +1658,7 @@ class MechanisticModelingEngine:
             violations = []
             values = value_map(vector)
             for left, sense, right in constraint_nodes:
+                evaluations.consume()
                 residual = (
                     _SafeNumericExpression.evaluate(left, values)
                     - _SafeNumericExpression.evaluate(right, values)
@@ -1799,6 +1738,8 @@ class MechanisticModelingEngine:
             "solution": best["solution"],
             "maximum_constraint_violation": best["maximum_constraint_violation"],
             "successful_starts": len(feasible), "attempted_starts": len(starts),
+            "evaluation_usage": {"used": evaluations.used, "maximum": max_evaluations,
+                                 "unit": "objective_or_constraint_call_including_checks"},
             "objective_relative_spread": objective_spread,
             "summary": {
                 "objective_value": best["objective_value"],

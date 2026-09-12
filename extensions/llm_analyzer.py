@@ -6,6 +6,7 @@
 """
 
 import textwrap
+import json
 from typing import Dict, Any, List
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -21,6 +22,9 @@ class LLMConfig:
     api_key: str = field(default="", repr=False)
     model_name: str = "gpt-4o"
     timeout: int = 120
+    max_calls: int = 1
+    max_prompt_chars: int = 120_000
+    max_output_tokens: int = 4096
 
     def validate(self) -> "LLMConfig":
         self.provider = str(self.provider).strip().lower()
@@ -34,6 +38,12 @@ class LLMConfig:
             raise ValueError("LLM 服务地址或模型名称过长")
         if not isinstance(self.timeout, int) or isinstance(self.timeout, bool) or not 5 <= self.timeout <= 300:
             raise ValueError("LLM 请求超时必须是 5 到 300 秒的整数")
+        if type(self.max_calls) is not int or not 1 <= self.max_calls <= 8:
+            raise ValueError("LLM 调用次数预算必须是 1 到 8 的整数")
+        if type(self.max_prompt_chars) is not int or not 1_024 <= self.max_prompt_chars <= 2_000_000:
+            raise ValueError("LLM 提示体积预算必须是 1024 到 2000000 字符的整数")
+        if type(self.max_output_tokens) is not int or not 128 <= self.max_output_tokens <= 32_768:
+            raise ValueError("LLM 输出 token 预算必须是 128 到 32768 的整数")
         parsed = urlparse(self.base_url)
         if not parsed.hostname or parsed.scheme not in {"http", "https"}:
             raise ValueError("LLM 服务地址必须是完整的 HTTP(S) URL")
@@ -54,6 +64,18 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig):
         self.config = config.validate()
+        self._call_count = 0
+
+    def _admit_request(self, messages: List[Dict[str, Any]]) -> None:
+        if self._call_count >= self.config.max_calls:
+            raise ValueError("LLM 调用预算已耗尽；请新建一次分析请求")
+        try:
+            serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("LLM 消息格式不可序列化") from exc
+        if len(serialized) > self.config.max_prompt_chars:
+            raise ValueError("LLM 提示体积超过本次请求预算；请减少字段或图片")
+        self._call_count += 1
 
     @staticmethod
     def _http_error_detail(error: requests.exceptions.HTTPError) -> str:
@@ -82,7 +104,7 @@ class LLMClient:
             "model": config.model_name,
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 4096,
+            "max_tokens": config.max_output_tokens,
         }
         resp = requests.post(url, headers=headers, json=payload, timeout=config.timeout)
         resp.raise_for_status()
@@ -103,7 +125,7 @@ class LLMClient:
             "stream": False,
             "options": {
                 "temperature": 0.7,
-                "num_predict": 4096,
+                "num_predict": config.max_output_tokens,
             }
         }
         resp = requests.post(url, json=payload, timeout=config.timeout)
@@ -121,6 +143,9 @@ class LLMClient:
         优先使用 OpenAI 兼容 API，失败时 fallback 到 Ollama 原生 API
         """
         config = self.config
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("LLM 消息不能为空")
+        self._admit_request(messages)
         last_error = None
 
         # 1. 先尝试 OpenAI 兼容 API

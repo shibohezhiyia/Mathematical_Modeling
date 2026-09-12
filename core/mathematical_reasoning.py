@@ -107,6 +107,50 @@ class UnitDimension:
         return {"powers": self.mapping, "scale": self.scale, "symbol": self.symbol}
 
 
+class UnitConversionError(ValueError):
+    """Raised when a numeric unit conversion is not proven linear and compatible."""
+
+
+def unit_conversion_factor(source: str, target: str) -> float:
+    """Return the multiplicative factor ``source values -> target values``.
+
+    Unknown or dimensionally incompatible units are rejected.  Temperature
+    conversions with different symbols are rejected because Celsius/Fahrenheit
+    require an affine offset, not a multiplicative factor.
+    """
+    source_dimension, target_dimension = parse_unit(source), parse_unit(target)
+    if source_dimension is None or target_dimension is None:
+        raise UnitConversionError("unknown_unit")
+    if not source_dimension.compatible(target_dimension):
+        raise UnitConversionError("incompatible_units")
+    if ("temperature" in source_dimension.mapping
+            and source_dimension.symbol != target_dimension.symbol):
+        raise UnitConversionError("affine_temperature_conversion_not_supported")
+    factor = source_dimension.scale / target_dimension.scale
+    if not math.isfinite(factor) or factor <= 0:
+        raise UnitConversionError("invalid_conversion_factor")
+    return float(factor)
+
+
+def convert_values(values: Any, source: str, target: str, *, max_values: int = 1_000_000) -> np.ndarray:
+    """Convert a finite numeric array without mutating the caller's data."""
+    if type(max_values) is not int or not 1 <= max_values <= 10_000_000:
+        raise UnitConversionError("invalid_conversion_budget")
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise UnitConversionError("values_must_be_numeric") from exc
+    if array.size == 0 or array.size > max_values:
+        raise UnitConversionError("conversion_size_limit")
+    if not np.all(np.isfinite(array)):
+        raise UnitConversionError("values_must_be_finite")
+    factor = unit_conversion_factor(source, target)
+    converted = np.asarray(array * factor, dtype=float)
+    if not np.all(np.isfinite(converted)):
+        raise UnitConversionError("converted_values_nonfinite")
+    return converted
+
+
 _ATOMIC_UNITS: Dict[str, UnitDimension] = {
     "1": UnitDimension(),
     "%": UnitDimension(scale=0.01, symbol="%"),
@@ -158,7 +202,7 @@ def parse_unit(unit: Optional[str]) -> Optional[UnitDimension]:
     not applied; only dimensional compatibility is represented.
     """
 
-    if unit is None:
+    if unit is None or len(str(unit)) > 256:
         return None
     token = str(unit).strip().lower().replace(" ", "")
     token = token.replace("每", "/").replace("·", "*").replace("⋅", "*")
@@ -185,9 +229,18 @@ def parse_unit(unit: Optional[str]) -> Optional[UnitDimension]:
         atomic = _ATOMIC_UNITS.get(atomic_name)
         if atomic is None:
             return None
-        exponent = float(match.group(2) or 1.0)
-        component = atomic.power(exponent)
-        result = result.multiply(component) if operator == "*" else result.divide(component)
+        try:
+            exponent = float(match.group(2) or 1.0)
+            if not math.isfinite(exponent):
+                return None
+            component = atomic.power(exponent)
+            result = result.multiply(component) if operator == "*" else result.divide(component)
+            if not (math.isfinite(result.scale) and result.scale > 0 and all(
+                math.isfinite(power) for _, power in result.powers
+            )):
+                return None
+        except (ArithmeticError, ValueError):
+            return None
         parsed_any = True
     return UnitDimension.from_mapping(result.mapping, result.scale, token) if parsed_any else None
 
@@ -593,13 +646,17 @@ def check_expression_dimensions(
         }
     try:
         dimension = _ExpressionDimensionAnalyzer(parsed_units).visit(tree.body)
+        if not (math.isfinite(dimension.scale) and dimension.scale > 0 and all(
+            math.isfinite(power) for _, power in dimension.powers
+        )):
+            raise DimensionAnalysisError("单位尺度或量纲指数超出有限数值范围")
         return {
             "status": "pass",
             "expression": expression,
             "evidence": "表达式的加减、乘除和函数参数通过静态量纲检查。",
             "result_dimension": dimension.to_dict(),
         }
-    except (SyntaxError, DimensionAnalysisError) as exc:
+    except (SyntaxError, DimensionAnalysisError, ArithmeticError) as exc:
         return {
             "status": "fail",
             "expression": expression,
@@ -3244,7 +3301,8 @@ class MathematicalReasoningEngine:
 
 
 __all__ = [
-    "UnitDimension", "parse_unit", "extract_column_unit",
+    "UnitDimension", "UnitConversionError", "parse_unit", "extract_column_unit",
+    "unit_conversion_factor", "convert_values",
     "check_expression_dimensions", "check_equation_dimensions", "classify_expression_structure",
     "compile_linear_expression",
     "ModelSymbol", "AssumptionRecord", "CandidateModel", "MathematicalModelSpec",

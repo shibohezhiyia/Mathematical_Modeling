@@ -1,0 +1,20 @@
+{
+  "schema_version": "mathmodel.review-rubric/v1",
+  "criteria": [
+    "problem_interpretation", "assumptions_and_scope", "mathematical_model",
+    "derivation_and_methods", "computation_and_reproducibility",
+    "validation_sensitivity_stability", "conclusions_and_actionability",
+    "communication_and_evidence"
+  ],
+  "scale": {"min": 0, "max": 4, "integer": true},
+  "minimum_reviewers": 2,
+  "anchors": {
+    "0": "缺失或无法审计",
+    "1": "有尝试但关键步骤不成立或证据严重不足",
+    "2": "部分可用，存在明显未验证条件",
+    "3": "完整且有主要证据，仍有有限边界问题",
+    "4": "清晰、可复核、对边界和反例有充分处理"
+  },
+  "source_ids": ["comap-2025-rules", "comap-umap-46-3-commentary", "comap-umap-46-4-commentary"],
+  "policy": "independent_review_required; descriptive_score_only; not_gold_truth"
+}

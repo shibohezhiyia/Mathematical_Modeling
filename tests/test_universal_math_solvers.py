@@ -47,6 +47,21 @@ def test_structure_catalog_has_broad_honest_coverage():
     assert all(item["recognition_status"] == "candidate_not_executable" for item in candidates)
 
 
+def test_runtime_dynamics_primitives_are_registered_with_capabilities():
+    registry = UniversalSolverRegistry()
+    assert registry.describe("linear_ode/v1")["family"] == "dynamics"
+    result = registry.execute(
+        "linear_ode/v1",
+        {"matrix": [[-1.0]], "initial": [1.0], "times": [0.0, 1.0]},
+    )
+    assert result["status"] == "executed"
+    event = registry.execute(
+        "threshold_event/v1",
+        {"times": [0.0, 1.0], "values": [0.0, 2.0], "threshold": 1.0},
+    )
+    assert event["crossing_found"] is True
+
+
 def test_hierarchical_finite_actions_execute_through_four_layers():
     result = _run([{
         "id": "hierarchical_selection",
@@ -319,3 +334,97 @@ def test_structure_validator_and_solver_registries_extend_without_question_branc
         assert result["four_layer_pipeline"]["solver_plan"]["selection_rule"] == "mathematical_form_only"
     finally:
         UniversalRelationValidator.unregister_custom("affine_transform")
+
+
+def test_solver_registry_exposes_capability_contracts_without_executing_payloads():
+    registry = UniversalSolverRegistry()
+    capabilities = registry.describe()
+    keys = {item["key"] for item in capabilities}
+    assert "linear_system/v1" in keys
+    assert len(keys) == len(capabilities)
+    assert all(item["schema_version"] == registry.CAPABILITY_SCHEMA for item in capabilities)
+    assert all(item["input_contract"] and item["complexity"] and item["backend"] for item in capabilities)
+    assert registry.describe("maximum_flow/v1")["family"] == "graph"
+
+
+def test_custom_solver_can_publish_a_capability_contract():
+    registry = UniversalSolverRegistry()
+    registry.register(
+        "toy/v1", lambda payload: {"status": "executed"},
+        capability={
+            "family": "algebra", "input_contract": "one scalar", "complexity": "O(1)",
+            "backend": "test",
+        },
+    )
+    assert registry.describe("toy/v1")["backend"] == "test"
+
+
+def test_geometry_primitives_are_first_class_registry_contracts():
+    registry = UniversalSolverRegistry()
+    assert registry.describe("distance/v1")["family"] == "geometry"
+    distance = UniversalRelationValidator.verify({
+        "id": "d", "kind": "distance", "left": [0, 0], "right": [3, 4],
+    })
+    assert distance["parse_status"] == "machine_verified"
+    assert registry.execute("distance/v1", distance)["distance"] == pytest.approx(5)
+
+    intervals = UniversalRelationValidator.verify({
+        "id": "u", "kind": "interval_union", "intervals": [[0, 1], [0.5, 2]],
+    })
+    assert intervals["parse_status"] == "machine_verified"
+    assert registry.execute("interval_union/v1", intervals)["measure"] == pytest.approx(2)
+
+    polygon = UniversalRelationValidator.verify({
+        "id": "r", "kind": "region_membership", "point": [0.5, 0.5],
+        "region": [[0, 0], [1, 0], [1, 1], [0, 1]],
+    })
+    assert polygon["parse_status"] == "machine_verified"
+    assert registry.execute("region_membership/v1", polygon)["inside"] is True
+
+    segments = UniversalRelationValidator.verify({
+        "id": "s", "kind": "segment_intersection",
+        "first": [[0, 0], [2, 2]], "second": [[0, 2], [2, 0]],
+    })
+    assert segments["parse_status"] == "machine_verified"
+    assert registry.execute("segment_intersection/v1", segments)["intersects"] is True
+
+    visibility = UniversalRelationValidator.verify({
+        "id": "v", "kind": "line_of_sight", "source": [0, 0], "target": [3, 0],
+        "obstacles": [[[1, -1], [2, -1], [2, 1], [1, 1]]],
+    })
+    assert visibility["parse_status"] == "machine_verified"
+    assert registry.execute("line_of_sight/v1", visibility)["visible"] is False
+
+    likelihood = UniversalRelationValidator.verify({
+        "id": "ll", "kind": "normal_log_likelihood", "observations": [0, 1, -1],
+        "mean": 0, "standard_deviation": 1,
+    })
+    assert likelihood["parse_status"] == "machine_verified"
+    assert registry.execute("normal_log_likelihood/v1", likelihood)["sample_count"] == 3
+
+    bootstrap = UniversalRelationValidator.verify({
+        "id": "b", "kind": "bootstrap_mean", "values": [1, 2, 3, 4],
+        "resamples": 100, "seed": 7,
+    })
+    assert bootstrap["parse_status"] == "machine_verified"
+    assert registry.execute("bootstrap_mean/v1", bootstrap)["seed"] == 7
+
+    permutation = UniversalRelationValidator.verify({
+        "id": "p", "kind": "permutation_test", "first": [1, 2, 3], "second": [1, 1, 1],
+        "permutations": 100, "seed": 7,
+    })
+    assert permutation["parse_status"] == "machine_verified"
+    assert 0 < registry.execute("permutation_test/v1", permutation)["p_value_two_sided"] <= 1
+
+
+def test_geometry_validator_rejects_nonfinite_or_ambiguous_contracts():
+    invalid = UniversalRelationValidator.verify({
+        "id": "d", "kind": "distance", "left": [0, float("nan")], "right": [0, 1],
+    })
+    assert invalid["parse_status"] == "requires_symbol_and_unit_binding"
+    assert invalid["validation_errors"]
+    invalid_region = UniversalRelationValidator.verify({
+        "id": "r", "kind": "region_membership", "point": [0, 0],
+        "region": [[0, 0], [1, 1]],
+    })
+    assert invalid_region["validation_errors"]

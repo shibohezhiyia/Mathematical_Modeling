@@ -21,6 +21,8 @@ import math
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from .backend_planner import plan_backend
+
 
 EXECUTABLE_PARSE_STATES = frozenset({"machine_verified", "machine_compiled"})
 _SUBPROBLEM = re.compile(
@@ -95,6 +97,7 @@ class SolverSpecification:
     timeout_seconds: int
 
     def public(self) -> Dict[str, Any]:
+        supervised = self.executor_key in {"adaptive_ode/v1", "bounded_nlp/v1"}
         return {
             "mathematical_form": self.mathematical_form,
             "executor_key": self.executor_key,
@@ -104,7 +107,13 @@ class SolverSpecification:
                 "max_variables": self.max_variables,
                 "max_evaluations": self.max_evaluations,
                 "wall_time_budget_seconds": self.timeout_seconds,
+                "wall_time_enforcement": "parent_process_deadline" if supervised else "advisory",
+                "memory_limit_mb": 1024 if supervised else None,
+                "permission_isolation": False,
                 "enforcement": (
+                    "dedicated trusted worker; mandatory OS memory limits, parent deadline, "
+                    "and counted numerical callbacks; unavailable isolation fails closed"
+                    if supervised else
                     "hard contract-size and solver-iteration caps; wall-clock value is advisory "
                     "unless the selected backend exposes a native time limit"
                 ),
@@ -150,6 +159,14 @@ class MathematicalStructureRegistry:
         "differential_algebraic_system": (r"微分代数|DAE",),
         "partial_differential_system": (r"偏微分|PDE|扩散方程|传热方程|波动方程",),
         "continuous_event_measure": (r"事件.{0,8}(?:检测|时长|区间)|持续时间|event.{0,8}(?:duration|measure)",),
+        "distance_geometry": (r"距离|欧氏距离|曼哈顿距离|haversine|distance",),
+        "segment_intersection_geometry": (r"线段.{0,8}(?:相交|交点)|segment.{0,8}intersection",),
+        "region_membership_geometry": (r"区域.{0,8}(?:内|外|包含|成员)|region.{0,8}membership|point.?in.?polygon",),
+        "interval_union_geometry": (r"区间.{0,8}(?:并|合并|总时长)|interval.{0,8}union",),
+        "line_of_sight_geometry": (r"视线|可见性|遮挡|line.?of.?sight|visibility",),
+        "normal_likelihood_statistics": (r"正态.{0,8}(?:似然|对数似然)|normal.{0,8}likelihood",),
+        "bootstrap_statistics": (r"bootstrap|自助法|重采样.{0,8}(?:均值|区间)",),
+        "permutation_test_statistics": (r"置换检验|permutation.{0,8}test",),
         "linear_program": (r"线性规划|linear\s+program",),
         "mixed_integer_linear_program": (r"整数规划|混合整数|MILP|integer\s+program",),
         "hierarchical_finite_action_program": (
@@ -218,6 +235,14 @@ class MathematicalStructureRegistry:
         "bipartite_matching": ("left_nodes", "right_nodes", "edges"),
         "markov_chain": ("transition_matrix", "initial_distribution", "steps"),
         "sample_expectation": ("values", "weights", "quantity_names", "units"),
+        "distance_geometry": ("left", "right", "metric"),
+        "segment_intersection_geometry": ("first", "second"),
+        "region_membership_geometry": ("point", "region"),
+        "interval_union_geometry": ("intervals",),
+        "line_of_sight_geometry": ("source", "target", "obstacles"),
+        "normal_likelihood_statistics": ("observations", "mean", "standard_deviation"),
+        "bootstrap_statistics": ("values", "resamples", "seed"),
+        "permutation_test_statistics": ("first", "second", "permutations", "seed"),
     }
 
     def __init__(self) -> None:
@@ -274,6 +299,54 @@ class MathematicalStructureRegistry:
                 ("kinematic_visibility_event",), "continuous event detection and interval measure",
                 solver("continuous_event_measure", "continuous_event_measure/v1", "bracketing, root refinement, and interval union",
                        ("grid_refinement", "root_recalculation", "interval_union_recalculation"), 20, 100_000, 30),
+            ),
+            MathematicalStructureDefinition(
+                "distance_geometry", "geometry", "distance/v1", ("distance",),
+                "bounded metric distance between coordinate vectors",
+                solver("distance_geometry", "distance/v1", "allow-listed vector metric",
+                       ("finite_coordinates", "metric_recalculation", "dimension_check"), 128, 128, 5),
+            ),
+            MathematicalStructureDefinition(
+                "segment_intersection_geometry", "geometry", "segment_intersection/v1",
+                ("segment_intersection",), "two-dimensional segment intersection",
+                solver("segment_intersection_geometry", "segment_intersection/v1", "orientation predicates",
+                       ("finite_coordinates", "endpoint_boundary_check", "intersection_recalculation"), 4, 16, 5),
+            ),
+            MathematicalStructureDefinition(
+                "region_membership_geometry", "geometry", "region_membership/v1",
+                ("region_membership",), "bounded box or polygon membership",
+                solver("region_membership_geometry", "region_membership/v1", "box comparison or ray casting",
+                       ("finite_coordinates", "boundary_inclusion", "membership_recalculation"), 10_000, 10_000, 5),
+            ),
+            MathematicalStructureDefinition(
+                "interval_union_geometry", "event_system", "interval_union/v1",
+                ("interval_union",), "finite interval union and measure",
+                solver("interval_union_geometry", "interval_union/v1", "sorted sweep union",
+                       ("ordered_endpoints", "overlap_recalculation", "measure_recalculation"), 100_000, 100_000, 5),
+            ),
+            MathematicalStructureDefinition(
+                "line_of_sight_geometry", "geometry", "line_of_sight/v1",
+                ("line_of_sight",), "segment visibility against polygon obstacles",
+                solver("line_of_sight_geometry", "line_of_sight/v1", "segment-polygon intersection",
+                       ("finite_coordinates", "obstacle_intersection_recalculation", "visibility_boundary_check"), 10_000, 10_000, 5),
+            ),
+            MathematicalStructureDefinition(
+                "normal_likelihood_statistics", "probability", "normal_log_likelihood/v1",
+                ("normal_log_likelihood",), "normal-distribution log likelihood",
+                solver("normal_likelihood_statistics", "normal_log_likelihood/v1", "finite normal likelihood",
+                       ("finite_observations", "parameter_domain", "likelihood_recalculation"), 1_000_000, 1_000_000, 5),
+            ),
+            MathematicalStructureDefinition(
+                "bootstrap_statistics", "statistics", "bootstrap_mean/v1",
+                ("bootstrap_mean",), "seeded bootstrap mean interval",
+                solver("bootstrap_statistics", "bootstrap_mean/v1", "bounded seeded resampling",
+                       ("finite_observations", "seed_replay", "interval_recalculation"), 1_000_000, 5_000_000, 15),
+            ),
+            MathematicalStructureDefinition(
+                "permutation_test_statistics", "statistics", "permutation_test/v1",
+                ("permutation_test",), "seeded two-sample permutation test",
+                solver("permutation_test_statistics", "permutation_test/v1", "bounded randomization test",
+                       ("finite_groups", "seed_replay", "p_value_recalculation"), 200_000, 10_000_000, 20),
             ),
             MathematicalStructureDefinition(
                 "linear_program", "mathematical_program", "linear_program/v1",
@@ -690,6 +763,13 @@ class StructureAwareSolverPlanner:
             elif variable_count > specification.max_variables:
                 reasons.append("variable_count_exceeds_solver_budget")
             status = "runnable" if not reasons else "deferred"
+            backend_plan = plan_backend(
+                {**dict(node), "status": "executable" if status == "runnable" else node.get("status")},
+                specification,
+            )
+            if backend_plan.status == "deferred" and not reasons:
+                reasons.append(backend_plan.reason)
+                status = "deferred"
             if status == "runnable":
                 runnable += 1
                 total_evaluations += specification.max_evaluations
@@ -708,6 +788,7 @@ class StructureAwareSolverPlanner:
                     "verification_strategy": [],
                     "resource_budget": {},
                 }),
+                "backend_plan": backend_plan.public(),
                 "failure_policy": "isolate_node_and_continue",
             })
         execution_order, dependency_errors = self._execution_order(nodes)

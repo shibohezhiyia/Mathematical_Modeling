@@ -15,6 +15,8 @@ import json
 import math
 import re
 import socket
+import threading
+import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlparse
 
@@ -82,20 +84,31 @@ class SemanticCompilerConfig:
     api_key: str = field(default="", repr=False)
     timeout_seconds: int = 90
     max_output_tokens: int = 8192
+    max_retries: int = 0
+    retry_backoff_seconds: float = 0.25
+    request_interval_seconds: float = 0.0
 
     def validate(self) -> "SemanticCompilerConfig":
-        provider = str(self.provider).strip().lower()
-        if provider not in {"ollama", "local_openai", "openai_compatible", "deepseek", "callable"}:
-            raise ValueError("semantic model provider must be ollama/local_openai/openai_compatible/deepseek/callable")
-        if not str(self.model_name).strip() or len(str(self.model_name)) > 200:
+        if type(self.provider) is not str:
+            raise ValueError("semantic model provider must be a string")
+        provider = self.provider.strip().lower()
+        if provider not in {"offline", "ollama", "local_openai", "openai_compatible", "deepseek", "callable"}:
+            raise ValueError("semantic model provider must be offline/ollama/local_openai/openai_compatible/deepseek/callable")
+        if type(self.model_name) is not str or not self.model_name.strip() or len(self.model_name) > 200:
             raise ValueError("semantic model name must contain 1 to 200 characters")
         if not isinstance(self.timeout_seconds, int) or isinstance(self.timeout_seconds, bool):
             raise ValueError("semantic model timeout must be an integer")
         if not 5 <= self.timeout_seconds <= 300:
             raise ValueError("semantic model timeout must be between 5 and 300 seconds")
-        if not 256 <= int(self.max_output_tokens) <= 32768:
+        if type(self.max_output_tokens) is not int or not 256 <= self.max_output_tokens <= 32768:
             raise ValueError("semantic model output token budget must be between 256 and 32768")
-        if provider != "callable":
+        if type(self.max_retries) is not int or not 0 <= self.max_retries <= 5:
+            raise ValueError("semantic model retry budget must be an integer between 0 and 5")
+        if type(self.retry_backoff_seconds) not in (int, float) or not 0 <= float(self.retry_backoff_seconds) <= 30:
+            raise ValueError("semantic model retry backoff must be between 0 and 30 seconds")
+        if type(self.request_interval_seconds) not in (int, float) or not 0 <= float(self.request_interval_seconds) <= 60:
+            raise ValueError("semantic model request interval must be between 0 and 60 seconds")
+        if provider not in {"offline", "callable"}:
             _validate_base_url(str(self.base_url), provider)
         if provider == "deepseek" and not str(self.api_key).strip():
             raise ValueError("DeepSeek API key is required")
@@ -108,6 +121,9 @@ class SemanticCompilerConfig:
             "model_name": self.model_name,
             "timeout_seconds": self.timeout_seconds,
             "max_output_tokens": self.max_output_tokens,
+            "max_retries": self.max_retries,
+            "retry_backoff_seconds": self.retry_backoff_seconds,
+            "request_interval_seconds": self.request_interval_seconds,
             "api_key_configured": bool(self.api_key),
         }
 
@@ -177,13 +193,35 @@ class CallableSemanticBackend:
         return value
 
 
+class OfflineSemanticBackend:
+    """Deterministic no-network fallback; it proposes nothing and never fails open."""
+
+    def complete(self, messages: Sequence[Mapping[str, Any]]) -> str:
+        if not isinstance(messages, Sequence):
+            raise TypeError("offline semantic messages must be a sequence")
+        return json.dumps({"hypotheses": [], "questions": []}, ensure_ascii=False, separators=(",", ":"))
+
+
 class HttpSemanticBackend:
     """Bounded OpenAI-compatible or Ollama-native JSON completion client."""
 
     def __init__(self, config: SemanticCompilerConfig) -> None:
         self.config = config.validate()
-        if self.config.provider == "callable":
-            raise ValueError("callable provider requires CallableSemanticBackend")
+        if self.config.provider in {"callable", "offline"}:
+            raise ValueError("callable/offline providers require their dedicated backend")
+        self._rate_lock = threading.Lock()
+        self._next_request_at = 0.0
+
+    def _wait_for_rate_limit(self) -> None:
+        interval = float(self.config.request_interval_seconds)
+        if interval <= 0:
+            return
+        with self._rate_lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_request_at - now)
+            self._next_request_at = max(now, self._next_request_at) + interval
+        if wait:
+            time.sleep(wait)
 
     @staticmethod
     def _read_bounded_response(response: Any) -> bytes:
@@ -226,29 +264,43 @@ class HttpSemanticBackend:
                 "max_tokens": config.max_output_tokens,
                 "response_format": {"type": "json_object"},
             }
-        try:
-            response = requests.post(
-                url, headers=headers, json=payload, timeout=config.timeout_seconds,
-                allow_redirects=False, stream=True,
-            )
-            if 300 <= response.status_code < 400:
-                raise ValueError("semantic model API redirects are not allowed")
-            response.raise_for_status()
-            body = self._read_bounded_response(response)
-            envelope = json.loads(body.decode("utf-8"))
-            if config.provider == "ollama":
-                content = envelope.get("message", {}).get("content")
-            else:
-                content = envelope.get("choices", [{}])[0].get("message", {}).get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("semantic model API returned no textual JSON content")
-            if len(content.encode("utf-8")) > _MAX_RESPONSE_BYTES:
-                raise ValueError("semantic model content exceeds the safety limit")
-            return content
-        except requests.Timeout as exc:
-            raise TimeoutError("semantic model API request timed out") from exc
-        except requests.ConnectionError as exc:
-            raise ConnectionError("semantic model API is unreachable") from exc
+        for attempt in range(config.max_retries + 1):
+            self._wait_for_rate_limit()
+            try:
+                response = requests.post(
+                    url, headers=headers, json=payload, timeout=config.timeout_seconds,
+                    allow_redirects=False, stream=True,
+                )
+                if 300 <= response.status_code < 400:
+                    raise ValueError("semantic model API redirects are not allowed")
+                if response.status_code in {408, 429} or response.status_code >= 500:
+                    if attempt < config.max_retries:
+                        response.close()
+                        time.sleep(min(30.0, float(config.retry_backoff_seconds) * (2 ** attempt)))
+                        continue
+                response.raise_for_status()
+                body = self._read_bounded_response(response)
+                envelope = json.loads(body.decode("utf-8"))
+                if config.provider == "ollama":
+                    content = envelope.get("message", {}).get("content")
+                else:
+                    content = envelope.get("choices", [{}])[0].get("message", {}).get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("semantic model API returned no textual JSON content")
+                if len(content.encode("utf-8")) > _MAX_RESPONSE_BYTES:
+                    raise ValueError("semantic model content exceeds the safety limit")
+                return content
+            except requests.Timeout as exc:
+                if attempt < config.max_retries:
+                    time.sleep(min(30.0, float(config.retry_backoff_seconds) * (2 ** attempt)))
+                    continue
+                raise TimeoutError("semantic model API request timed out") from exc
+            except requests.ConnectionError as exc:
+                if attempt < config.max_retries:
+                    time.sleep(min(30.0, float(config.retry_backoff_seconds) * (2 ** attempt)))
+                    continue
+                raise ConnectionError("semantic model API is unreachable") from exc
+        raise RuntimeError("semantic model retry budget exhausted")
 
 
 def _json_without_duplicate_keys(text: str) -> Any:
@@ -320,7 +372,12 @@ class SemanticModelCompiler:
         backend: Optional[SemanticCompletionBackend] = None,
     ) -> None:
         self.config = config.validate()
-        self.backend = backend or HttpSemanticBackend(self.config)
+        if backend is not None:
+            self.backend = backend
+        elif self.config.provider == "offline":
+            self.backend = OfflineSemanticBackend()
+        else:
+            self.backend = HttpSemanticBackend(self.config)
 
     @staticmethod
     def _prompt(

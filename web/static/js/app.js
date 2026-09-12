@@ -23,6 +23,14 @@ let transformPreviewResult = null;
 let transformPreviewPresets = [];
 let transformPreviewView = { orientation: 'horizontal', sort: 'desc', topN: 15, labels: true };
 let transformEditingStepIndex = null;
+let pendingResearchContractHash = null;
+let currentResearchClarificationQuestions = [];
+let currentResearchClarificationOptions = {};
+let researchRequestActive = false;
+let currentResearchResult = null;
+let hypothesisPreviewTimer = null;
+let hypothesisPreviewController = null;
+let hypothesisPreviewRevision = 0;
 
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', () => {
@@ -335,6 +343,7 @@ async function runResearch() {
         return;
     }
     const button = document.getElementById('research-run-btn');
+    const cancelButton = document.getElementById('research-cancel-btn');
     const progress = document.getElementById('research-progress');
     const resultBox = document.getElementById('research-result');
     const hasDataset = uploadedFiles.length > 0 || Boolean(uploadedData);
@@ -349,6 +358,8 @@ async function runResearch() {
     ];
     let messageIndex = 0;
     button.disabled = true;
+    researchRequestActive = true;
+    cancelButton?.classList.remove('hidden');
     progress.classList.remove('hidden');
     resultBox.classList.add('hidden');
     progress.innerHTML = `<span class="research-spinner"></span><span>${messages[0]}</span>`;
@@ -359,20 +370,24 @@ async function runResearch() {
     try {
         const target = document.getElementById('research-target').value.trim();
         const semanticEnabled = document.getElementById('research-semantic-model').checked;
+        const hypothesisEnabled = document.getElementById('research-hypothesis-generation')?.checked || false;
+        const clarificationContractHash = pendingResearchContractHash;
         const response = await fetch('/api/research/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 description,
+                clarification_contract_hash: clarificationContractHash,
                 target: target || null,
                 run_modeling: document.getElementById('research-run-model').checked,
                 feedback_optimization: document.getElementById('research-feedback-optimize').checked,
                 credibility_audit: document.getElementById('research-credibility-audit').checked,
                 semantic_model_compiler: semanticEnabled,
+                hypothesis_generation: hypothesisEnabled,
                 semantic_provider: document.getElementById('research-semantic-provider').value,
                 semantic_base_url: document.getElementById('research-semantic-base-url').value.trim(),
                 semantic_model_name: document.getElementById('research-semantic-model-name').value.trim(),
-                semantic_api_key: semanticEnabled
+                semantic_api_key: (semanticEnabled || hypothesisEnabled)
                     ? document.getElementById('research-semantic-api-key').value
                     : '',
                 images: researchImageAttachments.map(image => ({
@@ -393,6 +408,7 @@ async function runResearch() {
                 const statusResponse = await fetch('/api/research/status');
                 const statusData = await statusResponse.json();
                 if (statusData.status === 'error') throw new Error(statusData.error || '研究任务执行失败');
+                if (statusData.status === 'cancelled') throw new Error('研究任务已取消');
                 if (statusData.status === 'done') {
                     data = { success: true, result: statusData.result };
                     completed = true;
@@ -402,6 +418,7 @@ async function runResearch() {
             if (!completed) throw new Error('研究任务超过等待时限，请稍后重试');
         }
         renderResearchResult(data.result);
+        pendingResearchContractHash = null;
         resultBox.classList.remove('hidden');
         showToast('研究完成：已生成可审计数学证据包', 'success');
     } catch (error) {
@@ -412,7 +429,80 @@ async function runResearch() {
         clearInterval(timer);
         progress.classList.add('hidden');
         button.disabled = false;
+        researchRequestActive = false;
+        cancelButton?.classList.add('hidden');
     }
+}
+
+async function cancelResearch() {
+    if (!researchRequestActive) return;
+    const cancelButton = document.getElementById('research-cancel-btn');
+    if (cancelButton) cancelButton.disabled = true;
+    try {
+        const response = await fetch('/api/research/cancel', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) throw new Error(payload.error || '取消请求失败');
+        showToast('已请求取消，正在等待安全检查点', 'info');
+    } catch (error) {
+        if (cancelButton) cancelButton.disabled = false;
+        showToast(error.message, 'error');
+    }
+}
+
+async function submitResearchClarification(questionIndex, button) {
+    if (!Number.isInteger(questionIndex) || questionIndex < 0 ||
+        questionIndex >= currentResearchClarificationQuestions.length) {
+        showToast('澄清问题已失效，请重新运行研究', 'error');
+        return;
+    }
+    const answer = document.getElementById(`research-clarification-answer-${questionIndex}`)?.value.trim() || '';
+    const hardConstraint = Boolean(
+        document.getElementById(`research-clarification-hard-${questionIndex}`)?.checked
+    );
+    if (!answer) {
+        showToast('请先填写你的回答', 'error');
+        return;
+    }
+    const original = button?.textContent || '';
+    if (button) {
+        button.disabled = true;
+        button.textContent = '正在写入契约…';
+    }
+    try {
+        const response = await fetch('/api/research/clarify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                question_index: questionIndex,
+                answer,
+                hard_constraint: hardConstraint,
+            }),
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) throw new Error(payload.error || '题意契约修订失败');
+        const statement = payload.contract?.statement;
+        if (typeof statement !== 'string' || !statement) throw new Error('服务端未返回有效题意契约');
+        document.getElementById('problem-description').value = statement;
+        pendingResearchContractHash = payload.contract_hash;
+        showToast(`已记录为题意契约第 ${payload.revision} 版，正在重新分析`, 'success');
+        await runResearch();
+    } catch (error) {
+        showToast('澄清未应用: ' + error.message, 'error');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = original;
+        }
+    }
+}
+
+function selectResearchClarificationOption(questionIndex, optionIndex) {
+    const options = currentResearchClarificationOptions[questionIndex] || [];
+    const option = options[optionIndex];
+    const input = document.getElementById(`research-clarification-answer-${questionIndex}`);
+    if (!option || !input) return;
+    input.value = option.label || '';
+    input.focus();
 }
 
 async function clearResearchCache(button) {
@@ -439,11 +529,48 @@ function formatResearchValue(value) {
     return Math.abs(value) >= 1000 ? value.toLocaleString() : Number(value.toPrecision(5)).toString();
 }
 
+function renderInteractiveSurfaces(surfaces) {
+    if (!surfaces || typeof surfaces !== 'object') return '';
+    let html = '';
+    const constraints = surfaces.constraint_state || surfaces.constraints;
+    if (constraints && Array.isArray(constraints.constraints)) {
+        html += '<details class="research-section" open><summary>约束状态</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>约束</th><th>当前值</th><th>边界</th><th>违反量</th><th>状态</th></tr></thead><tbody>';
+        constraints.constraints.slice(0, 64).forEach(item => {
+            const cls = item.status === 'pass' ? 'research-safe' : 'research-fail';
+            html += `<tr><td>${escapeHtml(item.id || '-')}</td><td>${formatResearchValue(item.value)}</td><td>${escapeHtml(item.relation || '')} ${formatResearchValue(item.bound)}</td><td>${formatResearchValue(item.violation)}</td><td class="${cls}">${escapeHtml(item.status || 'not_assessed')}</td></tr>`;
+        });
+        html += '</tbody></table></div><p class="hint">约束状态只反映当前已执行数值摘要；未执行或未绑定的约束不会被显示为通过。</p></details>';
+    }
+    const sensitivity = surfaces.sensitivity_surface || surfaces.sensitivity;
+    if (sensitivity && Array.isArray(sensitivity.points)) {
+        const axes = Array.isArray(sensitivity.axes) ? sensitivity.axes : [];
+        html += `<details class="research-section"><summary>有限敏感性曲面 · ${escapeHtml(sensitivity.metric || '-')}</summary><div class="table-wrapper"><table class="data-table"><thead><tr>${axes.map(axis => `<th>${escapeHtml(axis)}</th>`).join('')}<th>${escapeHtml(sensitivity.metric || 'metric')}</th></tr></thead><tbody>`;
+        sensitivity.points.slice(0, 128).forEach(point => {
+            html += `<tr>${axes.map(axis => `<td>${formatResearchValue(point[axis])}</td>`).join('')}<td>${formatResearchValue(point.metric)}</td></tr>`;
+        });
+        html += `</tbody></table></div><p class="hint">这是有限 what-if 评估，不是全局敏感性或因果效应；滑块变更后必须重新执行验证。</p></details>`;
+    }
+    const pareto = surfaces.pareto_surface || surfaces.pareto;
+    if (pareto && Array.isArray(pareto.points)) {
+        const objectives = pareto.objectives && typeof pareto.objectives === 'object' ? Object.keys(pareto.objectives) : [];
+        const front = new Set(Array.isArray(pareto.front_ids) ? pareto.front_ids : []);
+        html += '<details class="research-section"><summary>无权重 Pareto 前沿</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>候选</th>' + objectives.map(name => `<th>${escapeHtml(name)}</th>`).join('') + '<th>状态</th></tr></thead><tbody>';
+        pareto.points.slice(0, 128).forEach(point => {
+            html += `<tr><td>${escapeHtml(point.id || '-')}</td>${objectives.map(name => `<td>${formatResearchValue(point.objectives?.[name])}</td>`).join('')}<td class="${front.has(point.id) ? 'research-safe' : ''}">${front.has(point.id) ? '非支配' : '被支配'}</td></tr>`;
+        });
+        html += '</tbody></table></div><p class="hint">非支配集保留多目标权衡，不自动选择唯一冠军，也不构成现实正确性证明。</p></details>';
+    }
+    return html;
+}
+
 function renderResearchResult(result) {
     const box = document.getElementById('research-result');
+    currentResearchResult = result || null;
     const profiles = result.dataset_profiles || [];
     const relations = result.relationships || [];
     const interactions = result.interactions || [];
+    currentResearchClarificationQuestions = [];
+    currentResearchClarificationOptions = {};
     const researchStatusLabels = {
         model_draft_ready: '数学草案已形成', needs_confirmation: '待符号与单位确认',
         not_applicable: '不适用', not_applicable_without_observations: '无观测数据时不适用',
@@ -475,6 +602,22 @@ function renderResearchResult(result) {
     let html = '<div class="research-hero">';
     html += `<div><span class="research-kicker">自动研究已完成</span><h3>${escapeHtml(result.problem_analysis.model_class || '数学建模分析')}</h3><p>${escapeHtml(result.problem_analysis.model_description || '')}</p></div>`;
     html += `<div class="research-score">${result.problem_analysis.confidence || '-'}<small>% 题型识别置信度</small></div></div>`;
+
+    const hypothesisControls = result.hypothesis_controls || {};
+    if (Array.isArray(hypothesisControls.controls) && hypothesisControls.controls.length) {
+        html += '<details class="research-section hypothesis-controls" open><summary>假设滑块（有限 what-if）</summary>';
+        html += '<p class="hint">滑块只改变候选假设预览，不自动改写事实、约束或最终结论；影响节点需重新执行完整验证。</p><div class="hypothesis-control-grid">';
+        hypothesisControls.controls.forEach(control => {
+            const id = escapeHtml(String(control.id || 'control'));
+            const min = Number(control.min), max = Number(control.max), step = Number(control.step), value = Number(control.default);
+            if (![min, max, step, value].every(Number.isFinite) || !(min < max) || !(step > 0) || value < min || value > max) return;
+            const nodes = Array.isArray(control.affected_nodes) ? control.affected_nodes.map(escapeHtml).join('、') : '-';
+            html += `<label class="hypothesis-control" for="research-control-${id}"><span>${escapeHtml(control.label || id)} <output id="research-control-${id}-value">${value}</output> ${escapeHtml(control.unit || '')}</span><input id="research-control-${id}" type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-affected-nodes="${nodes}" oninput="previewHypothesisControl(this)"><small>影响节点：${nodes}</small></label>`;
+        });
+        html += '</div><div id="hypothesis-control-preview" class="hint">尚未修改假设。</div></details>';
+    }
+
+    html += renderInteractiveSurfaces(result.interactive_surfaces);
 
     html += '<div class="research-stats">';
     if (profiles.length) {
@@ -529,6 +672,36 @@ function renderResearchResult(result) {
             html += `<p class="hint"><strong>竞争模型：</strong>已记录 ${evidence.model_tournament.length} 组候选比较；被选模型仍须通过独立确认与反证，胜出不等于真实。</p>`;
         }
         html += '<p class="research-warning">论文写作 API 当前关闭。它在最后阶段只能改写获准结论，并必须保留假设、边界和反证。</p></details>';
+    }
+
+    const verdict = result.model_verdict || {};
+    if (Object.keys(verdict).length) {
+        const verdictLabels = {approved: '已获准', conditional: '条件成立', unresolved: '未决', rejected: '被反证'};
+        const verdictClass = verdict.status === 'approved' ? 'research-safe' : (verdict.status === 'rejected' ? 'research-fail' : 'research-risk');
+        html += '<details class="research-section" open><summary>模型判决书 · 防止“似对非对”</summary>';
+        html += `<div class="research-metrics"><span><small>总状态</small><strong class="${verdictClass}">${escapeHtml(verdictLabels[verdict.status] || verdict.status || '未决')}</strong></span><span><small>候选数</small><strong>${Number(verdict.candidate_count || 0)}</strong></span><span><small>显式获准</small><strong>${(verdict.approved_candidate_ids || []).length}</strong></span><span><small>未决</small><strong>${(verdict.unresolved_candidate_ids || []).length}</strong></span></div>`;
+        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>候选</th><th>状态</th><th>依据</th><th>证据引用</th></tr></thead><tbody>';
+        (verdict.candidates || []).slice(0, 32).forEach(candidate => {
+            const cls = candidate.state === 'approved' ? 'research-safe' : (candidate.state === 'rejected' ? 'research-fail' : 'research-risk');
+            html += `<tr><td>${escapeHtml(candidate.label || candidate.id || '-')}</td><td><span class="${cls}">${escapeHtml(verdictLabels[candidate.state] || candidate.state || '-')}</span><br><small>${escapeHtml(candidate.status || '')}</small></td><td>${escapeHtml(candidate.state_basis || '-')}</td><td>${escapeHtml((candidate.evidence_refs || []).join('、') || '无')}</td></tr>`;
+        });
+        html += '</tbody></table></div>';
+        const minimum = verdict.minimum_common_conclusion || {};
+        html += `<p class="hint"><strong>最小共同结论：</strong>${escapeHtml(minimum.interpretation || '未建立')}<br><strong>四层不确定性：</strong>${escapeHtml(Object.entries(verdict.uncertainty || {}).map(([key, value]) => `${key}=${value.status || '-'}`).join('；') || '未评估')}</p>`;
+        (verdict.warnings || []).slice(0, 8).forEach(warning => { html += `<p class="research-warning">${escapeHtml(warning)}</p>`; });
+        html += '</details>';
+    }
+
+    const competitions = result.model_competitions || [];
+    if (competitions.length) {
+        html += '<details class="research-section"><summary>候选模型 Pareto 竞争</summary><div class="table-wrapper"><table class="data-table"><thead><tr><th>数据集.目标</th><th>比较状态</th><th>候选数</th><th>Pareto 候选</th><th>决策</th></tr></thead><tbody>';
+        competitions.slice(0, 24).forEach(item => {
+            const competition = item.competition || {};
+            const comparison = competition.comparison || {};
+            const decision = comparison.decision_consensus ? '一致' : (comparison.decision_assessed ? '分歧' : '未评估');
+            html += `<tr><td>${escapeHtml(`${item.dataset || '-'} . ${item.target || '-'}`)}</td><td>${escapeHtml(competition.status || 'not_assessed')}</td><td>${Number(comparison.candidate_count || 0)}</td><td>${escapeHtml((competition.pareto_candidate_ids || []).join('、') || '无')}</td><td>${escapeHtml(decision)}</td></tr>`;
+        });
+        html += '</tbody></table></div><p class="hint">比较同时考虑验证损失、结构规模、稳定性和训练成本。Pareto 非支配只表示当前指标下未被全面压过，不等于模型正确或已经获准。</p></details>';
     }
 
     const taskGraph = result.problem_analysis.task_graph || [];
@@ -610,6 +783,7 @@ function renderResearchResult(result) {
         .some(([key, value]) => key !== 'mechanistic_model' && Boolean(value));
     if (hasMechanism || hasOtherSpecialized) {
         html += '<details class="research-section" open><summary>专项数学分析</summary>';
+        html += renderModelDiagnostics(specialized.model_diagnostics);
         const dataCompilation = specialized.mathematical_data_compilation || null;
         if (dataCompilation) {
             const contract = dataCompilation.contract || {};
@@ -706,7 +880,10 @@ function renderResearchResult(result) {
                     html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>统一 IR 节点</th><th>数学形式</th><th>求解器族</th><th>状态</th><th>预算</th></tr></thead><tbody>';
                     solverPlan.nodes.slice(0, 40).forEach(node => {
                         const budget = node.resource_budget || {};
-                        const budgetText = `变量≤${budget.max_variables ?? '-'}；评估≤${budget.max_evaluations ?? '-'}；软墙钟预算 ${budget.wall_time_budget_seconds ?? '-'}s`;
+                        const supervised = budget.wall_time_enforcement === 'parent_process_deadline';
+                        const timeLabel = supervised ? '独立进程强制时限' : '软墙钟预算';
+                        const memoryLabel = supervised ? `；内存≤${budget.memory_limit_mb}MB` : '';
+                        const budgetText = `变量≤${budget.max_variables ?? '-'}；评估≤${budget.max_evaluations ?? '-'}；${timeLabel} ${budget.wall_time_budget_seconds ?? '-'}s${memoryLabel}`;
                         html += `<tr><td>${escapeHtml(node.ir_node_id || '-')}</td><td>${escapeHtml(node.mathematical_form || '-')}</td><td>${escapeHtml(node.solver_family || '-')}</td><td>${escapeHtml(researchStatusText(node.status || '-'))}</td><td>${escapeHtml(budgetText)}</td></tr>`;
                     });
                     html += '</tbody></table></div>';
@@ -728,7 +905,11 @@ function renderResearchResult(result) {
                     html += '</tbody></table></div></details>';
                 }
                 if ((independentAudit.execution_failures || []).length) {
-                    html += `<p class="research-warning"><strong>已隔离失败节点：</strong>${escapeHtml(JSON.stringify(independentAudit.execution_failures))}</p>`;
+                    html += '<h5>未完成的计算节点</h5><p class="hint">运行失败不等于数学反例；其下游不会使用占位结果继续计算。</p><div class="research-table-wrap"><table class="data-table"><thead><tr><th>节点</th><th>原因</th><th>建议处理</th></tr></thead><tbody>';
+                    independentAudit.execution_failures.slice(0, 40).forEach(failure => {
+                        html += `<tr><td>${escapeHtml(failure.relation_id || failure.ir_node_id || '-')}</td><td>${escapeHtml(failure.failure_label || failure.error_type || '计算未完成')}</td><td>${escapeHtml(failure.next_action || failure.message || '请检查该节点的执行契约。')}</td></tr>`;
+                    });
+                    html += '</tbody></table></div>';
                 }
             }
             html += `<h4>纯题面通用数学 IR <span class="${auditClass}">${escapeHtml(audit.label || '-')}</span></h4>`;
@@ -912,12 +1093,47 @@ function renderResearchResult(result) {
         if (dynamics) {
             html += `<h4>时序动力特征 · ${escapeHtml(dynamics.dataset)}.${escapeHtml(dynamics.variable)}</h4><div class="research-metrics"><span><small>时间点</small><strong>${dynamics.n_time_points}</strong></span><span><small>日趋势</small><strong>${formatResearchValue(dynamics.linear_trend_per_day)}</strong></span><span><small>残差标准差</small><strong>${formatResearchValue(dynamics.residual_std)}</strong></span><span><small>中位间隔/天</small><strong>${formatResearchValue(dynamics.median_interval_days)}</strong></span></div><p class="hint">${escapeHtml(dynamics.note || '')}</p>`;
         }
+        const proposals = specialized.model_hypotheses;
+        if (proposals) {
+            html += '<h4>候选机制提议 <span class="research-risk">尚未求解 · 不作为事实或数值证据</span></h4>';
+            html += '<p class="hint">这里只展示候选数学结构。图类型检查不等于数值正确或机理证明；所有假设仍需验证。</p>';
+            (proposals.hypotheses || []).forEach(hypothesis => {
+                html += `<details><summary>${escapeHtml(hypothesis.id)} · ${(hypothesis.nodes || []).length} 个原语 · ${(hypothesis.unknown_mechanisms || []).length} 个待发现机制</summary>`;
+                (hypothesis.assumptions || []).forEach(assumption => {
+                    html += `<p>待检验假设：${escapeHtml(assumption.text)}</p>`;
+                });
+                html += `<pre class="code-block">${escapeHtml(JSON.stringify(hypothesis.nodes || [], null, 2))}</pre></details>`;
+            });
+            currentResearchClarificationQuestions = (proposals.questions || []).filter(
+                question => typeof question === 'string' && question.trim()
+            );
+            const proposedOptionMap = proposals.question_options && typeof proposals.question_options === 'object'
+                ? proposals.question_options : {};
+            currentResearchClarificationQuestions.forEach((question, questionIndex) => {
+                const options = Array.isArray(proposedOptionMap[question]) ? proposedOptionMap[question].filter(
+                    option => option && typeof option === 'object' && typeof option.label === 'string'
+                ).slice(0, 3) : [];
+                currentResearchClarificationOptions[questionIndex] = options;
+                const optionHtml = options.length ? `<div class="research-clarification-options"><span class="research-clarification-caption">可选答案（点击后仍可修改）：</span>${options.map((option, optionIndex) => `<button type="button" class="research-clarification-option" onclick="selectResearchClarificationOption(${questionIndex}, ${optionIndex})"><strong>${escapeHtml(option.label)}</strong><small>${escapeHtml(option.impact || '')}</small></button>`).join('')}</div>` : '';
+                html += `<div class="research-clarification"><label for="research-clarification-answer-${questionIndex}"><strong>待澄清：</strong>${escapeHtml(question)}</label>${optionHtml}<textarea id="research-clarification-answer-${questionIndex}" rows="2" maxlength="4000" placeholder="填写你的明确答案；系统会把问题和回答作为新题意事实"></textarea><label class="research-checkbox"><input type="checkbox" id="research-clarification-hard-${questionIndex}"> 这是题目明确规定的硬约束</label><button type="button" class="btn btn-secondary" onclick="submitResearchClarification(${questionIndex}, this)">写入题意并重新分析</button></div>`;
+            });
+            if (Array.isArray(proposals.suppressed_questions) && proposals.suppressed_questions.length) {
+                html += `<p class="hint">已跳过 ${proposals.suppressed_questions.length} 个当前契约中已回答的重复问题。</p>`;
+            }
+            if (Array.isArray(proposals.possible_repeated_questions) && proposals.possible_repeated_questions.length) {
+                html += `<p class="research-warning">发现 ${proposals.possible_repeated_questions.length} 个可能重复的问题，未自动删除，请人工判断。</p>`;
+            }
+            if (proposals.error_code) html += `<p class="research-risk">提议未完成：${escapeHtml(proposals.error_code)}。既有事实和求解不受影响。</p>`;
+            if (!(proposals.hypotheses || []).length && !proposals.error_code) html += '<p class="hint">当前没有通过结构检查的候选，系统未补造答案。</p>';
+        }
         const equation = specialized.equation_discovery;
         if (equation) {
             const audit = equation.credibility_audit || {};
             const auditClass = audit.status === 'pass' ? 'research-safe' : (audit.status === 'fail' ? 'research-fail' : 'research-risk');
             html += `<h4>积分弱形式候选方程 · ${escapeHtml(equation.dataset)}.${escapeHtml(equation.target)} <span class="${auditClass}">${escapeHtml(audit.label || '-')}</span></h4>`;
-            html += `<pre class="code-block">${escapeHtml(equation.equation || '-')}</pre><div class="research-metrics"><span><small>时间点</small><strong>${equation.n_time_points}</strong></span><span><small>训练窗口</small><strong>${equation.training_windows}</strong></span><span><small>验证窗口</small><strong>${equation.validation_windows}</strong></span><span><small>验证 R²</small><strong>${formatResearchValue((equation.metrics || {}).validation_r2)}</strong></span><span><small>项集稳定性</small><strong>${formatResearchValue((equation.metrics || {}).support_jaccard)}</strong></span></div><p><strong>${escapeHtml(audit.decision || '')}</strong></p><p class="hint">${escapeHtml(equation.note || '')}</p>`;
+            const trajectory = equation.trajectory_test || {};
+            const trajectoryLabels = {pass: '经验检查通过', warning: '谨慎采用', fail: '未通过', not_assessed: '未评估'};
+            html += `<pre class="code-block">${escapeHtml(equation.equation || '-')}</pre><div class="research-metrics"><span><small>时间点</small><strong>${equation.n_time_points}</strong></span><span><small>训练窗口</small><strong>${equation.training_windows}</strong></span><span><small>选参窗口</small><strong>${equation.selection_windows ?? '-'}</strong></span><span><small>锁定测试窗口</small><strong>${equation.test_windows ?? '-'}</strong></span><span><small>测试积分一致性 R²</small><strong>${formatResearchValue((equation.test_integral_metrics || {}).r2)}</strong></span><span><small>独立轨迹 R²</small><strong>${formatResearchValue((trajectory.metrics || {}).r2)}</strong></span><span><small>独立轨迹检查</small><strong>${escapeHtml(trajectoryLabels[trajectory.status] || '未评估')}</strong></span><span><small>项集稳定性</small><strong>${formatResearchValue((equation.metrics || {}).support_jaccard)}</strong></span></div><p class="hint">积分一致性使用测试期观测构造积分项；独立轨迹只从测试前初始状态出发，两项指标不能互相替代。</p><p><strong>${escapeHtml(audit.decision || '')}</strong></p><p class="hint">${escapeHtml(equation.note || '')}</p>`;
         }
         const causal = specialized.causal_effect;
         if (causal) {
@@ -1042,8 +1258,60 @@ function renderResearchResult(result) {
     (result.conclusions || []).forEach(text => { html += `<li>${escapeHtml(text)}</li>`; });
     (result.warnings || []).forEach(text => { html += `<li class="research-warning">${escapeHtml(text)}</li>`; });
     html += '</ul></details>';
-    html += `<div class="research-actions"><a class="btn btn-primary" href="${result.evidence_url || '/api/research/evidence'}">📥 下载机器可读证据</a><a class="btn btn-secondary" href="${result.report_url}">下载论证摘要</a><a class="btn btn-secondary" href="${result.manifest_url || '/api/research/manifest'}">下载产物清单</a><button class="btn btn-secondary" onclick="clearResearchCache(this)">清理本次缓存</button><button class="btn btn-secondary" onclick="goStep(4)">继续调整模型</button></div>`;
+    html += `<div class="research-actions"><a class="btn btn-primary" href="${result.evidence_url || '/api/research/evidence'}">📥 下载机器可读证据</a><a class="btn btn-secondary" href="${result.report_url}">下载论证摘要</a><a class="btn btn-secondary" href="${result.manifest_url || '/api/research/manifest'}">下载产物清单</a><a class="btn btn-secondary" href="/api/research/trace">下载追溯包</a><button class="btn btn-secondary" onclick="clearResearchCache(this)">清理本次缓存</button><button class="btn btn-secondary" onclick="goStep(4)">继续调整模型</button></div>`;
     box.innerHTML = html;
+}
+
+function previewHypothesisControl(input) {
+    if (!input || !input.id) return;
+    const value = document.getElementById(`${input.id}-value`);
+    if (value) value.textContent = input.value;
+    const preview = document.getElementById('hypothesis-control-preview');
+    const nodes = input.dataset.affectedNodes || '-';
+    if (preview) preview.textContent = `当前预览值 ${input.value}；正在准备重算受影响节点：${nodes}。`;
+    const result = currentResearchResult || {};
+    const contract = result.hypothesis_preview_contract;
+    if (!contract || typeof contract !== 'object' || !Array.isArray(contract.controls) || !contract.bindings) {
+        if (preview) preview.textContent = `当前预览值 ${input.value}；仅计划重算受影响节点：${nodes}。当前结果没有可执行绑定，需重新运行验证。`;
+        return;
+    }
+    clearTimeout(hypothesisPreviewTimer);
+    if (hypothesisPreviewController) hypothesisPreviewController.abort();
+    hypothesisPreviewTimer = setTimeout(() => runHypothesisPreview(contract, input, preview), 180);
+}
+
+async function runHypothesisPreview(contract, input, preview) {
+    const revision = ++hypothesisPreviewRevision;
+    hypothesisPreviewController = new AbortController();
+    const values = {};
+    document.querySelectorAll('.hypothesis-control-grid input[type="range"]').forEach(slider => {
+        const id = slider.id.replace(/^research-control-/, '');
+        if (id) values[id] = Number(slider.value);
+    });
+    const payload = {
+        controls: contract.controls,
+        values,
+        bindings: contract.bindings,
+        graph: contract.graph,
+        output_ids: contract.output_ids,
+    };
+    try {
+        const response = await fetch('/api/research/hypothesis-preview', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload), signal: hypothesisPreviewController.signal,
+        });
+        const data = await response.json();
+        if (revision !== hypothesisPreviewRevision) return;
+        if (!response.ok || !data.success) throw new Error(data.error || '预览执行失败');
+        const execution = data.execution || {};
+        const outputs = execution.outputs && typeof execution.outputs === 'object'
+            ? Object.entries(execution.outputs).map(([key, val]) => `${key}=${formatResearchValue(val)}`).join('；')
+            : '已完成参数校验，当前图没有可展示输出';
+        if (preview) preview.textContent = `预览已重算（探索结果）：${outputs}。版本 ${data.preview?.version ?? '-'}；仍需完整验证后才能形成结论。`;
+    } catch (error) {
+        if (error.name === 'AbortError' || revision !== hypothesisPreviewRevision) return;
+        if (preview) preview.textContent = `预览未完成：${error.message}。原结果保持不变。`;
+    }
 }
 
 async function handleUpload(files) {
@@ -1067,7 +1335,7 @@ async function handleUpload(files) {
             showUploadResult(data);
             renderMultiTablePanel();
             const totalFiles = uploadedFiles.length;
-            document.getElementById('data-status').textContent = `数据集: ${totalFiles} 个文件 · 当前 ${data.data.shape[0]}行×${data.data.shape[1]}列`;
+            document.getElementById('data-status').textContent = uploadStatusText(`数据集: ${totalFiles} 个文件 · 当前`, data.data);
             document.getElementById('data-status').classList.add('loaded');
             markStepCompleted(1);
             
@@ -1087,6 +1355,13 @@ async function handleUpload(files) {
     }
 }
 
+function uploadStatusText(prefix, info) {
+    const shown = `${Number(info?.shape?.[0] || 0).toLocaleString()}行×${Number(info?.shape?.[1] || 0).toLocaleString()}列`;
+    if (!info?.bounded_representation) return `${prefix} ${shown}`;
+    const source = Number(info?.source_shape?.[0] || 0).toLocaleString();
+    return `${prefix} ${shown}（源文件 ${source} 行；当前为受限覆盖预览，不能代表全量）`;
+}
+
 async function loadDatasets() {
     // 页面加载时获取已上传的数据集列表
     try {
@@ -1098,7 +1373,7 @@ async function loadDatasets() {
             renderMultiTablePanel();
             const active = data.datasets[data.active_index];
             if (active) {
-                document.getElementById('data-status').textContent = `数据集: ${data.datasets.length} 个 · 当前 ${active.shape[0]}×${active.shape[1]}`;
+                document.getElementById('data-status').textContent = uploadStatusText(`数据集: ${data.datasets.length} 个 · 当前`, active);
                 document.getElementById('data-status').classList.add('loaded');
                 populateTargetOptions(active.columns, null);
                 // 恢复 uploadedData，否则高级分析无法获取列类型
@@ -1189,7 +1464,7 @@ function renderMultiTablePanel() {
             rows += `
                 <tr class="merge-sheet-row ${sheetActive ? 'active' : ''} ${checked ? 'selected' : ''}">
                     <td class="merge-sheet-check-cell"><input type="checkbox" class="merge-sheet-checkbox" data-file-index="${fIdx}" data-sheet-index="${sIdx}" ${checked ? 'checked' : ''} onchange="toggleSheetSelection(this)" aria-label="选择 ${escapeHtml(file.filename)} ${escapeHtml(sheet || '默认表')}"></td>
-                    <td><strong>${icon} ${escapeHtml(file.filename)}</strong></td>
+                    <td><strong>${icon} ${escapeHtml(file.filename)}</strong>${file.bounded_representation ? '<br><small class="merge-bounded-badge">受限预览</small>' : ''}</td>
                     <td>${escapeHtml(sheet || '默认表')}</td>
                     <td>${Number(file.shape?.[0] || 0).toLocaleString()} × ${Number(file.shape?.[1] || 0).toLocaleString()}</td>
                     <td>${sheetActive ? '<span class="merge-current-badge">● 当前</span>' : '-'}</td>
@@ -1281,7 +1556,7 @@ async function selectSheet(fileIndex, sheetName) {
                 f.is_active = (i === fileIndex);
                 if (i === fileIndex) f.active_sheet = sheetName;
             });
-            document.getElementById('data-status').textContent = `数据集: ${uploadedFiles.length} 个 · 当前 ${uploadedFiles[fileIndex].filename}${sheetName ? ' · ' + sheetName : ''} (${data.data.shape[0]}行×${data.data.shape[1]}列)`;
+            document.getElementById('data-status').textContent = uploadStatusText(`数据集: ${uploadedFiles.length} 个 · 当前 ${uploadedFiles[fileIndex].filename}${sheetName ? ' · ' + sheetName : ''}`, data.data);
             populateTargetOptions(data.data.columns, data.target_hint);
             showToast('已切换数据表');
             // 重新渲染面板以更新活跃状态

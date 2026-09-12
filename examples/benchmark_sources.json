@@ -1,0 +1,277 @@
+{
+  "schema_version": "mathmodel.benchmark-source-registry/v1",
+  "sources": [
+    {
+      "id": "comap-2025-problem-index",
+      "kind": "problem_input",
+      "title": "COMAP 2025 MCM/ICM official problem index",
+      "url": "https://www.contest.comap.org/undergraduate/contests/mcm/contests/2025/problems/",
+      "authority": "official", "role": "task_input", "access": "public", "license_status": "official_public",
+      "notes": "Authoritative landing page for six 2025 problem statements and the C/D data attachments."
+    },
+    {
+      "id": "comap-2024-problem-index",
+      "kind": "problem_input",
+      "title": "COMAP 2024 MCM/ICM official problem index",
+      "url": "https://www.contest.comap.org/undergraduate/contests/mcm/contests/2024/problems/",
+      "authority": "official", "role": "task_input", "access": "public", "license_status": "official_public",
+      "notes": "Six 2024 MCM/ICM problem statements; use as a held-out task source after prompt and parameter development are frozen."
+    },
+    {
+      "id": "comap-2023-problem-index",
+      "kind": "problem_input",
+      "title": "COMAP 2023 MCM/ICM official problem index",
+      "url": "https://www.contest.comap.org/undergraduate/contests/mcm/contests/2023/problems/",
+      "authority": "official", "role": "task_input", "access": "public", "license_status": "official_public",
+      "notes": "Eight 2023 MCM/ICM problem statements; separate from training and prompt selection to test genuine unseen-task generalization."
+    },
+    {
+      "id": "comap-2025-mcm-c-problem",
+      "kind": "problem_input",
+      "title": "2025 MCM C problem statement",
+      "url": "https://www.contest.comap.org/undergraduate/contests/mcm/contests/2025/problems/2025_MCM_Problem_C.pdf",
+      "authority": "official", "role": "task_input", "access": "public", "license_status": "official_public",
+      "notes": "Problem statement; use the official index for the associated data zip."
+    },
+    {
+      "id": "comap-2025-icm-e-problem",
+      "kind": "problem_input",
+      "title": "2025 ICM E problem statement",
+      "url": "https://www.contest.comap.org/undergraduate/contests/mcm/contests/2025/problems/2025_ICM_Problem_E.pdf",
+      "authority": "official", "role": "task_input", "access": "public", "license_status": "official_public",
+      "notes": "Pure-mechanism problem: useful for testing no-upload workflows."
+    },
+    {
+      "id": "comap-2025-rules",
+      "kind": "rules",
+      "title": "COMAP MCM/ICM rules and judging guidance",
+      "url": "https://www.contest.comap.org/undergraduate/contests/mcm/instructions.php",
+      "authority": "official", "role": "rubric_material", "access": "public", "license_status": "official_public",
+      "notes": "Emphasizes thought process, analysis, modeling approaches, mathematical methods, validation, sensitivity/stability, strengths and weaknesses."
+    },
+    {
+      "id": "immc-official-guide",
+      "kind": "rules",
+      "title": "International Math Modeling Contest official guide",
+      "url": "https://www.imc-impea.org/immc.php",
+      "authority": "official", "role": "rubric_material", "access": "public", "license_status": "official_public",
+      "notes": "Official contest page describes independent evaluation by three mathematics/physics professors; use as rubric-process reference, not a numerical gold answer."
+    },
+    {
+      "id": "siam-gaimm-rubric",
+      "kind": "rubric",
+      "title": "SIAM GAI MM mathematical modeling rubric",
+      "url": "https://www.siam.org/media/n2tinywa/gaimme-2nd-ed-final-download-print-bw.pdf",
+      "authority": "official", "role": "rubric_material", "access": "public", "license_status": "metadata_only",
+      "notes": "A reusable modeling-assessment rubric; store metadata and cite the source, do not copy the PDF into the repository."
+    },
+    {
+      "id": "zenodo-phase-modeling-assessment",
+      "kind": "research_benchmark",
+      "title": "Zenodo phase-level mathematical modeling assessment dataset",
+      "url": "https://zenodo.org/records/18462009",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Anonymized classroom phase scores and codebook useful for rubric calibration; it is not a held-out contest gold standard."
+    },
+    {
+      "id": "mtfc-official-faq",
+      "kind": "problem_input",
+      "title": "Modeling the Future Challenge official FAQ",
+      "url": "https://www.mtfchallenge.org/faq/",
+      "authority": "official", "role": "task_input", "access": "public", "license_status": "official_public",
+      "notes": "The qualifying scenario includes a real-world dataset and multiple modeling/risk questions; access to active-year material is controlled by the organizer."
+    },
+    {
+      "id": "mtfc-actuarial-foundation",
+      "kind": "rules",
+      "title": "Modeling the Future Challenge program page",
+      "url": "https://actuarialfoundation.org/modeling-the-future-challenge/",
+      "authority": "official", "role": "rubric_material", "access": "public", "license_status": "official_public",
+      "notes": "Describes real-world data analysis, modeling, risk analysis and recommendations; contact the organizer for an independent evaluation partnership."
+    },
+    {
+      "id": "immc-official-2026",
+      "kind": "rules",
+      "title": "International Mathematical Modeling Contest official page",
+      "url": "https://www.imc-impea.org/immc.php",
+      "authority": "official", "role": "rubric_material", "access": "public", "license_status": "official_public",
+      "notes": "Official page documents contest delivery and independent professor evaluation; request organizer permission before using an unreleased problem as a holdout."
+    },
+    {
+      "id": "m3-official-rules-2026",
+      "kind": "rules",
+      "title": "MathWorks Math Modeling Challenge official rules",
+      "url": "https://m3challenge.siam.org/wp-content/uploads/01-M3_Official_Rules_and_Guidelines.pdf",
+      "authority": "official", "role": "rubric_material", "access": "public", "license_status": "metadata_only",
+      "notes": "Official rules document timed real-world modeling and multi-stage judging; contest eligibility and organizer permission apply to any private holdout use."
+    },
+    {
+      "id": "comap-2025-results",
+      "kind": "rules",
+      "title": "COMAP 2025 MCM/ICM results",
+      "url": "https://www.contest.comap.org/undergraduate/contests/mcm/contests/2025/results/index.html",
+      "authority": "official", "role": "policy_reference", "access": "public", "license_status": "official_public",
+      "notes": "Award labels can stratify reference material, but must never become numerical correctness labels."
+    },
+    {
+      "id": "comap-umap-46-4-commentary",
+      "kind": "rubric",
+      "title": "UMAP Journal 46.4: 2025 MCM papers and Judges' Commentary",
+      "url": "https://comap.org/membership/member-resources/item/umap-journal-46-4-winter-2025-edition",
+      "authority": "official", "role": "rubric_material", "access": "membership_required", "license_status": "metadata_only",
+      "notes": "Covers MCM A, B and C; store only metadata unless access rights permit retrieval."
+    },
+    {
+      "id": "comap-umap-46-3-commentary",
+      "kind": "rubric",
+      "title": "UMAP Journal 46.3: 2025 ICM papers and Judges' Commentary",
+      "url": "https://comap.org/membership/member-resources/item/umap-journal-46-3-fall-2025-edition",
+      "authority": "official", "role": "rubric_material", "access": "membership_required", "license_status": "metadata_only",
+      "notes": "Covers ICM D, E and F; commentary is not copied into this repository."
+    },
+    {
+      "id": "comap-2025-better-city-commentary-page",
+      "kind": "rubric",
+      "title": "COMAP 2025 ICM D Better City resource page",
+      "url": "https://www.comap.org/membership/member-resources/item/a-roadmap-to-a-better-city",
+      "authority": "official", "role": "rubric_material", "access": "membership_required", "license_status": "metadata_only",
+      "notes": "Confirms that commentary and student papers exist; access is controlled by Mathmodels membership."
+    },
+    {
+      "id": "mm-agent-mm-bench",
+      "kind": "research_benchmark",
+      "title": "MM-Agent / MM-Bench (111 MCM/ICM problems)",
+      "url": "https://arxiv.org/abs/2505.14148",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "External research benchmark; do not mix its scores with sealed-corpus scores without a predeclared protocol."
+    },
+    {
+      "id": "mm-agent-code",
+      "kind": "research_benchmark",
+      "title": "MM-Agent public implementation",
+      "url": "https://github.com/usail-hkust/LLM-MM-Agent",
+      "authority": "research", "role": "method_comparison", "access": "repository_access", "license_status": "metadata_only",
+      "notes": "Pin a commit and inspect its license before running or vendoring code."
+    },
+    {
+      "id": "mathworks-archive",
+      "kind": "archive",
+      "title": "mathworks MCM/ICM archive",
+      "url": "https://github.com/jshn9710/mathworks",
+      "authority": "community", "role": "reference_only", "access": "repository_access", "license_status": "repository_license_required",
+      "notes": "Useful for human inspection; each file's license must be checked separately."
+    },
+    {
+      "id": "community-2025-mcm-c",
+      "kind": "reference_solution",
+      "title": "Public 2025 MCM C solution/code repository",
+      "url": "https://github.com/david188888/2025-MCM-ICM",
+      "authority": "community", "role": "reference_only", "access": "repository_access", "license_status": "repository_license_required",
+      "notes": "A competing implementation, not a gold answer; use for hypothesis diversity and smoke tests only."
+    },
+    {
+      "id": "community-2025-icm-d",
+      "kind": "reference_solution",
+      "title": "Public 2025 ICM D solution/code repository",
+      "url": "https://github.com/CarmJos/MCM-ICM.2025.D",
+      "authority": "community", "role": "reference_only", "access": "repository_access", "license_status": "repository_license_required",
+      "notes": "Reported as a Meritorious Winner repository; award status is not mathematical correctness."
+    },
+    {
+      "id": "pysindy-official-docs",
+      "kind": "research_benchmark",
+      "title": "PySINDy official documentation",
+      "url": "https://pysindy.readthedocs.io/en/stable/index.html",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Sparse identification of nonlinear dynamics reference; use the same feature library, differentiation and validation budget when comparing equation-discovery candidates."
+    },
+    {
+      "id": "pysindy-weak-pde-example",
+      "kind": "research_benchmark",
+      "title": "PySINDy weak-form PDE identification example",
+      "url": "https://pysindy.readthedocs.io/en/stable/examples/1_feature_overview/example.html",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Documents weak-form PDE identification for noisy data; this is an implementation reference, not a correctness oracle for a contest problem."
+    },
+    {
+      "id": "sciml-ude-docs",
+      "kind": "research_benchmark",
+      "title": "SciML Universal Differential Equations documentation",
+      "url": "https://sciml.readthedocs.io/en/latest/UDE.html",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Reference for hybrid mechanistic plus learned differential equations; treat neural correction terms as a competing hypothesis requiring independent stability and extrapolation checks."
+    },
+    {
+      "id": "ude-original-paper",
+      "kind": "research_benchmark",
+      "title": "Universal Differential Equations for Scientific Machine Learning",
+      "url": "https://arxiv.org/abs/2001.04385",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Primary paper for the UDE formulation; citation metadata is retained without copying the paper or claiming its examples validate this project."
+    },
+    {
+      "id": "llm-sr-official-code",
+      "kind": "research_benchmark",
+      "title": "LLM-SR official implementation",
+      "url": "https://github.com/deep-symbolic-mathematics/LLM-SR",
+      "authority": "research", "role": "method_comparison", "access": "repository_access", "license_status": "repository_license_required",
+      "notes": "Official implementation of LLM-guided scientific equation discovery; pin a commit and inspect its MIT license before executing or vendoring."
+    },
+    {
+      "id": "llm-srbench-paper",
+      "kind": "research_benchmark",
+      "title": "LLM-SRBench scientific equation-discovery benchmark",
+      "url": "https://arxiv.org/abs/2504.10415",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Out-of-distribution equation-discovery benchmark designed to reduce memorization; keep its task data and scores separate from sealed MCM/ICM evaluation."
+    },
+    {
+      "id": "drivendata-platform",
+      "kind": "research_benchmark",
+      "title": "DrivenData real-world data-science competitions",
+      "url": "https://www.drivendata.org/",
+      "authority": "official", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "External predictive-accuracy arm with real-world tasks and competition scoring; not an open-ended mathematical-modeling gold standard."
+    },
+    {
+      "id": "drivendata-code-execution",
+      "kind": "research_benchmark",
+      "title": "DrivenData hidden-label code-execution competition design",
+      "url": "https://blog.drivendata.org/blog/code-execution-competitions",
+      "authority": "official", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Documents secure evaluation with hidden test labels; use only for a pre-registered prediction metric and keep it separate from expert-scored modeling claims."
+    },
+    {
+      "id": "kaggle-hidden-ground-truth",
+      "kind": "research_benchmark",
+      "title": "Kaggle competition setup and hidden ground truth",
+      "url": "https://www.kaggle.com/docs/competitions-setup",
+      "authority": "official", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Platform documentation for hidden solution files and leaderboard scoring; competition-specific terms and licenses must be checked before use."
+    },
+    {
+      "id": "tml-bench-private-holdout",
+      "kind": "research_benchmark",
+      "title": "TML-Bench tabular machine-learning agent benchmark",
+      "url": "https://arxiv.org/abs/2603.05764",
+      "authority": "research", "role": "method_comparison", "access": "public", "license_status": "metadata_only",
+      "notes": "Research benchmark reporting private-holdout scores on hidden labels; useful for predictive execution accuracy, not a substitute for open-ended mathematical-modeling evaluation."
+    },
+    {
+      "id": "tml-bench-code",
+      "kind": "research_benchmark",
+      "title": "TML-Bench code and benchmark materials",
+      "url": "https://github.com/MykolaPinchuk/TML-bench",
+      "authority": "research", "role": "method_comparison", "access": "repository_access", "license_status": "repository_license_required",
+      "notes": "Repository for reproducing the tabular-agent benchmark; pin a commit and inspect task-data and model-output licenses before execution."
+    },
+    {
+      "id": "uci-airfoil-self-noise-official",
+      "kind": "research_benchmark",
+      "title": "UCI Airfoil Self-Noise public regression dataset",
+      "url": "https://archive.ics.uci.edu/dataset/291/airfoil%2Bself-noise",
+      "authority": "official", "role": "method_comparison", "access": "public", "license_status": "official_public",
+      "notes": "Used as an external public-label regression case; source bytes and hash are pinned in external_dataset_catalog.json. It is not a sealed contest rubric or expert gold standard."
+    }
+  ]
+}

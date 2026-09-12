@@ -7,6 +7,7 @@
     <script src="{{ url_for('static', filename='vendor/echarts.min.js') }}?v=5.5.0"></script>
     <!-- echarts-gl 按需动态加载，默认不引入 -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=16">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/graph_lab.css') }}?v=1">
 </head>
 <body>
     <!-- 顶部标题栏 -->
@@ -132,12 +133,18 @@
                         </div>
                     </div>
                     <details class="research-section" style="margin-bottom:12px;">
-                        <summary>可选：本地小模型 / 外部 API 辅助题面编译</summary>
-                        <p class="hint">模型只生成候选数学 IR，不能绕过题面引文、数值溯源、单位和契约校验。调用失败会自动退回本地确定性编译；API 密钥不写入报告、证据或会话。</p>
+                        <summary>可选：本地小模型 / 外部 API · 事实抽取与候选机制提议</summary>
+                        <p class="hint">事实抽取严格引用题面；机制提议允许提出新结构，但只保留为未验证假设。两项都不能绕过执行与验证边界；API 密钥不写入报告、证据或会话。</p>
                         <div class="form-row">
                             <label class="research-checkbox">
-                                <input type="checkbox" id="research-semantic-model"> 启用语义模型编译
+                                <input type="checkbox" id="research-semantic-model"> 事实关系抽取（严格引用题面）
                             </label>
+                            <label class="research-checkbox">
+                                <input type="checkbox" id="research-hypothesis-generation"> 候选机制提议（实验功能，尚不自动求解）
+                            </label>
+                        </div>
+                        <p class="hint">两项可独立启用，共用下方模型配置。候选提议只读取题面文字，最多增加一次模型请求；结果单独标为待检验假设，不修改事实或输出数值答案。</p>
+                        <div class="form-row">
                             <div class="form-group">
                                 <label>后端</label>
                                 <select id="research-semantic-provider" onchange="onResearchSemanticProviderChange()">
@@ -181,6 +188,7 @@
                         <label class="research-checkbox"><input type="checkbox" id="research-credibility-audit" checked> 自动反证与可信度审计</label>
                         <button class="btn btn-secondary" onclick="analyzeProblem()">仅分析题目</button>
                         <button class="btn btn-primary" id="research-run-btn" onclick="runResearch()">🚀 一键完成研究</button>
+                        <button class="btn btn-secondary hidden" id="research-cancel-btn" onclick="cancelResearch()">⏹ 取消研究</button>
                     </div>
                     <div id="problem-result" style="margin-top:12px;display:none;">
                         <div id="problem-result-content"></div>
@@ -189,6 +197,67 @@
                     <div id="research-result" class="research-result hidden"></div>
                 </div>
                 
+                <details class="card graph-lab">
+                    <summary><strong>数学图实验 · 开发搜索 / 冻结 / 留出审计</strong></summary>
+                    <p>实验功能：运行显式绑定的通用标量数学图，不依赖题目专用模板。可从当前表格选择变量和单位来准备实验，也可上传开发实验 JSON；尚未实现任意题面的自动编译。</p>
+                    <details id="graph-lab-table-builder" class="graph-lab-heldout">
+                        <summary><strong>从当前表格准备实验 · 无需编写 JSON</strong></summary>
+                        <p class="hint">先在上方上传或处理表格，再读取字段。仅处理明确选定的 12–360 行开发数据：前 70% 训练，后 30% 开发检查，不是最终留出。不会修改当前表格。</p>
+                        <button type="button" class="btn" onclick="graphLabTableFields()">读取当前表格字段</button>
+                        <p id="graph-lab-table-source" class="hint"></p>
+                        <div class="graph-lab-fields">
+                            <label>输入列（最多 4 列，可按 Ctrl / Command 多选）<select id="graph-lab-table-inputs" multiple size="4" onchange="graphLabTableUnits()"></select></label>
+                            <label>目标列<select id="graph-lab-table-target" onchange="graphLabTableUnits()"><option value="">请先读取字段</option></select></label>
+                        </div>
+                        <div id="graph-lab-table-units" class="graph-lab-fields"></div>
+                        <div class="graph-lab-fields graph-lab-parameters">
+                            <label>起始行（从 1 开始）<input id="graph-lab-table-start" type="number" min="1" step="1" value="1"></label>
+                            <label>开发行数（不代表全表）<input id="graph-lab-table-count" type="number" min="12" max="360" step="1" value="200"></label>
+                            <label>允许绝对误差（目标的 SI 单位）<input id="graph-lab-table-atol" type="number" min="0" step="any" value="0.1"></label>
+                            <label>允许相对误差（0.05 = 5%）<input id="graph-lab-table-rtol" type="number" min="0" step="any" value="0.05"></label>
+                        </div>
+                        <label>题目背景 / 研究目标<textarea id="graph-lab-table-problem" rows="2" placeholder="例如：研究距离与时间的关系，并检验简单机制是否成立。"></textarea></label>
+                        <p class="hint">必须明确单位；“1”表示明确无量纲，而非未知单位。误差阈值只定义数值容许范围，不是置信水平。重复输入、缺失值、疑似编号和未知单位不会被静默处理。</p>
+                        <button type="button" class="btn btn-secondary" id="graph-lab-table-compile" onclick="graphLabCompileTable()">准备实验（不运行）</button>
+                        <div id="graph-lab-table-preview" aria-live="polite"></div>
+                    </details>
+                    <div class="graph-lab-fields">
+                        <label for="graph-lab-input">开发实验文件（不含留出数据）<input id="graph-lab-input" type="file" accept=".json,application/json"></label>
+                        <label for="graph-lab-study">稳定研究标识<input id="graph-lab-study" type="text" maxlength="64" placeholder="例如 cooling_study_01" autocomplete="off"></label>
+                    </div>
+                    <label class="research-checkbox"><input id="graph-lab-model-mutation" type="checkbox"> 使用上方“候选机制/语义模型”的当前连接设置提出受限结构变异</label>
+                    <p class="hint">可选。模型只能提交最多 4 个 IR patch，不能改题意、数据、单位、容差或裁决结果；合法 patch 仍会完整执行和反例复检。API Key 仅随本次请求进入内存，不写入实验文件。模型调用最长等待 15 秒，实验剩余时间不足时自动跳过。</p>
+                    <div class="graph-lab-actions">
+                        <button type="button" class="btn" id="graph-lab-example" onclick="graphLabExample()">载入合成开发示例</button>
+                        <button type="button" class="btn btn-primary" id="graph-lab-start" onclick="graphLabStart()">运行通用搜索</button>
+                        <button type="button" class="btn" id="graph-lab-cancel" onclick="graphLabCancel()" disabled>取消计算</button>
+                        <button type="button" class="btn" onclick="graphLabRefresh()">刷新状态</button>
+                    </div>
+                    <p id="graph-lab-message" role="status" aria-live="polite">每次运行会保存独立证据；最多两个实验同时计算。当前仅限本地模式。</p>
+                    <div id="graph-lab-output" aria-live="polite"></div>
+                    <div class="graph-lab-heldout">
+                        <h4>模型冻结后，再提交留出样本</h4>
+                        <p class="hint">只有开发候选冻结后才能提交。留出结果不再用于改结构或调参；超时、取消和失败都不会将已使用数据重置为新证据。更换研究标识也不会使旧数据重新独立。</p>
+                        <details id="graph-lab-heldout-table">
+                            <summary><strong>用当前表格做留出审计 · 无需手写变量 JSON</strong></summary>
+                            <p class="hint">冻结后，可在上方上传验证表或切换当前表格，再读取字段。单位必须与冻结图量纲相容；只换算，不改参数、阈值或模型。</p>
+                            <button type="button" class="btn" id="graph-lab-heldout-fields" onclick="graphLabHeldoutFields()" disabled>读取验证表字段</button>
+                            <p id="graph-lab-heldout-source" class="hint"></p>
+                            <div id="graph-lab-heldout-mapping"></div>
+                            <div class="graph-lab-fields graph-lab-parameters">
+                                <label>验证起始行（从 1 开始）<input id="graph-lab-heldout-start" type="number" min="1" step="1" value="1" disabled></label>
+                                <label>验证行数（1–256）<input id="graph-lab-heldout-count" type="number" min="1" max="256" step="1" value="20" disabled></label>
+                            </div>
+                            <label><input id="graph-lab-heldout-si" type="checkbox" disabled> 我确认冻结实验的域、样本及阈值使用 SI 数值；表格单位将在此换算，且这些验证数据未用于选模或调参。</label>
+                            <p class="hint">本工具生成的表格实验使用 SI。若自行上传的数学图使用厘米等非 SI 数值，不能勾选此项蒙混通过。此确认不证明真实的数据独立性。</p>
+                            <button type="button" class="btn btn-primary" id="graph-lab-confirm-table" onclick="graphLabConfirmTable()" disabled>映射并执行只读审计</button>
+                        </details>
+                        <p class="hint">或使用已按冻结变量和 SI 单位准备好的 JSON：</p>
+                        <div class="graph-lab-fields"><label for="graph-lab-heldout">留出样本 JSON<input type="file" id="graph-lab-heldout" accept=".json,application/json" disabled></label></div>
+                        <button type="button" class="btn btn-primary" id="graph-lab-confirm" onclick="graphLabConfirm()" disabled>执行只读留出审计</button>
+                    </div>
+                </details>
+
                 <!-- 多表数据面板 -->
                 <div id="multi-table-panel" class="card hidden">
                     <h3>📊 多表数据管理</h3>
@@ -1636,6 +1705,8 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=16"></script>
+    <script src="{{ url_for('static', filename='js/model_diagnostics.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/graph_lab.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=17"></script>
 </body>
 </html>

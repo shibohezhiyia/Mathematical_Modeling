@@ -70,6 +70,19 @@ def temp_save_path():
 
 @skip_if_no_mpl
 class TestDataVisualizerExtended:
+    def test_plotting_bounds_large_frame_and_closes_saved_figures(self, temp_save_path):
+        dv = DataVisualizer(max_plot_rows=500, max_plot_columns=2)
+        df = pd.DataFrame({
+            "a": np.arange(5_000, dtype=float),
+            "b": np.arange(5_000, dtype=float)[::-1],
+            "missing": [None if i % 7 == 0 else i for i in range(5_000)],
+        })
+        fig = dv.plot_correlation_heatmap(df, save_path=temp_save_path)
+        assert fig is not None
+        assert os.path.exists(temp_save_path)
+        import matplotlib.pyplot as plt
+        assert plt.get_fignums() == []
+
     def test_plot_correlation_heatmap_exact_two_cols(self, temp_save_path):
         dv = DataVisualizer()
         df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [3.0, 2.0, 1.0]})
@@ -80,6 +93,11 @@ class TestDataVisualizerExtended:
         dv = DataVisualizer()
         y = np.random.choice([0, 1, 2], 100)
         fig = dv.plot_target_distribution(y, task_type="classification", save_path=temp_save_path)
+        assert fig is not None
+
+    def test_plot_target_distribution_accepts_plain_sequence(self, temp_save_path):
+        dv = DataVisualizer()
+        fig = dv.plot_target_distribution([1, 2, 3, 4], task_type="regression", save_path=temp_save_path)
         assert fig is not None
 
     def test_plot_pairplot_default_columns(self, sample_df, temp_save_path):
