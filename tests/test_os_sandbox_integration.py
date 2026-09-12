@@ -48,7 +48,10 @@ def test_real_container_runs_numeric_contract_and_cleans_up():
     result = SolverProcessRunner().execute(
         "linear_ode/v1",
         {"matrix": [[-1.0]], "initial": [1.0], "times": [0.0, 1.0]},
-        limits=SolverLimits(isolation_mode="strict_os", memory_mb=512, wall_seconds=60),
+        # NumPy/SciPy can reserve >512MB of virtual address space during
+        # import under Linux RLIMIT_AS; 1GB keeps this a numerical smoke test
+        # rather than an import-memory failure.
+        limits=SolverLimits(isolation_mode="strict_os", memory_mb=1024, wall_seconds=60),
     )
     assert result["states"][-1][0] == pytest.approx(math.exp(-1), rel=1e-6)
     assert result["execution_supervision"]["container_cleanup"] == "confirmed"

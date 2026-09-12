@@ -38,4 +38,5 @@ export MATHMODEL_OS_SANDBOX_RUNTIME="$RUNTIME"
 export MATHMODEL_OS_SANDBOX_IMAGE="$IMAGE"
 export MATHMODEL_OS_SANDBOX_ATTESTATION_FILE="$OUT/attestation.json"
 export MATHMODEL_OS_SANDBOX_ATTESTED=1
+export MATHMODEL_TEST_REAL_SANDBOX=1
 python3 -m pytest "$ROOT/tests/test_os_sandbox.py" "$ROOT/tests/test_solver_runtime.py" "$ROOT/tests/test_os_sandbox_integration.py" -q
