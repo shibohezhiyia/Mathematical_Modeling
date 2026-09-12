@@ -273,13 +273,26 @@ class ModelEvaluator:
             underfit_risk=underfit_risk
         )
     
+    # 启发式参数估计：按子串优先匹配，提到模块级避免每次评估重建。
+    # 顺序敏感——子串更具体的放前面，避免 'gradient' 被 'mlp' 抢匹配。
+    _HEURISTIC_PARAMS = (
+        # (匹配子串, 参数数)
+        (("random", "extra"), 200 * 100),                          # 200 棵树
+        (("gradient", "xgboost", "lightgbm", "catboost"), 200 * 50),
+        (("mlp", "neural"), 10000),
+        (("svm",), 5000),
+        (("linear", "logistic"), 100),
+        (("decision tree",), 50),
+        (("knn",), 10),
+    )
+
     def _estimate_params(self, cv_result: CVResult) -> int:
         """估计模型参数数量"""
         # 从最后一个fold的模型估计
         if not cv_result.fitted_models:
             return 0
         model = cv_result.fitted_models[-1]
-        
+
         # 尝试获取参数数量
         try:
             if hasattr(model, 'get_params'):
@@ -291,33 +304,34 @@ class ModelEvaluator:
         except Exception:
             # 限定 Exception 避免吞掉 KeyboardInterrupt / SystemExit
             pass
-        
-        # 根据模型类型启发式估计
+
+        # 启发式回退：模块级 _HEURISTIC_PARAMS 列表，单次 for + any() 短路。
+        # 之前是 7 个独立的 `if/elif "X" in name` 字符串扫描，复杂度 O(7·L)；
+        # 改成 O(L + k) 一次 lowercase + 线性查找。
         name = cv_result.model_name.lower()
-        if 'random' in name or 'extra' in name:
-            return 200 * 100  # 200棵树
-        elif 'gradient' in name or 'xgboost' in name or 'lightgbm' in name or 'catboost' in name:
-            return 200 * 50
-        elif 'mlp' in name or 'neural' in name:
-            return 10000
-        elif 'svm' in name:
-            return 5000
-        elif 'linear' in name or 'logistic' in name:
-            return 100
-        elif 'decision tree' in name:
-            return 50
-        elif 'knn' in name:
-            return 10
+        for substrings, param_count in self._HEURISTIC_PARAMS:
+            if any(s in name for s in substrings):
+                return param_count
         return 100
-    
-    def _get_range(self, values: List[float]) -> Tuple[float, float]:
-        """获取数值范围，处理边界情况"""
+
+    @staticmethod
+    def _get_range(values: List[float]) -> Tuple[float, float]:
+        """获取数值范围，处理边界情况
+
+        优化：原代码 min() + max() 两次 O(n) 扫描合并为单次 for 循环。
+        """
         if not values:
             return (0, 1)
-        min_v, max_v = min(values), max(values)
-        if min_v == max_v:
-            return (min_v - 1, max_v + 1)
-        return (min_v, max_v)
+        # 单次扫描同时算 min/max（省一遍列表遍历）
+        lo = hi = values[0]
+        for v in values[1:]:
+            if v < lo:
+                lo = v
+            elif v > hi:
+                hi = v
+        if lo == hi:
+            return (lo - 1, hi + 1)
+        return (lo, hi)
     
     def _normalize(self, value: float, min_v: float, max_v: float,
                    higher_better: bool = True) -> float:
