@@ -13,7 +13,7 @@ docker build -f deploy/solver/Dockerfile -t mathmodel-worker:local .
 docker image inspect --format "{{.Id}}" mathmodel-worker:local
 ```
 
-构建阶段允许下载基础镜像和数值依赖；构建完成后执行阶段只接受固定镜像摘要，
+构建阶段允许下载基础镜像和 worker 数值依赖；构建完成后执行阶段只接受固定镜像摘要，
 不会因请求参数自动拉取或替换镜像。
 Dockerfile 专用忽略文件只允许核心 Python 源码、工具源码和构建文件进入上下文，
 不传入 `.git`、环境文件、密钥配置、数据和研究缓存。仍应审查源码是否硬编码密钥。
