@@ -18,7 +18,22 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import pandas as pd
+
+
+def _pandas():
+    """Load pandas only for tabular-data paths.
+
+    Mechanistic ODE/optimization workers use this module for unit checking,
+    but do not manipulate DataFrames.  Keeping pandas out of module import is
+    important for the restricted worker: it avoids a large optional runtime
+    dependency and prevents pandas' lazy platform/file discovery from running
+    after the worker audit hook is installed.
+    """
+    try:
+        import pandas as pd
+    except ImportError as exc:  # pragma: no cover - exercised in lean workers
+        raise RuntimeError("tabular_analysis_requires_pandas") from exc
+    return pd
 
 
 _ROLE_TOKEN = r"[0-9A-Za-z_\-\.\u4e00-\u9fff]+"
@@ -40,7 +55,11 @@ def _json_safe(value: Any) -> Any:
         return int(value)
     if isinstance(value, (np.floating,)):
         return float(value) if np.isfinite(value) else None
-    if isinstance(value, (pd.Timestamp, np.datetime64)):
+    value_type = type(value)
+    if isinstance(value, np.datetime64) or (
+        value_type.__module__.startswith("pandas")
+        and value_type.__name__ in {"Timestamp", "Timedelta", "Period"}
+    ):
         return str(value)
     return value
 
@@ -904,6 +923,7 @@ class MathematicalReasoningEngine:
 
     @staticmethod
     def _dataset_manifest(datasets: Mapping[str, pd.DataFrame]) -> List[Dict[str, Any]]:
+        pd = _pandas() if datasets else None
         manifest: List[Dict[str, Any]] = []
         for name, frame in datasets.items():
             source_rows = int(frame.attrs.get("source_rows", len(frame)))
@@ -953,6 +973,7 @@ class MathematicalReasoningEngine:
         targets: Optional[Union[str, Sequence[str]]] = None,
         mechanistic_result: Optional[Mapping[str, Any]] = None,
     ) -> MathematicalModelSpec:
+        pd = _pandas() if datasets else None
         if isinstance(targets, str):
             target_references = [item.strip() for item in re.split(r"[,，;；]", targets) if item.strip()]
         else:
@@ -1430,6 +1451,7 @@ class MathematicalReasoningEngine:
         prose-only formulations.  Refusal is safer than silently changing the
         mathematical problem.
         """
+        pd = _pandas() if datasets else None
         plan = next(
             (item for item in spec.compiler_plan if item.get("task_type") == "optimization"),
             None,
@@ -1815,6 +1837,7 @@ class MathematicalReasoningEngine:
         targets: Sequence[Tuple[str, str]],
         problem_analysis: Mapping[str, Any],
     ) -> Dict[str, Any]:
+        pd = _pandas() if datasets else None
         numeric_columns = sum(
             int(pd.api.types.is_numeric_dtype(frame[column]))
             for frame in datasets.values() for column in frame.columns
