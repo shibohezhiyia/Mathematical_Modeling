@@ -57,12 +57,51 @@ def main() -> None:
         except ImportError:
             pass
         try:
+            import sklearn  # noqa: F401
+            import gplearn  # noqa: F401
+        except ImportError:
+            pass
+        try:
             _install_worker_permissions(os.environ.get("TMPDIR") or os.getcwd())
         except WorkerPermissionError as exc:
             raise SolverRuntimeError("permission_isolation_unavailable") from exc
 
         # Numerical imports happen only after mandatory resource setup.
-        if request["executor_key"] in ("scalar_graph/v1", "scalar_graph_confirm/v1"):
+        if request["executor_key"] in ("modeling_legacy_proxy/v1", "modeling_simple_tools/v1"):
+            from core.modeling_benchmark_suite import legacy_typed_executor_adapter, simple_tool_modeling_adapter
+            if type(request["contract"]) is not dict:
+                raise SolverRuntimeError("invalid_contract")
+            adapter = (legacy_typed_executor_adapter if request["executor_key"] == "modeling_legacy_proxy/v1"
+                       else simple_tool_modeling_adapter)
+            result = adapter(request["contract"], {})
+        elif request["executor_key"] == "automatic_modeling/v1":
+            from core.automatic_modeling import AutomaticModelingError, induce_and_solve_modeling_task
+            if type(request["contract"]) is not dict:
+                raise SolverRuntimeError("invalid_contract")
+            try:
+                result = induce_and_solve_modeling_task(request["contract"])
+            except AutomaticModelingError as exc:
+                result = {
+                    "status": "needs_input", "reason": str(exc),
+                    "usage": {"model_api_calls": 0, "numerical_solver_calls": 0,
+                              "manual_interventions": 0},
+                    "policy": "bounded_schema_induction_failed_safe",
+                }
+        elif request["executor_key"] == "gplearn_symbolic_regression/v1":
+            from core.gplearn_baseline import GPLearnBaselineError, fit_gplearn_baseline
+            if type(request["contract"]) is not dict:
+                raise SolverRuntimeError("invalid_contract")
+            try:
+                result = fit_gplearn_baseline(
+                    request["contract"], maximum_program_evaluations=limits.max_evaluations)
+            except GPLearnBaselineError as exc:
+                result = {
+                    "status": "not_assessed", "reason": str(exc),
+                    "usage": {"model_api_calls": 0, "numerical_solver_calls": 0,
+                              "manual_interventions": 0},
+                    "policy": "optional_mature_baseline_failed_safe",
+                }
+        elif request["executor_key"] in ("scalar_graph/v1", "scalar_graph_confirm/v1"):
             from core.graph_evaluator import evaluate_graph_request
             from core.graph_confirmation import evaluate_frozen_request
             from core.model_hypotheses import HypothesisValidationError

@@ -45,6 +45,7 @@ workspace/**/.api_key
 logs/
 cache/
 temp/
+artifacts/
 *.db
 *.sqlite
 *.sqlite3

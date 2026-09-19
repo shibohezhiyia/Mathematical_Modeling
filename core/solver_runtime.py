@@ -25,6 +25,8 @@ from .shared_resource_quota import SharedResourceQuota
 
 
 SUPPORTED_EXECUTORS = frozenset({
+    "automatic_modeling/v1", "modeling_legacy_proxy/v1", "modeling_simple_tools/v1",
+    "gplearn_symbolic_regression/v1",
     "adaptive_ode/v1", "bounded_nlp/v1", "scalar_graph/v1", "scalar_graph_confirm/v1",
     "linear_ode/v1", "threshold_event/v1", "quadratic_program/v1",
     "distance/v1", "interval_union/v1", "region_membership/v1", "segment_intersection/v1",

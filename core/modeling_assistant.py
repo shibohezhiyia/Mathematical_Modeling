@@ -477,6 +477,12 @@ class MathModelingAssistant:
         max_input_memory_mb: int = 512,
         enable_gnn_screen: bool = False,
         enable_graph_search: bool = False,
+        enable_dynamic_competition: bool = False,
+        enable_automatic_modeling: bool = True,
+        enable_symbolic_portfolio: bool = True,
+        enable_symbolic_discontinuity_gate: bool = True,
+        symbolic_routing_policy: str = "current_then_fallback",
+        symbolic_solver_arm_budget: int = 2,
     ) -> None:
         if output_dir is None:
             self.run_id = create_run_id()
@@ -511,6 +517,16 @@ class MathModelingAssistant:
         self.max_input_memory_mb = int(max_input_memory_mb)
         self.enable_gnn_screen = bool(enable_gnn_screen)
         self.enable_graph_search = bool(enable_graph_search)
+        self.enable_dynamic_competition = bool(enable_dynamic_competition)
+        self.enable_automatic_modeling = bool(enable_automatic_modeling)
+        self.enable_symbolic_portfolio = bool(enable_symbolic_portfolio)
+        self.enable_symbolic_discontinuity_gate = bool(enable_symbolic_discontinuity_gate)
+        if symbolic_routing_policy not in {"current_then_fallback", "evaluate_both"}:
+            raise ValueError("symbolic_routing_policy_invalid")
+        self.symbolic_routing_policy = symbolic_routing_policy
+        if type(symbolic_solver_arm_budget) is not int or symbolic_solver_arm_budget not in {1, 2}:
+            raise ValueError("symbolic_solver_arm_budget_invalid")
+        self.symbolic_solver_arm_budget = symbolic_solver_arm_budget
         self.semantic_compiler = semantic_compiler
         self.hypothesis_generator = hypothesis_generator
         self._datasets: Dict[str, pd.DataFrame] = {}
@@ -600,6 +616,174 @@ class MathModelingAssistant:
             "interaction_graph": any(len(profile.numeric_columns) >= 3 for profile in profiles),
         }
 
+    @staticmethod
+    def _select_graph_search_features(
+        frame: pd.DataFrame,
+        profile: DatasetProfile,
+        target_column: str,
+        *,
+        max_features: int = 4,
+        random_state: int = 42,
+    ) -> Tuple[List[str], Dict[str, Any]]:
+        """Select graph-search inputs without depending on column order.
+
+        The graph-search bridge intentionally has a small (at most four input)
+        grammar.  The old caller satisfied that bound by taking the first four
+        numeric columns, which made a column permutation change the search
+        problem.  Rank all eligible columns using statistics computed from the
+        explicit target and use the column name only as a deterministic tie
+        breaker.  This is a routing heuristic, not a causal claim.
+        """
+        if not isinstance(frame, pd.DataFrame):
+            raise TypeError("frame_must_be_dataframe")
+        if not isinstance(max_features, int) or not 1 <= max_features <= 4:
+            raise ValueError("graph_search_max_features_must_be_one_to_four")
+        if not isinstance(random_state, (int, np.integer)) or not 0 <= int(random_state) < 2**32:
+            raise ValueError("invalid_random_state")
+
+        excluded_columns = []
+        candidates = []
+        for raw_column in profile.numeric_columns:
+            column = str(raw_column)
+            if column == target_column:
+                excluded_columns.append({"column": column, "reason": "explicit_target"})
+            elif column in profile.id_candidates:
+                excluded_columns.append({"column": column, "reason": "entity_or_identifier_candidate"})
+            elif column not in frame.columns:
+                excluded_columns.append({"column": column, "reason": "profile_column_missing_from_frame"})
+            else:
+                candidates.append(column)
+        candidates = sorted(set(candidates))
+        if not candidates:
+            return [], {
+                "method": "stable_target_association_v2",
+                "candidate_count": 0,
+                "selected": [],
+                "excluded_columns": sorted(excluded_columns, key=lambda item: item["column"]),
+                "permutation_invariant": True,
+                "reason": "no_eligible_numeric_features",
+            }
+
+        # Create explicit, row-disjoint selection, execution, and final
+        # partitions.  Only the execution partition is later passed to the
+        # graph bridge (which makes its own train/search split); final rows are
+        # never available to either feature ranking or graph search.
+        indices = np.arange(len(frame), dtype=int)
+        np.random.default_rng(int(random_state)).shuffle(indices)
+        if len(indices) < 9:
+            raise ValueError("graph_search_requires_nine_rows_for_three_way_isolation")
+        final_count = max(1, int(round(len(indices) * 0.2)))
+        selection_count = max(4, int(round(len(indices) * 0.5)))
+        selection_count = min(selection_count, len(indices) - final_count - 4)
+        selection_positions = np.sort(indices[:selection_count])
+        execution_positions = np.sort(indices[selection_count:-final_count])
+        final_positions = np.sort(indices[-final_count:])
+        selection_frame = frame.iloc[selection_positions]
+        target = pd.to_numeric(selection_frame[target_column], errors="coerce")
+        marginal: Dict[str, Tuple[float, float, float]] = {}
+        for column in candidates:
+            values = pd.to_numeric(selection_frame[column], errors="coerce")
+            valid = values.notna() & target.notna() & np.isfinite(values) & np.isfinite(target)
+            count = int(valid.sum())
+            coverage = float(count / max(1, len(selection_frame)))
+            association = 0.0
+            variance = 0.0
+            if count >= 4:
+                x = values[valid]
+                y = target[valid]
+                variance = float(x.var(ddof=0))
+                if variance > 0.0 and float(y.var(ddof=0)) > 0.0:
+                    # Spearman correlation is less sensitive to arbitrary units
+                    # and monotone scale changes than raw Pearson correlation.
+                    corr = x.rank(method="average").corr(y.rank(method="average"))
+                    if corr is not None and np.isfinite(corr):
+                        association = abs(float(corr))
+            marginal[column] = (association, coverage, variance)
+
+        # Detect bounded pure pairwise interactions that have weak marginal
+        # association.  Standardization makes the gain invariant to changing
+        # measurement units.  Wider tables retain an explicit coverage limit
+        # rather than pretending every pair was evaluated.
+        interaction_columns = candidates[:32]
+        interaction_gain = {column: 0.0 for column in candidates}
+        pair_count = 0
+        for left_index, left in enumerate(interaction_columns):
+            for right in interaction_columns[left_index + 1:]:
+                values_left = pd.to_numeric(selection_frame[left], errors="coerce")
+                values_right = pd.to_numeric(selection_frame[right], errors="coerce")
+                valid = (values_left.notna() & values_right.notna() & target.notna()
+                         & np.isfinite(values_left) & np.isfinite(values_right) & np.isfinite(target))
+                if int(valid.sum()) < 8:
+                    continue
+                x_left = values_left[valid].to_numpy(dtype=float)
+                x_right = values_right[valid].to_numpy(dtype=float)
+                observed = target[valid].to_numpy(dtype=float)
+                left_scale, right_scale = float(np.std(x_left)), float(np.std(x_right))
+                observed_variance = float(np.var(observed))
+                if left_scale <= 0 or right_scale <= 0 or observed_variance <= 0:
+                    continue
+                z_left = (x_left - float(np.mean(x_left))) / left_scale
+                z_right = (x_right - float(np.mean(x_right))) / right_scale
+                main = np.column_stack([np.ones(len(observed)), z_left, z_right])
+                extended = np.column_stack([main, z_left * z_right])
+                main_fit, *_ = np.linalg.lstsq(main, observed, rcond=None)
+                extended_fit, *_ = np.linalg.lstsq(extended, observed, rcond=None)
+                main_mse = float(np.mean((main @ main_fit - observed) ** 2))
+                extended_mse = float(np.mean((extended @ extended_fit - observed) ** 2))
+                gain = min(1.0, max(0.0, (main_mse - extended_mse) / observed_variance))
+                interaction_gain[left] = max(interaction_gain[left], gain)
+                interaction_gain[right] = max(interaction_gain[right], gain)
+                pair_count += 1
+
+        ranking: List[Tuple[float, float, float, float, str]] = []
+        for column in candidates:
+            association, coverage, variance = marginal[column]
+            relevance = max(association, interaction_gain[column])
+            # Raw variance is diagnostic only: using it as a tie-break made a
+            # unit conversion capable of changing the selected variables.
+            ranking.append((relevance, association, interaction_gain[column], coverage, column))
+        ranking.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
+        selected = [item[4] for item in ranking[:max_features]]
+        def partition_digest(values: np.ndarray) -> str:
+            return sha256(json.dumps([int(value) for value in values]).encode("utf-8")).hexdigest()
+        return selected, {
+            "method": "stable_target_association_v2",
+            "candidate_count": len(candidates),
+            "selected": selected,
+            "excluded_columns": sorted(excluded_columns, key=lambda item: item["column"]),
+            "permutation_invariant": True,
+            "max_features": max_features,
+            "selection_partition": "deterministic_selection_50_percent",
+            "selection_rows": int(len(selection_frame)),
+            "selection_random_state": int(random_state),
+            "unit_scale_invariant_tiebreak": True,
+            "interaction_screen": {"method": "standardized_pairwise_incremental_mse",
+                                   "candidate_limit": 32,
+                                   "candidate_count_screened": len(interaction_columns),
+                                   "pair_count_evaluated": pair_count,
+                                   "coverage_complete": len(candidates) <= 32},
+            "row_partitions": {
+                "selection": {"count": int(len(selection_positions)),
+                              "position_digest": partition_digest(selection_positions)},
+                "graph_execution": {"count": int(len(execution_positions)),
+                                    "position_digest": partition_digest(execution_positions)},
+                "final_withheld": {"count": int(len(final_positions)),
+                                   "position_digest": partition_digest(final_positions)},
+                "pairwise_disjoint": True,
+                "final_passed_to_search": False,
+            },
+            # Private hand-off for the caller.  It is removed before the audit
+            # is returned to users and never reaches the graph-search worker.
+            "_execution_row_positions": [int(value) for value in execution_positions],
+            "ranking": [
+                {"column": column, "relevance": relevance, "abs_spearman": association,
+                 "pairwise_interaction_gain": gain, "finite_coverage": coverage,
+                 "variance": marginal[column][2]}
+                for relevance, association, gain, coverage, column in ranking
+            ],
+            "causal_status": "not_assessed",
+        }
+
     def run(
         self,
         problem: str,
@@ -610,6 +794,7 @@ class MathModelingAssistant:
         mechanistic_ir: Optional[Mapping[str, Any]] = None,
         problem_images: Optional[Sequence[Mapping[str, Any]]] = None,
         problem_contract: Optional[Any] = None,
+        dynamic_contract: Optional[Mapping[str, Any]] = None,
     ) -> ResearchResult:
         """Analyze the problem and datasets, execute safe analyses, and report."""
         if not problem or not str(problem).strip():
@@ -699,6 +884,34 @@ class MathModelingAssistant:
 
         specialized_results: Dict[str, Any] = {}
         specialized_results["mechanistic_model"] = mechanistic_result
+        # Supplying a typed contract is itself an explicit opt-in.  This keeps
+        # the legacy path quiet for ordinary tabular studies while ensuring
+        # the main research entry cannot silently skip a requested dynamic
+        # competition just because a UI flag was omitted.
+        if self.enable_dynamic_competition or isinstance(dynamic_contract, Mapping):
+            # The main research path now has the same dynamic competition
+            # entry as the dedicated API.  A typed contract is required; the
+            # assistant must not invent candidate cases or targets from prose.
+            if not isinstance(dynamic_contract, Mapping):
+                specialized_results["dynamic_model_competition"] = {
+                    "status": "not_assessed", "reason": "typed_dynamic_contract_required",
+                    "policy": "main_pipeline_never_guesses_candidate_cases",
+                }
+                self._runtime_warnings.append(
+                    "动态模型竞争未执行：启用后必须提供 typed dynamic_contract。"
+                )
+            else:
+                try:
+                    from .dynamic_model_compiler import compile_and_execute_model
+                    specialized_results["dynamic_model_competition"] = compile_and_execute_model(
+                        "dynamic_competition", dynamic_contract,
+                    )
+                except (TypeError, ValueError, KeyError) as exc:
+                    specialized_results["dynamic_model_competition"] = {
+                        "status": "not_assessed", "reason": str(exc)[:160],
+                        "policy": "typed_dynamic_contract_rejected",
+                    }
+                    self._runtime_warnings.append(f"动态模型竞争未完成：{exc}")
         try:
             from .external_method_router import plan_external_methods
             specialized_results["external_method_plan"] = plan_external_methods(
@@ -787,6 +1000,110 @@ class MathModelingAssistant:
             )
         except (TypeError, ValueError) as exc:
             self._runtime_warnings.append(f"候选结构提议未完成，已跳过：{exc}")
+        # Ordinary uploaded record tables can enter the bounded induction path
+        # without requiring users to author dynamic_contract JSON.  Only a
+        # small sampled record envelope is passed; unsupported schemas remain
+        # explicit and do not affect the rest of the research workflow.
+        if self._datasets and self.enable_automatic_modeling:
+            try:
+                from .automatic_modeling import (
+                    AutomaticModelingError, bind_modeling_task,
+                    induce_and_solve_modeling_task_isolated,
+                )
+                table_budget = max(1, 10_000 // min(8, len(self._datasets)))
+                attachments = []
+                for name, frame in list(self._datasets.items())[:8]:
+                    sample = frame.head(table_budget).astype(object).where(pd.notna(frame.head(table_budget)), None)
+                    attachments.append({"name": str(name), "format": "records",
+                                        "rows": sample.to_dict(orient="records")})
+                automatic_payload = {
+                    "attachments": attachments,
+                    "problem": str(problem),
+                }
+                # The ordinary UI already asks users to select a target. Feed
+                # that explicit choice into semantic binding so a business
+                # column need not be renamed to one of the built-in aliases.
+                # Multi-table and multi-target cases stay conservative.
+                if len(target_specs) > 1:
+                    raise AutomaticModelingError("automatic_modeling_requires_single_target")
+                if len(attachments) == 1 and len(target_specs) == 1:
+                    target_spec = target_specs[0]
+                    if "." in target_spec:
+                        target_dataset, target_column = target_spec.split(".", 1)
+                        target_matches_attachment = target_dataset == attachments[0]["name"]
+                    else:
+                        target_column = target_spec
+                        target_matches_attachment = True
+                    row_columns = set(attachments[0]["rows"][0]) if attachments[0]["rows"] else set()
+                    if not target_matches_attachment:
+                        raise AutomaticModelingError("explicit_target_dataset_not_found")
+                    if target_column not in row_columns:
+                        raise AutomaticModelingError("explicit_target_column_not_found")
+                    automatic_payload["response_column"] = target_column
+                binding = bind_modeling_task(automatic_payload)
+                response = binding.get("response_variable")
+                bound_queries = binding.get("bound_query_inputs")
+                eligible = bool(
+                    self.enable_symbolic_portfolio
+                    and binding.get("family") == "modeling_algebra"
+                    and len(attachments) == 1 and len(attachments[0]["rows"]) >= 64
+                    and isinstance(response, str) and response
+                    and isinstance(bound_queries, list) and bound_queries
+                )
+                if eligible:
+                    normalized_rows = []
+                    for row in attachments[0]["rows"]:
+                        if response not in row:
+                            raise ValueError("symbolic_portfolio_response_binding_missing")
+                        normalized = {key: value for key, value in row.items() if key != response}
+                        normalized["response"] = row[response]
+                        normalized_rows.append(normalized)
+                    from .symbolic_portfolio import run_validation_routed_portfolio
+                    try:
+                        portfolio = run_validation_routed_portfolio({
+                            "attachments": [{**attachments[0], "rows": normalized_rows}],
+                            "query_inputs": bound_queries,
+                        }, seed=int(self.random_state),
+                            enable_discontinuity_gate=self.enable_symbolic_discontinuity_gate,
+                            routing_policy=self.symbolic_routing_policy,
+                            solver_arm_budget=self.symbolic_solver_arm_budget)
+                        portfolio["entrypoint"] = "main_research_default_symbolic_portfolio"
+                        portfolio["original_response_variable"] = response
+                        portfolio["binding_evidence"] = binding
+                        if portfolio.get("status") in {"completed", "needs_input"}:
+                            specialized_results["automatic_modeling"] = portfolio
+                        else:
+                            single_solver = induce_and_solve_modeling_task_isolated(automatic_payload)
+                            specialized_results["automatic_modeling"] = single_solver
+                            specialized_results["symbolic_portfolio"] = portfolio
+                            self._runtime_warnings.append(
+                                "符号组合技术执行未完成，已回退单求解器；组合结果不作为可用性判决。"
+                            )
+                    except (TypeError, ValueError, KeyError, RuntimeError) as exc:
+                        single_solver = induce_and_solve_modeling_task_isolated(automatic_payload)
+                        specialized_results["automatic_modeling"] = single_solver
+                        specialized_results["symbolic_portfolio"] = {
+                            "status": "not_assessed", "reason": str(exc),
+                            "result_grade": "not_assessed",
+                            "recommended_action": "use_single_solver_result_and_check_optional_dependency",
+                        }
+                        self._runtime_warnings.append(
+                            "符号组合技术执行未完成，已回退单求解器；组合结果不作为可用性判决。"
+                        )
+                else:
+                    single_solver = induce_and_solve_modeling_task_isolated(automatic_payload)
+                    specialized_results["automatic_modeling"] = single_solver
+                    if self.enable_symbolic_portfolio:
+                        specialized_results["symbolic_portfolio"] = {
+                            "status": "not_applicable",
+                            "reason": "requires_bound_algebra_model_explicit_query_single_table_and_64_rows",
+                            "result_grade": "not_assessed",
+                        }
+            except (AutomaticModelingError, TypeError, ValueError, KeyError, RuntimeError) as exc:
+                specialized_results["automatic_modeling"] = {
+                    "status": "needs_input", "reason": str(exc),
+                    "policy": "bounded_schema_induction_failed_safe",
+                }
         # A real execution bridge is available only when the caller explicitly
         # opts in and names a target.  This prevents the generic assistant from
         # guessing a target/causal direction while allowing an ordinary table
@@ -806,16 +1123,20 @@ class MathModelingAssistant:
                     if dataset_name not in self._datasets or target_column not in self._datasets[dataset_name].columns:
                         raise ValueError("graph_search_target_not_found")
                     profile = self._profiles[dataset_name]
-                    feature_columns = [
-                        column for column in profile.numeric_columns
-                        if column != target_column and column not in profile.id_candidates
-                    ][:4]
+                    feature_columns, feature_selection = self._select_graph_search_features(
+                        self._datasets[dataset_name], profile, target_column,
+                        random_state=self.random_state,
+                    )
                     if not feature_columns:
                         raise ValueError("graph_search_requires_numeric_features")
+                    execution_positions = feature_selection.pop("_execution_row_positions", None)
+                    if not isinstance(execution_positions, list) or len(execution_positions) < 4:
+                        raise ValueError("graph_search_execution_partition_invalid")
+                    execution_frame = self._datasets[dataset_name].iloc[execution_positions]
                     from .data_graph_bridge import build_tabular_graph_bundle
                     from .graph_search_artifacts import run_search_bundle
                     bundle, audit = build_tabular_graph_bundle(
-                        self._datasets[dataset_name], feature_columns, target_column,
+                        execution_frame, feature_columns, target_column,
                         statement=str(problem), max_rows=min(384, self.max_analysis_rows),
                         random_state=self.random_state,
                     )
@@ -824,7 +1145,8 @@ class MathModelingAssistant:
                     )
                     specialized_results["data_graph_search"] = {
                         "dataset": dataset_name, "target": target_column,
-                        "features": feature_columns, "audit": audit,
+                        "features": feature_columns, "feature_selection": feature_selection,
+                        "audit": audit,
                         "result": search_result, "run_directory": str(search_directory),
                         "execution_policy": "explicit_target_typed_graph_search; exploratory_not_causal",
                     }
@@ -1139,6 +1461,15 @@ class MathModelingAssistant:
         ) or (
             primary_task == "optimization" and bool(specialized_results.get("optimization"))
         )
+        dynamic_result = specialized_results.get("dynamic_model_competition")
+        if isinstance(dynamic_result, Mapping) and dynamic_result.get("status") in {
+            "completed", "executed", "validated"
+        }:
+            # Dynamic competition is an executable primary result even when
+            # the natural-language classifier selected a different task.
+            # Keep this explicit so task readiness reflects actual execution,
+            # not merely candidate generation.
+            primary_executed = True
         if primary_task in {"anomaly_detection", "dimension_reduction"}:
             primary_executed = bool(specialized_results.get("data_structure"))
         if primary_task == "data_requirements":

@@ -19,7 +19,7 @@ from typing import Any, Iterable, Mapping
 
 SCHEMA = "mathmodel.evaluation-freeze/v1"
 _ROOTS = ("core", "scripts", "web", "examples")
-_FILES = ("requirements.txt", "pytest.ini", ".env.example")
+_FILES = ("requirements.txt", "requirements-symbolic-baseline.txt", "pytest.ini", ".env.example")
 _SKIP = {"__pycache__", ".pytest_cache", ".git", "node_modules", "data", "workspace"}
 _PACKAGES = ("numpy", "pandas", "scipy", "scikit-learn", "sympy", "torch")
 

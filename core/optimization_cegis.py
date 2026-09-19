@@ -65,7 +65,9 @@ def evaluate_linear_program_candidate(compiled: Mapping[str, Any], cases: Sequen
     if type(tolerance) not in (int, float) or not math.isfinite(float(tolerance)) or tolerance <= 0:
         raise OptimizationCEGISError("lp_tolerance_invalid")
     registry = UniversalSolverRegistry()
-    violations, objectives = [], []
+    violations, objectives, solver_evidence = [], [], []
+    objective_errors: list[float] = []
+    max_constraint_violation = 0.0
     for index, raw_case in enumerate(cases):
         try:
             relation = _scenario(compiled, raw_case)
@@ -74,6 +76,23 @@ def evaluate_linear_program_candidate(compiled: Mapping[str, Any], cases: Sequen
             return {"status": "not_assessed", "failure_code": "lp_solver_failed", "diagnostic": type(exc).__name__, "violations": [], "cost_units": index + 1}
         objective = float(result.get("objective_value"))
         objectives.append(objective)
+        constraint_violation = result.get("maximum_constraint_violation", 0.0)
+        try:
+            constraint_violation = float(constraint_violation)
+        except (TypeError, ValueError):
+            return {"status": "not_assessed", "failure_code": "lp_constraint_audit_invalid", "violations": [], "cost_units": index + 1}
+        if not math.isfinite(constraint_violation):
+            return {"status": "not_assessed", "failure_code": "lp_constraint_audit_nonfinite", "violations": [], "cost_units": index + 1}
+        convergence = result.get("convergence", {})
+        convergence_status = convergence.get("status") if isinstance(convergence, Mapping) else None
+        solver_evidence.append({"case": index, "maximum_constraint_violation": constraint_violation,
+                                "convergence_status": convergence_status})
+        max_constraint_violation = max(max_constraint_violation, constraint_violation)
+        if constraint_violation > float(tolerance):
+            violations.append({"reason": "lp_constraint_violation", "witness_id": str(raw_case.get("id", f"case_{index}"))[:80],
+                               "maximum_constraint_violation": constraint_violation})
+        if convergence_status == "fail":
+            violations.append({"reason": "lp_solver_certificate_failed", "witness_id": str(raw_case.get("id", f"case_{index}"))[:80]})
         expected = raw_case.get("expected_objective") if isinstance(raw_case, Mapping) else None
         if expected is not None:
             try:
@@ -82,9 +101,19 @@ def evaluate_linear_program_candidate(compiled: Mapping[str, Any], cases: Sequen
                 return {"status": "not_assessed", "failure_code": "lp_expected_objective_invalid", "violations": [], "cost_units": index + 1}
             if not math.isfinite(expected_value) or abs(objective - expected_value) > float(tolerance):
                 violations.append({"reason": "lp_objective_deviation", "witness_id": str(raw_case.get("id", f"case_{index}"))[:80], "absolute_error": abs(objective - expected_value)})
+            objective_errors.append(abs(objective - expected_value))
+    metrics: dict[str, float] = {
+        "complexity": float(len(compiled.get("objective_coefficients", []))
+                             + len(compiled.get("A_ub", [])) + len(compiled.get("A_eq", []))),
+        "constraint_violation": max_constraint_violation,
+        "instability": max_constraint_violation,
+    }
+    if objective_errors:
+        metrics["validation_loss"] = float(np.mean(objective_errors))
     return {"status": "pass" if not violations else "fail", "score": float(np.mean(objectives)) if objectives else None,
-            "violations": violations[:16], "cost_units": len(cases),
-            "policy": "validated_linear_program_replay;_not_a_global_model_proof"}
+            "predictions": objectives, "metrics": metrics,
+            "violations": violations[:16], "solver_evidence": solver_evidence[:128], "cost_units": len(cases),
+            "policy": "validated_linear_program_replay;_not_a_global_model_proof;validation_loss_requires_expected_objective"}
 
 
 def diagnose_linear_program_feedback(feedback: Mapping[str, Any]) -> dict[str, Any]:
@@ -173,7 +202,10 @@ def evaluate_optimization_candidate(compiled: Mapping[str, Any], cases: Sequence
     executor = _OPTIMIZATION_KINDS.get(kind)
     if executor is None:
         raise OptimizationCEGISError("optimization_kind_not_supported_by_cegis")
-    registry = UniversalSolverRegistry(); violations = []; objectives = []
+    registry = UniversalSolverRegistry(); violations = []; objectives = []; solver_evidence = []
+    objective_errors: list[float] = []
+    max_constraint_violation = 0.0
+    max_integrality_violation = 0.0
     for index, raw_case in enumerate(cases):
         try:
             result = registry.execute(executor, _optimization_scenario(compiled, raw_case))
@@ -181,6 +213,35 @@ def evaluate_optimization_candidate(compiled: Mapping[str, Any], cases: Sequence
         except Exception as exc:
             return {"status": "not_assessed", "failure_code": "optimization_solver_failed", "diagnostic": type(exc).__name__, "violations": [], "cost_units": index + 1}
         objectives.append(objective)
+        constraint_violation = result.get("maximum_constraint_violation", 0.0)
+        try:
+            constraint_violation = float(constraint_violation)
+        except (TypeError, ValueError):
+            return {"status": "not_assessed", "failure_code": "optimization_constraint_audit_invalid", "violations": [], "cost_units": index + 1}
+        if not math.isfinite(constraint_violation):
+            return {"status": "not_assessed", "failure_code": "optimization_constraint_audit_nonfinite", "violations": [], "cost_units": index + 1}
+        integrality_violation = result.get("maximum_integrality_violation", 0.0)
+        try:
+            integrality_violation = float(integrality_violation)
+        except (TypeError, ValueError):
+            return {"status": "not_assessed", "failure_code": "optimization_integrality_audit_invalid", "violations": [], "cost_units": index + 1}
+        if not math.isfinite(integrality_violation):
+            return {"status": "not_assessed", "failure_code": "optimization_integrality_audit_nonfinite", "violations": [], "cost_units": index + 1}
+        convergence = result.get("convergence", {})
+        convergence_status = convergence.get("status") if isinstance(convergence, Mapping) else None
+        solver_evidence.append({"case": index, "maximum_constraint_violation": constraint_violation,
+                                "maximum_integrality_violation": integrality_violation,
+                                "convergence_status": convergence_status})
+        max_constraint_violation = max(max_constraint_violation, constraint_violation)
+        max_integrality_violation = max(max_integrality_violation, integrality_violation)
+        if constraint_violation > float(tolerance):
+            violations.append({"reason": "optimization_constraint_violation", "witness_id": str(raw_case.get("id", f"case_{index}"))[:80],
+                               "maximum_constraint_violation": constraint_violation})
+        if integrality_violation > float(tolerance):
+            violations.append({"reason": "optimization_integrality_violation", "witness_id": str(raw_case.get("id", f"case_{index}"))[:80],
+                               "maximum_integrality_violation": integrality_violation})
+        if convergence_status == "fail":
+            violations.append({"reason": "optimization_solver_certificate_failed", "witness_id": str(raw_case.get("id", f"case_{index}"))[:80]})
         expected = raw_case.get("expected_objective") if isinstance(raw_case, Mapping) else None
         if expected is not None:
             try:
@@ -189,9 +250,22 @@ def evaluate_optimization_candidate(compiled: Mapping[str, Any], cases: Sequence
                 return {"status": "not_assessed", "failure_code": "optimization_expected_objective_invalid", "violations": [], "cost_units": index + 1}
             if not math.isfinite(expected_value) or abs(objective - expected_value) > float(tolerance):
                 violations.append({"reason": "optimization_objective_deviation", "witness_id": str(raw_case.get("id", f"case_{index}"))[:80], "absolute_error": abs(objective - expected_value)})
+            objective_errors.append(abs(objective - expected_value))
+    complexity = float(len(compiled.get("objective_coefficients", compiled.get("linear_coefficients", [])))
+                       + len(compiled.get("A_ub", [])) + len(compiled.get("A_eq", [])))
+    metrics: dict[str, float] = {
+        "complexity": complexity,
+        "constraint_violation": max(max_constraint_violation, max_integrality_violation),
+        # This is a solver-feasibility margin, not a claim about global
+        # optimization stability.
+        "instability": max(max_constraint_violation, max_integrality_violation),
+    }
+    if objective_errors:
+        metrics["validation_loss"] = float(np.mean(objective_errors))
     return {"status": "pass" if not violations else "fail", "score": float(np.mean(objectives)),
-            "violations": violations[:16], "cost_units": len(cases),
-            "policy": "validated_optimization_contract_replay;_not_a_global_model_proof"}
+            "predictions": objectives, "metrics": metrics,
+            "violations": violations[:16], "solver_evidence": solver_evidence[:128], "cost_units": len(cases),
+            "policy": "validated_optimization_contract_replay;_not_a_global_model_proof;validation_loss_requires_expected_objective"}
 
 
 def patch_optimization_objective(candidate: Mapping[str, Any], diagnostic: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:

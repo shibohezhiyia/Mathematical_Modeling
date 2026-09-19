@@ -10,6 +10,7 @@
 - [Worker 权限与磁盘配额](worker_permissions.md)：允许目录、网络/子进程开关和有界磁盘写入检查；不是 OS 级沙箱。
 - [模型族 CEGIS 适配契约](model_family_adapters.md)：统一编译、评价、诊断、修复和反例重放边界；不冒充各后端已完成。
 - [ODE CEGIS 适配器](ode_cegis.md)：低维多项式 RHS 的受控积分、轨迹反例和系数修复；不是通用微分方程求解器。
+- [动态模型竞争](dynamic_model_competition.md)：先执行 ODE/优化/多表/GNN/外部方法候选的统一 CEGIS，再按显式比较组做保守 Pareto 判决。
 - [线性规划 CEGIS 适配器](optimization_cegis.md)：复用线性规划合同的有限扰动、目标偏差检查和反例修复；不是任意优化器。
 - [USAGE.md](USAGE.md)：Python、Web 界面、多数据集和多模态调用示例。
 - [项目主页](../README.md)：安装、功能概览和最小运行流程。
@@ -22,9 +23,11 @@
 - [规模感知执行路线](backend_planner.md)：按数学结构和规模生成保守执行计划。
 - [模型竞争与判决](model_competition.md)：比较候选并保留未决、反例和结构分歧。
 - [开放模型基准](open_model_bench.md)：公开基准清单和结果记录边界。
+- [自动可判定基准](automated_benchmark.md)：有真值任务、结构/来源留出、等价变换和同预算配对比较；是当前默认评测路线。
+- [当前能力与证据状态](current_capability_evidence.md)：能力、证据、边界和最新端到端建模结果的单一入口。
 - [真实未见题封存基准](blind_benchmark.md)：公开哈希清单、泄漏扫描、固定预算运行和解封计分。
-- [真实未见题统计评估](blind_statistics.md)：独立解封评分、准确率区间和配对显著性检验门槛。
-- [评估来源审计](evaluation_sources.md)：区分公开回归、私有防污染基准和可发表的真实未见题证据。
+- [真实未见题统计评估](blind_statistics.md)：需要项目外封存真值时才启用的条件性扩展，不是算法比较前置。
+- [评估来源审计](evaluation_sources.md)：区分自动真值、公开回归、私有防污染基准和开放式质量补充。
 - [独立未见题登记](holdout_intake.md)：封存前检查题型分层、哈希承诺和出题/评审角色隔离。
 - [外部未公开题与评审合作](external_holdout_outreach.md)：可联系的建模竞赛渠道、所需材料和不可声称边界。
 - [数学工具](dimensional_analysis.md)：无量纲分析、性质检查和梯度校验。
@@ -63,7 +66,7 @@
 - [外部来源注册表](../examples/benchmark_sources.json)：题面、评审量规、研究基准和参考候选的机器可读目录；公开题解不会被当作金标准。可用 `python scripts/list_benchmark_sources.py` 筛选。
 - [外部方法来源与接入边界](external_methods.md)：PySINDy、UDE、LLM-SR、LLM-SRBench 及 2023/2024 COMAP 未见题的可复用入口和严格评测边界。
 - `data/benchmarks/`：公开题源索引与外部研究基准元数据；仅登记来源，不把公开题解/论文分数当作独立金标准。
-- [公开数据标签隔离替代评测](public_holdout_fallback.md)：无法取得封存题和独立评分时的可复现回退方案及证据边界。
+- [公开数据标签隔离评测](public_holdout_fallback.md)：无需外部评委的可复现公开标签评测臂及证据边界。
 - [类型化符号回归](typed_symbolic_regression.md)：JSON 表达式树、参数边界和时间留出执行边界。
 - [外部方法候选路由](external_method_router.md)：根据题目证据规划 SINDy、weak-form、PDE、UDE 和 LLM-SR 候选，不默认假设依赖已安装。
 - [外部方法 CEGIS 执行桥](external_method_cegis.md)：将类型化 PDE/UDE/神经 UDE/LLM-SR 候选接入受限反例修复循环。

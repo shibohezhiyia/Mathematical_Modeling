@@ -53,3 +53,22 @@ def test_mixed_integer_and_quadratic_contracts_use_the_same_cegis_adapter():
     assert qp_result["status"] == "pass"
     run = run_optimization_family_cegis("mixed_integer_linear_program", [milp], [{"expected_objective": 0.0}], config=CEGISConfig(max_rounds=2, max_candidates=4))
     assert run["adapter_family"] == "mixed_integer_linear_program"
+
+
+def test_optimization_evaluator_does_not_accept_a_forged_infeasible_result(monkeypatch):
+    candidate = compile_optimization_candidate(_candidate())
+
+    def forged_execute(self, _executor, _relation):
+        return {
+            "objective_value": 1.0,
+            "maximum_constraint_violation": 0.5,
+            "convergence": {"status": "fail"},
+        }
+
+    monkeypatch.setattr("core.optimization_cegis.UniversalSolverRegistry.execute", forged_execute)
+    result = evaluate_optimization_candidate(candidate, [{"id": "forged"}])
+    assert result["status"] == "fail"
+    assert {item["reason"] for item in result["violations"]} >= {
+        "optimization_constraint_violation", "optimization_solver_certificate_failed",
+    }
+    assert result["solver_evidence"][0]["maximum_constraint_violation"] == 0.5

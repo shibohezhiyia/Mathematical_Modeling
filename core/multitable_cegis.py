@@ -109,18 +109,32 @@ def evaluate_multitable_candidate(compiled: Mapping[str, Any], cases: Sequence[M
         raise MultiTableCEGISError("cases_invalid")
     violations = []
     outputs = []
+    row_errors: list[float] = []
     for idx, case in enumerate(cases):
         frame = materialize_multitable_candidate(compiled)
         expected_rows = case.get("expected_rows")
         if expected_rows is not None and len(frame) != int(expected_rows):
             violations.append({"case": idx, "reason": "row_count_mismatch", "actual": len(frame), "expected": int(expected_rows)})
+            row_errors.append(abs(float(len(frame) - int(expected_rows))))
+        elif expected_rows is not None:
+            row_errors.append(0.0)
         target = case.get("target", compiled.get("target"))
         if target and target not in frame.columns:
             violations.append({"case": idx, "reason": "target_missing", "target": target})
         outputs.append({"rows": len(frame), "columns": list(frame.columns)[:256]})
+    metrics: dict[str, float] = {
+        "complexity": float(len(compiled.get("tables", {})) + len(compiled.get("joins", []))),
+        "constraint_violation": float(max(row_errors, default=0.0)),
+        # This measures observed join-contract violations only; it is not a
+        # statistical stability or causal validity certificate.
+        "instability": float(max(row_errors, default=0.0)),
+    }
+    if row_errors:
+        metrics["validation_loss"] = float(sum(row_errors) / len(row_errors))
     return {"status": "fail" if violations else "pass", "violations": violations,
+            "predictions": [float(item["rows"]) for item in outputs], "metrics": metrics,
             "outputs": outputs, "cost_units": len(cases),
-            "policy": "grain_and_key_checked;_many_to_many_aggregated_before_join"}
+            "policy": "grain_and_key_checked;_many_to_many_aggregated_before_join;validation_loss_requires_expected_rows"}
 
 
 def run_multitable_cegis(candidates: Iterable[Mapping[str, Any]], cases: Sequence[Mapping[str, Any]], *, config: CEGISConfig | None = None) -> dict[str, Any]:

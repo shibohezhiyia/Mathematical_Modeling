@@ -4,7 +4,12 @@ from __future__ import annotations
 from typing import Any
 
 CAPABILITIES: dict[str, dict[str, Any]] = {
+    "problem_statement": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
     "primitive_graph": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
+    "ode_cegis": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
+    "optimization_cegis": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
+    "multitable_cegis": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
+    "dynamic_competition": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
     "ode": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
     "optimization": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},
     "multi_table": {"family": "dynamic", "max_wall_seconds": 600, "isolated": True},

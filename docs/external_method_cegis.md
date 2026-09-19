@@ -1,11 +1,11 @@
 # 外部方法 CEGIS 执行桥
 
-`core.external_method_cegis` 将已存在的类型化 `pde_find`、`ude`、`ude_neural`
+`core.external_method_cegis` 将已存在的类型化 `pde_find`、`ude`、`ude_neural`、`ude_joint`、`ude_stiff`
 和 `llm_sr` 运行器接入统一的 `compile → evaluate → diagnose → patch → replay`
 循环。候选只能是 JSON 方法负载，不接受源码、路径、模块或命令字段。
 
-每个案例必须提供 `max_metric`（例如 PDE 的 `validation_rmse` 或 UDE 的
-`holdout_rmse`）。因此“执行成功”不会自动成为通过；超过独立阈值才记录反例，
+每个案例必须提供 `max_metric`（例如 PDE 的 `validation_rmse`、UDE 的
+`holdout_rmse` 或刚性轨迹的 `trajectory_rmse`，后者还需提供 `observations`）。因此“执行成功”不会自动成为通过；超过独立阈值才记录反例，
 运行器不可用或字段缺失则保留为 `not_assessed`。参数变异仅限稀疏阈值、对流开关、
 岭系数、网络宽度和已声明搜索代数，所有候选都会重新经过下游类型和资源检查。
 

@@ -114,7 +114,13 @@ def evaluate_structure_candidate(
 
 
 def propose_arithmetic_repairs(candidate: Mapping[str, Any], feedback: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Propose bounded constant-only repairs while preserving graph topology."""
+    """Propose bounded arithmetic repairs while preserving graph topology.
+
+    Constants remain the first, cheapest mutation.  If those do not explain a
+    witness, a small operator mutation is also proposed.  The runtime type and
+    dimension gate remains authoritative, so an invalid operator change is
+    rejected rather than silently accepted as a repair.
+    """
     if not isinstance(candidate, Mapping) or not isinstance(feedback, Mapping):
         return []
     graph = candidate.get("primitive_graph")
@@ -140,21 +146,50 @@ def propose_arithmetic_repairs(candidate: Mapping[str, Any], feedback: Mapping[s
             proposals.append(revised)
             if len(proposals) >= 8:
                 return proposals
+    if not bool(feedback.get("allow_structural", False)):
+        return proposals
+    # Structural mutations are deliberately finite and local.  They do not
+    # invent new variables or alter bindings/expected values.
+    operator_mutations = {
+        "add": ("subtract",), "subtract": ("add",),
+        "multiply": ("divide",), "divide": ("multiply",),
+        "minimum": ("maximum",), "maximum": ("minimum",),
+    }
+    for index, node in enumerate(graph["nodes"]):
+        if not isinstance(node, Mapping):
+            continue
+        alternatives = operator_mutations.get(str(node.get("op")), ())
+        if not alternatives or not isinstance(node.get("inputs"), list) or len(node["inputs"]) != 2:
+            continue
+        for operator in alternatives:
+            revised = copy.deepcopy(dict(candidate))
+            revised_node = revised["primitive_graph"]["nodes"][index]
+            revised_node["op"] = operator
+            revised["id"] = f"{candidate.get('id', 'candidate')}_op_{index}_{operator}"
+            proposals.append(revised)
+            if len(proposals) >= 16:
+                return proposals
     return proposals
 
 
 def run_arithmetic_candidate_cegis(
     initial_candidate: Mapping[str, Any], cases: Sequence[Mapping[str, Any]], *,
     config: CEGISConfig | None = None, output_id: str | None = None,
-    tolerance: float = 1e-6,
+    tolerance: float = 1e-6, allow_structural: bool = False,
 ) -> dict[str, Any]:
     """Run a small, deterministic CEGIS loop over constant repairs."""
     if not isinstance(initial_candidate, Mapping):
         raise CandidateExecutionError("candidate_must_be_mapping")
+    if type(allow_structural) is not bool:
+        raise CandidateExecutionError("allow_structural_must_be_boolean")
+    def mutate(candidate: Mapping[str, Any], feedback: Mapping[str, Any]):
+        enriched = dict(feedback)
+        enriched["allow_structural"] = allow_structural
+        return propose_arithmetic_repairs(candidate, enriched)
     return run_cegis(
         [dict(initial_candidate)],
         lambda candidate: evaluate_structure_candidate(candidate, cases, output_id=output_id, tolerance=tolerance),
-        propose_arithmetic_repairs,
+        mutate,
         config=config,
     )
 

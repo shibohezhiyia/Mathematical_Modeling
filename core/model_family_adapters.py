@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .cegis_controller import CEGISConfig, CEGISControllerError, run_cegis
+from .cegis_controller import CEGISConfig, CEGISControllerError, _candidate_hash, run_cegis
 
 
 class ModelFamilyAdapterError(ValueError):
@@ -59,8 +59,15 @@ def run_model_family_cegis(
     if len(frozen_cases) != len(cases):
         raise ModelFamilyAdapterError("case_must_be_mapping")
 
+    candidate_snapshots: dict[str, dict[str, Any]] = {}
+
     def evaluate(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
         try:
+            digest = _candidate_hash(candidate)
+            # Keep only candidates actually sent to the adapter.  This lets a
+            # downstream competition inspect accepted repairs without
+            # serializing the entire search queue or unbounded evaluator data.
+            candidate_snapshots[digest] = dict(candidate)
             compiled = adapter.compile(candidate)
             result = adapter.evaluate(compiled, frozen_cases)
             if not isinstance(result, Mapping):
@@ -91,6 +98,11 @@ def run_model_family_cegis(
     except Exception as exc:
         raise ModelFamilyAdapterError("adapter_loop_failed") from exc
     result["adapter_family"] = adapter.family
+    result["accepted_candidate_snapshots"] = [
+        candidate_snapshots[digest]
+        for digest in result.get("accepted_candidate_hashes", [])
+        if digest in candidate_snapshots
+    ][:32]
     result["policy"] = {**result.get("policy", {}),
                          "compile_before_evaluate": True,
                          "resource_failure_is_not_counterexample": True,

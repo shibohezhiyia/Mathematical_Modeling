@@ -1023,6 +1023,11 @@ def api_research_run():
             hypothesis_generator=hypothesis_generator,
             enable_gnn_screen=request_bool('enable_gnn_screen', False),
             enable_graph_search=request_bool('enable_graph_search', False),
+            enable_dynamic_competition=(
+                request_bool('enable_dynamic_competition', False)
+                or isinstance(data.get('dynamic_contract'), dict)
+            ),
+            enable_symbolic_portfolio=request_bool('enable_symbolic_portfolio', True),
         )
         result = assistant.run(
             problem=description,
@@ -1033,6 +1038,7 @@ def api_research_run():
             mechanistic_ir=data.get('mechanistic_ir'),
             problem_images=problem_images,
             problem_contract=requested_contract,
+            dynamic_contract=data.get('dynamic_contract'),
         ).to_dict()
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError('research_cancelled')
@@ -1059,8 +1065,41 @@ def api_research_run():
                         'graph': raw_controls['graph'],
                         'output_ids': raw_controls.get('output_ids', raw_controls['graph'].get('output_ids', [])),
                     }
+                    if isinstance(data.get('dynamic_contract'), dict):
+                        result['hypothesis_preview_contract']['dynamic_contract'] = data['dynamic_contract']
+                        result['hypothesis_preview_contract']['dynamic_paths'] = raw_controls.get('dynamic_paths', {})
             except (TypeError, ValueError) as exc:
                 result.setdefault('warnings', []).append(f'假设滑块契约未通过，已停用：{type(exc).__name__}')
+        elif isinstance(data.get('dynamic_contract'), dict):
+            # Typed dynamic contracts expose coefficient-level what-if
+            # controls automatically.  This keeps the normal research flow
+            # usable without asking callers to hand-author JSON bindings,
+            # while still restricting edits to an allow-listed numeric field
+            # and routing every preview through the validated runtime.
+            try:
+                from core.hypothesis_controls import build_dynamic_hypothesis_controls
+                generated = build_dynamic_hypothesis_controls(data['dynamic_contract'])
+                if generated.get('controls'):
+                    result['hypothesis_controls'] = {
+                        'schema_version': 'mathmodel.hypothesis-controls/v1',
+                        'status': 'validated',
+                        'controls': generated['controls'],
+                        'node_count': len(generated.get('node_ids', [])),
+                        'policy': generated.get('policy', ''),
+                    }
+                    result['hypothesis_preview_contract'] = {
+                        'controls': generated['controls'],
+                        'bindings': generated['bindings'],
+                        'dynamic_contract': data['dynamic_contract'],
+                        'dynamic_paths': generated['dynamic_paths'],
+                        'output_ids': [],
+                    }
+                    if generated.get('truncated'):
+                        result.setdefault('warnings', []).append(
+                            '动态模型滑块已限制为前 24 个系数；其余参数仍可通过重新提交 typed contract 调整。'
+                        )
+            except (TypeError, ValueError) as exc:
+                result.setdefault('warnings', []).append(f'动态模型滑块自动生成失败，已停用：{type(exc).__name__}')
         for chart in result.get('charts', []):
             try:
                 relative_path = Path(chart['path']).resolve().relative_to(
@@ -1121,8 +1160,14 @@ def api_research_run():
                         'feedback_trials': feedback_trials, 'credibility_audit': request_bool('credibility_audit', True),
                         'enable_gnn_screen': request_bool('enable_gnn_screen', False),
                         'enable_graph_search': request_bool('enable_graph_search', False),
+                        'enable_dynamic_competition': (
+                            request_bool('enable_dynamic_competition', False)
+                            or isinstance(data.get('dynamic_contract'), dict)
+                        ),
+                        'enable_symbolic_portfolio': request_bool('enable_symbolic_portfolio', True),
                         'run_modeling': request_bool('run_modeling', True), 'generate_plots': request_bool('generate_plots', True),
                     },
+                    'dynamic_contract': data.get('dynamic_contract'),
                 }
                 task = _research_process_service.submit_research(
                     session.get('sid', ''), process_payload,
@@ -1193,8 +1238,14 @@ def api_research_run():
                     'max_analysis_rows': max_rows, 'feedback_optimization': request_bool('feedback_optimization', True),
                     'feedback_trials': feedback_trials, 'credibility_audit': request_bool('credibility_audit', True),
                     'enable_gnn_screen': request_bool('enable_gnn_screen', False), 'enable_graph_search': request_bool('enable_graph_search', False),
+                    'enable_dynamic_competition': (
+                        request_bool('enable_dynamic_competition', False)
+                        or isinstance(data.get('dynamic_contract'), dict)
+                    ),
+                    'enable_symbolic_portfolio': request_bool('enable_symbolic_portfolio', True),
                     'run_modeling': request_bool('run_modeling', True), 'generate_plots': request_bool('generate_plots', True),
                 },
+                'dynamic_contract': data.get('dynamic_contract'),
             }
             task = _research_process_service.submit_research(session.get('sid', ''), process_payload, wall_seconds=max(30, min(int(data.get('wall_seconds', 600)), 1800)))
             done = _research_process_service.wait(session.get('sid', ''), task['task_id'], timeout=max(35, min(int(data.get('wall_seconds', 600)) + 10, 1810)))
@@ -1345,7 +1396,10 @@ def api_research_dynamic_compile():
                 task = _dynamic_execution_service.wait(session.get('sid', ''), task['task_id'], timeout=605)
                 if task['status'] != 'completed':
                     return jsonify({'success': False, 'status': task['status'], 'error': task.get('error')}), 504
-                return jsonify(clean_for_json({'success': True, 'result': task.get('result'), 'execution_policy': 'typed_dynamic_spawn_worker'}))
+                response = {'success': True, 'result': task.get('result'), 'execution_policy': 'typed_dynamic_spawn_worker'}
+                if kind == 'dynamic_competition':
+                    response['hypothesis_preview'] = _dynamic_contract_preview_metadata(contract)
+                return jsonify(clean_for_json(response))
         except (TypeError, ValueError) as exc:
             return jsonify({'success': False, 'error': str(exc)}), 409
         return jsonify({'success': True, 'status': task['status'], 'task': task}), 202
@@ -1354,8 +1408,26 @@ def api_research_dynamic_compile():
         result = compile_and_execute_model(kind, contract)
     except (TypeError, ValueError, KeyError) as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
-    return jsonify(clean_for_json({'success': True, 'result': result,
-                                   'execution_policy': 'typed_dynamic_dispatch_no_source_eval'}))
+    response = {'success': True, 'result': result,
+                'execution_policy': 'typed_dynamic_dispatch_no_source_eval'}
+    if kind == 'dynamic_competition':
+        response['hypothesis_preview'] = _dynamic_contract_preview_metadata(contract)
+    return jsonify(clean_for_json(response))
+
+
+def _dynamic_contract_preview_metadata(contract):
+    """Return optional UI controls without making dynamic compile UI-specific."""
+    try:
+        from core.hypothesis_controls import build_dynamic_hypothesis_controls
+        generated = build_dynamic_hypothesis_controls(contract)
+    except (TypeError, ValueError):
+        return {'status': 'not_available', 'controls': [], 'bindings': {}, 'dynamic_paths': {}}
+    if not generated.get('controls'):
+        return {'status': 'not_available', 'controls': [], 'bindings': {}, 'dynamic_paths': {}}
+    return {'status': 'validated', 'controls': generated['controls'],
+            'bindings': generated['bindings'], 'dynamic_paths': generated['dynamic_paths'],
+            'truncated': bool(generated.get('truncated')),
+            'policy': generated.get('policy', '')}
 
 
 @app.route('/api/execution/capabilities', methods=['GET'])
@@ -1432,12 +1504,13 @@ def api_research_structure_candidate_cegis():
         result = run_arithmetic_candidate_cegis(
             candidate, cases, config=config, output_id=payload.get('output_id'),
             tolerance=payload.get('tolerance', 1e-6),
+            allow_structural=payload.get('allow_structural', False),
         )
     except (TypeError, ValueError, KeyError) as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
     return jsonify(clean_for_json({
         'success': True, 'result': result,
-        'execution_policy': 'bounded_arithmetic_cegis_constant_repairs; not_a_proof',
+        'execution_policy': 'bounded_arithmetic_cegis_constant_and_optional_operator_repairs; not_a_proof',
     }))
 
 
@@ -1574,20 +1647,34 @@ def api_research_gnn_interactions():
 
 @app.route('/api/research/causal-discovery', methods=['POST'])
 def api_research_causal_discovery():
-    """Run the bounded order-constrained DAG hypothesis screen."""
+    """Run a bounded DAG or chronological lagged-interaction screen.
+
+    ``time_lags`` selects the temporal route. Its output is predictive
+    evidence for model search, never an intervention effect or causal proof.
+    """
     payload = request.get_json(silent=True) or {}
     try:
-        from core.causal_dag import discover_linear_causal_dag
-        result = discover_linear_causal_dag(
-            payload.get('data'), payload.get('variable_names'),
-            edge_threshold=payload.get('edge_threshold', 0.15),
-            bootstrap=payload.get('bootstrap', 20), max_edges=payload.get('max_edges', 64),
-            random_state=payload.get('random_state', 0),
-        )
+        from core.causal_dag import discover_linear_causal_dag, discover_temporal_causal_graph
+        if payload.get('time_lags') is not None:
+            result = discover_temporal_causal_graph(
+                payload.get('data'), payload.get('variable_names'),
+                max_lag=payload.get('time_lags', 3),
+                edge_threshold=payload.get('edge_threshold', 0.1),
+                min_validation_gain=payload.get('min_validation_gain', 0.0),
+                bootstrap=payload.get('bootstrap', 20), max_edges=payload.get('max_edges', 64),
+                random_state=payload.get('random_state', 0),
+            )
+        else:
+            result = discover_linear_causal_dag(
+                payload.get('data'), payload.get('variable_names'),
+                edge_threshold=payload.get('edge_threshold', 0.15),
+                bootstrap=payload.get('bootstrap', 20), max_edges=payload.get('max_edges', 64),
+                random_state=payload.get('random_state', 0),
+            )
     except (TypeError, ValueError, KeyError) as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
     return jsonify(clean_for_json({'success': True, 'result': result,
-                                   'execution_policy': 'bounded_order_constrained_dag_hypothesis_not_causal_proof'}))
+                                   'execution_policy': result.get('policy', 'bounded_order_constrained_dag_hypothesis_not_causal_proof')}))
 
 
 @app.route('/api/research/evaluation-sources', methods=['GET'])
@@ -2061,7 +2148,13 @@ def api_research_hypothesis_plan():
 
 @app.route('/api/research/hypothesis-preview', methods=['POST'])
 def api_research_hypothesis_preview():
-    """Apply finite slider values and optionally recompute a typed graph."""
+    """Apply finite slider values and recompute a typed graph or model family.
+
+    Dynamic contracts are patched only through an explicit ``dynamic_paths``
+    map (control parameter id -> JSON path).  This keeps slider values as
+    untrusted inputs while allowing the same UI interaction to exercise the
+    dynamic competition backend instead of merely changing a preview label.
+    """
     data = request.get_json(silent=True) or {}
     controls_raw = data.get('controls')
     values, bindings = data.get('values', {}), data.get('bindings', {})
@@ -2080,11 +2173,48 @@ def api_research_hypothesis_preview():
             if not isinstance(output_ids, list):
                 raise ValueError('output_ids_invalid')
             execution = execute_primitive_graph(graph.get('nodes', []), preview['bindings'], output_ids=output_ids)
+        dynamic_execution = None
+        dynamic_contract = data.get('dynamic_contract')
+        dynamic_paths = data.get('dynamic_paths', {})
+        if dynamic_contract is not None:
+            if not isinstance(dynamic_contract, dict) or not isinstance(dynamic_paths, dict):
+                raise ValueError('dynamic_contract_and_paths_must_be_objects')
+            import copy
+            patched_contract = copy.deepcopy(dynamic_contract)
+            for change in preview.get('changes', []):
+                parameter_id = str(change.get('parameter_id', ''))
+                path = dynamic_paths.get(parameter_id)
+                if not isinstance(path, str) or not path or len(path) > 240:
+                    raise ValueError('dynamic_path_missing')
+                parts = path.split('.')
+                if len(parts) > 16 or any(not part or len(part) > 64 for part in parts):
+                    raise ValueError('dynamic_path_invalid')
+                cursor = patched_contract
+                for part in parts[:-1]:
+                    if isinstance(cursor, list):
+                        if not part.isdigit() or int(part) >= len(cursor):
+                            raise ValueError('dynamic_path_index_invalid')
+                        cursor = cursor[int(part)]
+                    elif isinstance(cursor, dict) and part in cursor:
+                        cursor = cursor[part]
+                    else:
+                        raise ValueError('dynamic_path_not_found')
+                leaf = parts[-1]
+                if isinstance(cursor, list):
+                    if not leaf.isdigit() or int(leaf) >= len(cursor):
+                        raise ValueError('dynamic_path_index_invalid')
+                    cursor[int(leaf)] = change['value']
+                elif isinstance(cursor, dict) and leaf in cursor:
+                    cursor[leaf] = change['value']
+                else:
+                    raise ValueError('dynamic_path_not_found')
+            from core.dynamic_model_compiler import compile_and_execute_model
+            dynamic_execution = compile_and_execute_model('dynamic_competition', patched_contract)
     except (TypeError, ValueError, KeyError) as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
     return jsonify(clean_for_json({'success': True, 'controls': contract, 'preview': preview,
-                                   'execution': execution,
-                                   'policy': 'finite_control_values_recomputed_in_typed_runtime'}))
+                                   'execution': execution, 'dynamic_execution': dynamic_execution,
+                                   'policy': 'finite_control_values_recomputed_and_revalidated_in_typed_runtime'}))
 
 
 @app.route('/api/research/cache', methods=['DELETE'])

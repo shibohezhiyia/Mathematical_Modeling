@@ -11,6 +11,8 @@ from __future__ import annotations
 import math
 from typing import Any, Iterable, Mapping, Sequence
 
+import numpy as np
+
 from .cegis_controller import CEGISConfig
 from .external_method_runtime import execute_external_method
 from .model_family_adapters import ModelFamilyAdapter, run_model_family_cegis
@@ -20,12 +22,13 @@ class ExternalMethodCEGISError(ValueError):
     pass
 
 
-_SUPPORTED = frozenset({"pde_find", "ude", "ude_neural", "ude_joint", "llm_sr"})
+_SUPPORTED = frozenset({"pde_find", "ude", "ude_neural", "ude_joint", "ude_stiff", "llm_sr"})
 _METRIC_BY_METHOD = {
     "pde_find": "validation_rmse",
     "ude": "holdout_rmse",
     "ude_neural": "holdout_rmse",
     "ude_joint": "holdout_rmse",
+    "ude_stiff": "trajectory_rmse",
     "llm_sr": "holdout_rmse",
 }
 
@@ -73,6 +76,7 @@ def evaluate_external_method_candidate(
         raise ExternalMethodCEGISError("external_cases_invalid")
     violations: list[dict[str, Any]] = []
     scores: list[float] = []
+    complexity = 0.0
     for index, case in enumerate(cases):
         try:
             payload, bound, metric = _case_payload(compiled, case)
@@ -85,19 +89,41 @@ def evaluate_external_method_candidate(
                     "diagnostic": result.get("reason", result.get("status")),
                     "violations": [], "cost_units": index + 1}
         value = result["result"].get(metric)
+        if metric == "trajectory_rmse" and value is None:
+            observations = case.get("observations") if isinstance(case, Mapping) else None
+            trajectory = result["result"].get("trajectory")
+            try:
+                observed = np.asarray(observations, dtype=float)
+                predicted = np.asarray(trajectory, dtype=float)
+                if observed.shape != predicted.shape or observed.ndim != 2:
+                    raise ValueError("trajectory_shape_mismatch")
+                value = float(np.sqrt(np.mean((predicted - observed) ** 2)))
+            except (TypeError, ValueError, OverflowError):
+                value = None
         if type(value) not in (int, float) or not math.isfinite(float(value)):
             return {"status": "not_assessed", "failure_code": "external_metric_missing",
                     "diagnostic": metric, "violations": [], "cost_units": index + 1}
         value = float(value)
         scores.append(value)
+        complexity = max(complexity, float(len(compiled.get("payload", {}))))
         if value > bound:
             violations.append({"reason": "external_metric_bound_exceeded",
                                "witness_id": str(case.get("id", f"case_{index}"))[:80],
                                "metric": metric, "value": value, "bound": bound})
+    mean_score = float(sum(scores) / len(scores)) if scores else None
     return {"status": "pass" if not violations else "fail",
-            "score": -float(sum(scores) / len(scores)) if scores else None,
+            "score": -mean_score if mean_score is not None else None,
+            "predictions": scores,
+            "metrics": ({
+                "validation_loss": mean_score,
+                "complexity": complexity,
+                "constraint_violation": 0.0,
+                # Finite metric execution is only a numerical guard proxy;
+                # it is not a PDE stability or physical-validity certificate.
+                "instability": 0.0,
+            } if mean_score is not None else {}),
             "violations": violations[:16], "cost_units": len(cases),
-            "policy": "typed_external_method_replay;_independent_metric_bound_required"}
+            "policy": "typed_external_method_replay;_independent_metric_bound_required;instability_not_physical_stability"}
 
 
 def diagnose_external_method_feedback(feedback: Mapping[str, Any]) -> dict[str, Any]:

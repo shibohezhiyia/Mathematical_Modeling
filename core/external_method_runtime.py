@@ -68,6 +68,11 @@ def _certificate(method: str, result: Mapping[str, Any], boundary: Any, assumpti
         values = result.get("validation_weak_form_rmse", ())
     elif method in ("ude", "ude_neural", "ude_joint"):
         values = [result.get("holdout_rmse")]
+    elif method == "ude_stiff":
+        # The stiff simulator returns a trajectory; an external certificate
+        # can only be built when the caller supplies an independently checked
+        # residual field, so leave the value absent rather than inventing one.
+        values = [result.get("trajectory_rmse")]
     elif method in ("pde_find", "llm_sr"):
         values = ([result.get("validation_rmse"), result.get("boundary_rmse"), result.get("forward_rollout_rmse")] if method == "pde_find"
                   else [result.get("holdout_rmse")])

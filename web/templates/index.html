@@ -3,8 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2E86AB">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232E86AB'/%3E%3Cpath d='M16 42h8V25h-8zm12 0h8V16h-8zm12 0h8V31h-8z' fill='white'/%3E%3C/svg%3E">
     <title>Mathematical Modeling - 智能研究助手</title>
-    <script src="{{ url_for('static', filename='vendor/echarts.min.js') }}?v=5.5.0"></script>
+    <script defer src="{{ url_for('static', filename='vendor/echarts.min.js') }}?v=5.5.0"></script>
     <!-- echarts-gl 按需动态加载，默认不引入 -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=16">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/graph_lab.css') }}?v=1">
@@ -18,58 +20,58 @@
         </div>
         <div class="header-right">
             <span id="data-status">未加载数据</span>
-            <button class="btn btn-sm" onclick="toggleDependencyPanel()">📦 依赖管理</button>
-            <button class="btn btn-sm" onclick="toggleSettingsPanel()">⚙️ 设置</button>
-            <button class="btn btn-sm" onclick="resetAll()">🔄 重置</button>
+            <button class="btn btn-sm" id="dependency-toggle" title="依赖管理" aria-label="依赖管理" onclick="toggleDependencyPanel()">📦 依赖管理</button>
+            <button class="btn btn-sm" id="settings-toggle" title="设置" aria-label="设置" onclick="toggleSettingsPanel()">⚙️ 设置</button>
+            <button class="btn btn-sm" id="reset-toggle" title="重置" aria-label="重置" onclick="resetAll()">🔄 重置</button>
         </div>
     </header>
 
     <div class="main-container">
         <!-- 左侧导航 -->
         <nav class="sidebar">
-            <div class="step-item active" data-step="1" onclick="goStep(1)">
+            <div class="step-item active" data-step="1" role="button" tabindex="0" aria-current="step" onclick="goStep(1)">
                 <div class="step-num">1</div>
                 <div class="step-info">
                     <div class="step-title">数据上传</div>
                     <div class="step-desc">CSV / Excel / JSON</div>
                 </div>
             </div>
-            <div class="step-item" data-step="2" onclick="goStep(2)">
+            <div class="step-item" data-step="2" role="button" tabindex="0" onclick="goStep(2)">
                 <div class="step-num">2</div>
                 <div class="step-info">
                     <div class="step-title">数据概览</div>
                     <div class="step-desc">EDA & 类型识别</div>
                 </div>
             </div>
-            <div class="step-item" data-step="3" onclick="goStep(3)">
+            <div class="step-item" data-step="3" role="button" tabindex="0" onclick="goStep(3)">
                 <div class="step-num">2.5</div>
                 <div class="step-info">
                     <div class="step-title">报表设计</div>
                     <div class="step-desc">拖拽 & 组合报表</div>
                 </div>
             </div>
-            <div class="step-item" data-step="4" onclick="goStep(4)">
+            <div class="step-item" data-step="4" role="button" tabindex="0" onclick="goStep(4)">
                 <div class="step-num">3</div>
                 <div class="step-info">
                     <div class="step-title">建模配置</div>
                     <div class="step-desc">策略 & 参数设置</div>
                 </div>
             </div>
-            <div class="step-item" data-step="5" onclick="goStep(5)">
+            <div class="step-item" data-step="5" role="button" tabindex="0" onclick="goStep(5)">
                 <div class="step-num">4</div>
                 <div class="step-info">
                     <div class="step-title">训练与评估</div>
                     <div class="step-desc">自动训练 & 决策</div>
                 </div>
             </div>
-            <div class="step-item" data-step="6" onclick="goStep(6)">
+            <div class="step-item" data-step="6" role="button" tabindex="0" onclick="goStep(6)">
                 <div class="step-num">5</div>
                 <div class="step-info">
                     <div class="step-title">结果可视化</div>
                     <div class="step-desc">图表 & 预测</div>
                 </div>
             </div>
-            <div class="step-item" data-step="7" onclick="goStep(7)">
+            <div class="step-item" data-step="7" role="button" tabindex="0" onclick="goStep(7)">
                 <div class="step-num">6</div>
                 <div class="step-info">
                     <div class="step-title">AI 智能分析</div>
@@ -90,7 +92,7 @@
             <!-- Step 1: 数据上传 -->
             <section class="step-panel active" id="step-1">
                 <h2>📁 数据上传</h2>
-                <div class="upload-area" id="upload-area">
+                <div class="upload-area" id="upload-area" role="button" tabindex="0" aria-label="上传数据文件">
                     <div class="upload-icon">📤</div>
                     <p>拖拽文件到此处，或 <label class="link">点击上传<input type="file" id="file-input" accept=".csv,.xlsx,.xls,.json,.parquet" multiple hidden></label></p>
                     <p class="hint">支持 CSV, Excel(多sheet), JSON, Parquet · 可多选文件</p>
@@ -190,6 +192,11 @@
                         <button class="btn btn-primary" id="research-run-btn" onclick="runResearch()">🚀 一键完成研究</button>
                         <button class="btn btn-secondary hidden" id="research-cancel-btn" onclick="cancelResearch()">⏹ 取消研究</button>
                     </div>
+                    <details class="research-section research-dynamic-contract">
+                        <summary>高级：动态模型竞争合同（可选）</summary>
+                        <p class="hint">普通流程会先尝试从题意和已上传的原始表自动识别受支持的代数、动力学、资源优化或多表模型，无需填写合同。只有需要自定义 ODE、优化、GNN 或 PDE/UDE 候选竞争时才粘贴 typed JSON。</p>
+                        <textarea id="research-dynamic-contract" rows="6" spellcheck="false" placeholder='{"families":[{"family":"ode","comparison_group":"decay","candidates":[],"cases":[]}]} '></textarea>
+                    </details>
                     <div id="problem-result" style="margin-top:12px;display:none;">
                         <div id="problem-result-content"></div>
                     </div>
@@ -564,7 +571,7 @@
                                     <label class="slider-label">点大小倍率 <output id="viz-symbol-size-value">100%</output></label><input id="viz-symbol-size" type="range" min="30" max="250" value="100" oninput="syncInteractiveVizSliders(false)">
                                 </details>
                             </aside>
-                            <main class="interactive-viz-stage">
+                            <div class="interactive-viz-stage" role="region" aria-label="交互式图表区域">
                                 <div class="interactive-viz-stage-head">
                                     <div><span class="interactive-viz-section-kicker">交互验证画布</span><div id="interactive-viz-status" class="interactive-viz-status">正在读取字段画像…</div></div>
                                     <span class="interactive-viz-live-badge"><i></i> 实时探索</span>
@@ -577,7 +584,7 @@
                                     <div class="interactive-viz-insight-boundary"><span>解释边界</span><p id="interactive-viz-insight-boundary">探索图用于发现模式，不自动证明因果、显著性或外推有效性。</p></div>
                                     <div class="interactive-viz-insight-audit"><span>数据审计</span><div id="interactive-viz-audit" class="interactive-viz-audit"></div></div>
                                 </section>
-                            </main>
+                            </div>
                         </div>
                     </div>
                     
@@ -1388,8 +1395,40 @@
         </main>
     </div>
 
+    <!-- 轻量悬浮助手：快捷操作与二次元皮肤开关 -->
+    <aside class="anime-dock" id="anime-dock" aria-label="快捷助手">
+        <button class="anime-dock-toggle" id="anime-dock-toggle" type="button"
+                aria-expanded="false" aria-controls="anime-dock-panel" aria-label="打开快捷助手"
+                onclick="toggleAnimeDock()">🎀</button>
+        <div class="anime-dock-panel" id="anime-dock-panel" hidden>
+            <div class="anime-dock-heading">
+                <div>
+                    <span class="anime-dock-kicker">MODEL MATE</span>
+                    <strong>小建模助手 <span aria-hidden="true">✦</span></strong>
+                </div>
+                <span class="anime-dock-avatar" aria-hidden="true">🌸</span>
+            </div>
+            <div class="anime-dock-status">
+                <span class="anime-dock-status-dot" aria-hidden="true"></span>
+                <span id="anime-current-step">当前：数据上传</span>
+                <span class="anime-dock-divider">·</span>
+                <span id="anime-data-state">等待数据</span>
+            </div>
+            <div class="anime-dock-actions">
+                <button type="button" onclick="animeQuickUpload()"><span aria-hidden="true">📁</span> 上传数据</button>
+                <button type="button" onclick="animeQuickAnalyze()"><span aria-hidden="true">💡</span> 分析题目</button>
+                <button type="button" onclick="toggleLogPanel()"><span aria-hidden="true">📋</span> 打开日志</button>
+            </div>
+            <button class="anime-theme-toggle" id="anime-theme-toggle" type="button"
+                    aria-pressed="false" onclick="toggleAnimeTheme()">
+                <span aria-hidden="true">✨</span><span>开启萌系皮肤</span>
+            </button>
+            <p class="anime-dock-tip" id="anime-dock-tip">先上传一份数据，我们一起开始建模吧～</p>
+        </div>
+    </aside>
+
     <!--  toast 提示 -->
-    <div id="toast" class="toast hidden"></div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <!-- 运行日志面板（终端风格） -->
     <div id="log-panel" class="log-panel-overlay hidden">

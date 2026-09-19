@@ -54,6 +54,8 @@ python -m pytest -q
 - 安全处理一对一、一对多、多对多关系，避免笛卡尔积导致卡死。
 - 支持筛选、派生、聚合、透视、时间特征、窗口统计和跨表特征。
 - 自动分析变量交互、非线性关系、时滞和层级结构。
+- 因果发现入口支持 `time_lags` 的时滞预测筛查：以时间尾部留出和块 bootstrap
+  稳定性给出动态图候选边，明确不把观测相关升级为因果证明。
 - 可按固定字节数与 SHA-256 从官方来源获取外部评测数据：见 [`examples/external_dataset_catalog.json`](examples/external_dataset_catalog.json) 和 [`外部题源说明`](docs/benchmark_sources.md)。
 
 ### 建模与可信度评估
@@ -74,6 +76,7 @@ python -m pytest -q
 ### 可视化与结果管理
 
 - 网页端交互式图表，支持筛选、分面、动画维度和多变量联动。
+- 高级研究模式可提交 typed 动态模型合同，统一触发候选执行、CEGIS 反例修复和 Pareto 比较；普通流程无需填写合同。
 - 研究结果、缓存和临时数据隔离存放，带版本与校验信息。
 - 论文写作不参与求解；只有验证通过的结论才可交给末端写作接口。
 
@@ -84,10 +87,13 @@ python -m pytest -q
 - [数学图搜索](docs/graph_search.md)：受限原语组合、反例重放、等价去重和候选多样性审计。
 - [规模感知执行路线](docs/backend_planner.md)：按 IR 契约和规模选择受控 worker、可信后端或延期执行。
 - [模型竞争与判决](docs/model_competition.md)：保留 Pareto 候选、失败分母和反例阻断，不把分数当概率。
+- [动态模型竞争](docs/dynamic_model_competition.md)：用 typed contract 统一执行 ODE、优化、多表、GNN 与外部 PDE/UDE/LLM-SR 候选；题面入口可透传 `dynamic_contract`。
 - [模型引导的数学图变异](docs/model_guided_graph_mutation.md)：模型只提交受限 IR patch，所有候选仍由类型检查、反例和数值评价器重新判定。
 - [开放模型基准](docs/open_model_bench.md)：开发/未见/结构变换/对抗划分与结果协议。
+- [自动可判定基准](docs/automated_benchmark.md)：公开基准、自建真值任务、结构留出、等价变换与同预算配对比较；不依赖外部评委。
+- [当前能力与证据状态](docs/current_capability_evidence.md)：区分已实现、部分实现、未验收和已过期描述，并公开端到端建模负结果。
 - [真实未见题封存基准](docs/blind_benchmark.md)：题面/答案哈希承诺、泄漏扫描、固定预算运行与解封计分。
-- [真实未见题统计评估](docs/blind_statistics.md)：独立解封评分、准确率区间与配对显著性检验。
+- [真实未见题统计评估](docs/blind_statistics.md)：仅在需要声称“项目外封存真实未见题准确率”时使用的可选扩展。
 - [评估来源审计](docs/evaluation_sources.md)：哪些外部来源能、不能支持真实未见题准确率或显著性结论。
 - [独立未见题登记](docs/holdout_intake.md)：封存前的分层配额、角色隔离和哈希承诺检查。
 - [外部未公开题与评审合作](docs/external_holdout_outreach.md)：获取外部题面和独立评分的合作路径。

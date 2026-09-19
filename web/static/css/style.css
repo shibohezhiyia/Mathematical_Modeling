@@ -14,6 +14,12 @@
     --text-light: #666666;
     --shadow: 0 2px 8px rgba(0,0,0,0.08);
     --radius: 8px;
+    --surface: #ffffff;
+    --surface-alt: #fafbfc;
+    --surface-muted: #f7f9fb;
+    --input-bg: #f8fafc;
+    --primary-light: #e8f4fd;
+    --text-muted: #94a3b8;
 }
 
 /* ==================== Dark Mode ==================== */
@@ -24,6 +30,12 @@
     --text: #e2e8f0;
     --text-light: #94a3b8;
     --shadow: 0 2px 8px rgba(0,0,0,0.3);
+    --surface: #1e293b;
+    --surface-alt: #172235;
+    --surface-muted: #243247;
+    --input-bg: #172235;
+    --primary-light: #183b52;
+    --text-muted: #64748b;
 }
 [data-theme="dark"] body {
     background: var(--bg);
@@ -89,6 +101,22 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+html { color-scheme: light; }
+[data-theme="dark"] { color-scheme: dark; }
+
+button, input, select, textarea { font: inherit; }
+button:focus-visible, [role="button"]:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+summary:focus-visible {
+    outline: 3px solid rgba(46, 134, 171, 0.35);
+    outline-offset: 2px;
+}
+
+button:disabled, input:disabled, select:disabled, textarea:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
     background: var(--bg);
@@ -96,6 +124,8 @@ body {
     min-height: 100vh;
     display: flex;
     flex-direction: column;
+    line-height: 1.5;
+    overflow-x: hidden;
 }
 
 /* ==================== 顶部栏 ==================== */
@@ -145,7 +175,7 @@ body {
     flex-shrink: 0;
     position: sticky;
     top: 0;
-    height: 100vh;
+    height: calc(100vh - 56px);
     align-self: flex-start;
 }
 
@@ -494,7 +524,7 @@ body {
 /* ==================== 主内容区 ==================== */
 .content {
     flex: 1;
-    padding: 24px 32px;
+    padding: 24px 32px 96px;
     overflow-y: auto;
 }
 
@@ -569,6 +599,10 @@ h3 { font-size: 16px; margin-bottom: 12px; color: var(--text); }
 .upload-area:hover, .upload-area.dragover {
     border-color: var(--primary);
     background: #f0f7fb;
+}
+.upload-area[aria-busy="true"] {
+    cursor: progress;
+    opacity: 0.72;
 }
 .upload-icon { font-size: 40px; margin-bottom: 12px; }
 .upload-area p { color: var(--text-light); font-size: 14px; }
@@ -677,6 +711,19 @@ h3 { font-size: 16px; margin-bottom: 12px; color: var(--text); }
     border-radius: 6px;
     font-size: 14px;
     background: white;
+}
+.form-group textarea,
+textarea {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+}
+.form-group textarea:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(46,134,171,0.1);
 }
 .form-group input:focus, .form-group select:focus {
     outline: none;
@@ -1069,6 +1116,216 @@ h3 { font-size: 16px; margin-bottom: 12px; color: var(--text); }
     transition: all 0.3s;
 }
 .toast.show { opacity: 1; transform: translateY(0); }
+.toast-info { background: var(--text); }
+.toast-success { background: var(--success); }
+.toast-error { background: var(--danger); }
+
+/* ==================== 统一主题与移动端体验 ==================== */
+[data-theme="dark"] .form-group input,
+[data-theme="dark"] .form-group select,
+[data-theme="dark"] .upload-area,
+[data-theme="dark"] .upload-area-small,
+[data-theme="dark"] .data-table th,
+[data-theme="dark"] .config-item,
+[data-theme="dark"] .live-leaderboard-item {
+    background: var(--surface-alt);
+    color: var(--text);
+}
+[data-theme="dark"] .data-table tr:hover { background: var(--surface-muted); }
+[data-theme="dark"] .btn-secondary { background: var(--surface-muted); }
+
+@media (max-width: 800px) {
+    .header {
+        height: 56px;
+        padding: 0 12px;
+        gap: 8px;
+    }
+    .header-left { min-width: 0; flex: 1 1 auto; }
+    .logo {
+        min-width: 0;
+        overflow: hidden;
+        font-size: 16px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .subtitle, #data-status { display: none; }
+    .header-right { gap: 4px; }
+    .header-right .btn {
+        width: 36px;
+        min-height: 36px;
+        padding: 7px;
+        justify-content: center;
+        overflow: hidden;
+        font-size: 0;
+    }
+    .header-right .btn::before { font-size: 16px; }
+    #dependency-toggle::before { content: '📦'; }
+    #settings-toggle::before { content: '⚙️'; }
+    #reset-toggle::before { content: '🔄'; }
+
+    .main-container {
+        display: flex;
+        flex-direction: column;
+        height: auto;
+        min-height: calc(100vh - 56px);
+    }
+    .sidebar {
+        position: sticky;
+        top: 56px;
+        z-index: 90;
+        display: flex;
+        width: 100%;
+        height: auto;
+        padding: 8px 10px;
+        gap: 6px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+        scrollbar-width: thin;
+    }
+    .step-item {
+        flex: 0 0 58px;
+        flex-direction: column;
+        gap: 4px;
+        min-height: 52px;
+        margin: 0;
+        padding: 6px 4px;
+        text-align: center;
+    }
+    .step-item.active {
+        border-left: 0;
+        border-bottom: 3px solid var(--primary);
+    }
+    .step-info { display: none; }
+    .sidebar-divider, .sidebar-footer { display: none; }
+    .content {
+        width: 100%;
+        padding: 16px 12px 112px;
+        overflow: visible;
+    }
+    .card { padding: 14px; margin-bottom: 14px; }
+    .form-row { grid-template-columns: 1fr; gap: 12px; }
+    .form-actions, .research-actions { flex-wrap: wrap; }
+    .research-target-input { min-width: 100%; }
+    .research-controls .btn { flex: 1 1 auto; }
+    .config-display { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .upload-area { padding: 32px 16px; }
+    .chart-container { min-height: 280px; padding: 12px; }
+    .modal-overlay { align-items: flex-start; padding: 12px; overflow-y: auto; }
+    .modal-content, .modal-container { max-width: 100%; max-height: calc(100vh - 24px); }
+    .settings-container {
+        width: 100%;
+        height: calc(100vh - 24px);
+        max-height: calc(100vh - 24px);
+    }
+    .log-panel-container {
+        width: 100%;
+        height: calc(100vh - 24px);
+        max-height: calc(100vh - 24px);
+    }
+    .log-panel-header { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+    .log-panel-actions { flex: 1 1 100%; flex-wrap: wrap; gap: 6px; }
+}
+
+@media (max-width: 480px) {
+    .logo { font-size: 14px; }
+    .header-right .btn { width: 34px; padding-inline: 5px; }
+    h2 { font-size: 20px; margin-bottom: 14px; }
+    .btn { padding: 9px 12px; }
+    .config-display { grid-template-columns: 1fr; }
+    .research-hero { flex-direction: column; padding: 16px; }
+    .research-score { align-self: flex-end; }
+    .research-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .research-controls .btn { flex-basis: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* ==================== 二次元工作台与悬浮小组件 ==================== */
+.anime-dock {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    z-index: 300;
+    font-size: 13px;
+}
+.anime-dock-toggle {
+    display: grid;
+    place-items: center;
+    width: 52px;
+    height: 52px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    color: #fff;
+    background: linear-gradient(145deg, #f59bc2, #9d8bea);
+    box-shadow: 0 8px 24px rgba(120, 86, 151, .3), 0 0 0 5px rgba(245, 155, 194, .16);
+    cursor: pointer;
+    font-size: 23px;
+    transition: transform .2s ease, box-shadow .2s ease;
+}
+.anime-dock-toggle:hover { transform: translateY(-3px) rotate(-5deg); box-shadow: 0 12px 28px rgba(120, 86, 151, .35), 0 0 0 6px rgba(245, 155, 194, .2); }
+.anime-dock-toggle[aria-expanded="true"] { transform: rotate(12deg); }
+.anime-dock-panel {
+    position: absolute;
+    right: 0;
+    bottom: 64px;
+    width: min(300px, calc(100vw - 28px));
+    padding: 16px;
+    border: 1px solid #efd5e7;
+    border-radius: 18px;
+    background: linear-gradient(155deg, rgba(255,255,255,.98), rgba(255,247,252,.98));
+    box-shadow: 0 18px 46px rgba(89, 64, 108, .2);
+    color: #4d4260;
+    animation: animeDockIn .18s ease-out;
+}
+.anime-dock-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 11px; }
+.anime-dock-heading strong { display: block; color: #76558c; font-size: 15px; }
+.anime-dock-kicker { display: block; margin-bottom: 2px; color: #c584aa; font-size: 9px; font-weight: 800; letter-spacing: .16em; }
+.anime-dock-avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 12px; background: #fff0f7; font-size: 20px; }
+.anime-dock-status { display: flex; align-items: center; gap: 6px; padding: 8px 9px; border: 1px solid #f1deea; border-radius: 10px; color: #887592; background: #fffafd; font-size: 11px; }
+.anime-dock-status-dot { width: 7px; height: 7px; border-radius: 50%; background: #f59bc2; box-shadow: 0 0 0 3px rgba(245,155,194,.14); }
+.anime-dock-divider { color: #d7bed2; }
+.anime-dock-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 11px; }
+.anime-dock-actions button, .anime-theme-toggle { border: 1px solid #ecd8e8; border-radius: 10px; color: #705b7e; background: #fff; cursor: pointer; font-size: 11px; }
+.anime-dock-actions button { min-height: 58px; padding: 7px 4px; }
+.anime-dock-actions button span { display: block; margin-bottom: 3px; font-size: 17px; }
+.anime-dock-actions button:hover, .anime-theme-toggle:hover { border-color: #e3a5c5; color: #b25e8e; background: #fff6fb; }
+.anime-theme-toggle { display: flex; align-items: center; justify-content: center; gap: 5px; width: 100%; min-height: 34px; margin-top: 9px; }
+.anime-theme-toggle[aria-pressed="true"] { border-color: #dfa0c0; color: #a24d80; background: #fff0f7; }
+.anime-dock-tip { margin: 10px 1px 0; color: #9b899f; font-size: 11px; line-height: 1.5; }
+@keyframes animeDockIn { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+body.anime-theme {
+    --primary: #d85b96;
+    --primary-dark: #b9477b;
+    --secondary: #8977d9;
+    --bg: #fff6fb;
+    --border: #efdce8;
+    --shadow: 0 8px 24px rgba(153, 93, 132, .1);
+    background-image: radial-gradient(circle at 9% 13%, rgba(255, 196, 223, .22), transparent 22%), radial-gradient(circle at 92% 78%, rgba(195, 184, 255, .18), transparent 24%);
+    background-attachment: fixed;
+}
+body.anime-theme .card { border-radius: 15px; }
+body.anime-theme .upload-area { border-color: #e9b9d2; background: linear-gradient(145deg, #fffafe, #fff2f8); }
+body.anime-theme .upload-area:hover, body.anime-theme .upload-area.dragover { border-color: var(--primary); background: #ffedf6; }
+body.anime-theme .step-item.active { background: #fff0f7; }
+body.anime-theme .research-card { border-color: #efc4db; background: linear-gradient(145deg, #fff, #fff5fa); }
+
+@media (max-width: 800px) {
+    .anime-dock { right: 14px; bottom: 14px; }
+    .anime-dock-panel { bottom: 60px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .anime-dock-panel { animation: none; }
+}
 
 /* ==================== 覆盖选项 ==================== */
 .override-option {
@@ -3272,4 +3529,64 @@ input[type="range"] {
     gap: 8px;
     padding: 12px 20px;
     border-top: 1px solid var(--border);
+}
+
+/* 最终层级覆盖：避免悬浮助手、Toast、日志与弹窗互相遮挡 */
+.anime-dock { z-index: 600; }
+.log-panel-overlay { z-index: 1000; }
+.modal-overlay { z-index: 1100; }
+.toast {
+    right: 24px;
+    bottom: 88px;
+    z-index: 1200;
+    width: min(420px, calc(100vw - 32px));
+    max-width: calc(100vw - 32px);
+    overflow-wrap: anywhere;
+}
+.modal-header { gap: 12px; flex-wrap: wrap; }
+.modal-header h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.modal-header > button:last-child { flex: 0 0 auto; }
+
+@media (max-width: 800px) {
+    .modal-overlay { align-items: flex-start; padding: 12px; overflow-y: auto; }
+    .modal-content, .modal-container { max-width: 100%; max-height: calc(100vh - 24px); }
+    .settings-container, .log-panel-container {
+        width: 100%;
+        height: calc(100vh - 24px);
+        max-height: calc(100vh - 24px);
+    }
+    .log-panel-header { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+    .log-panel-actions { flex: 1 1 100%; flex-wrap: wrap; gap: 6px; }
+}
+
+@media (max-width: 600px) {
+    .settings-body { flex-direction: column; }
+    .settings-tabs {
+        width: 100%;
+        flex: 0 0 auto;
+        flex-direction: row;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+        padding: 0;
+        scrollbar-width: thin;
+    }
+    .settings-tab-btn {
+        flex: 0 0 auto;
+        white-space: nowrap;
+        padding: 10px 12px;
+        border-left: 0;
+        border-bottom: 3px solid transparent;
+    }
+    .settings-tab-btn.active { border-left: 0; border-bottom-color: var(--primary); }
+    .settings-content { min-height: 0; padding: 16px; }
+    .settings-footer { flex-wrap: wrap; padding: 10px 12px; }
+    .settings-footer .btn { flex: 1 1 120px; }
+    .log-panel-header { padding: 10px 12px; }
+    .log-panel-actions .btn { flex: 1 1 auto; }
+}
+
+@media (max-width: 480px) {
+    .toast { right: 16px; bottom: 78px; }
+    .anime-dock { right: 12px; bottom: 12px; }
 }

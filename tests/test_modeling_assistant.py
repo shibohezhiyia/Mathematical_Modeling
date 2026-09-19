@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from core.modeling_assistant import (
     DatasetRelation,
@@ -72,7 +73,241 @@ def test_explicit_graph_search_opt_in_executes_typed_bridge(monkeypatch, tmp_pat
     bridge = result.specialized_results["data_graph_search"]
     assert bridge["target"] == "target"
     assert bridge["features"] == ["x1", "x2"]
+    assert bridge["feature_selection"]["method"] == "stable_target_association_v2"
+    assert bridge["feature_selection"]["permutation_invariant"] is True
+    assert bridge["feature_selection"]["row_partitions"]["pairwise_disjoint"] is True
+    assert bridge["feature_selection"]["row_partitions"]["final_passed_to_search"] is False
+    assert bridge["audit"]["rows_input"] == bridge["feature_selection"]["row_partitions"]["graph_execution"]["count"]
     assert bridge["audit"]["causal_status"] == "not_assessed"
+
+
+def test_graph_search_feature_selection_is_stable_under_column_permutation():
+    rng = np.random.default_rng(12)
+    n = 80
+    signal = np.linspace(-2.0, 2.0, n)
+    frame = pd.DataFrame({
+        "noise_a": rng.normal(size=n),
+        "noise_b": rng.normal(size=n),
+        "signal": signal,
+        "weak": signal * 0.2 + rng.normal(scale=1.5, size=n),
+        "noise_c": rng.normal(size=n),
+        "target": signal * 3.0 + rng.normal(scale=0.05, size=n),
+    })
+    assistant = MathModelingAssistant(feedback_optimization=False)
+    assistant._datasets = {"data": frame}
+    assistant.profile_datasets("根据数据预测 target")
+    profile = assistant._profiles["data"]
+
+    first, first_audit = assistant._select_graph_search_features(frame, profile, "target")
+    permuted = frame[["target", "noise_c", "weak", "signal", "noise_a", "noise_b"]]
+    second, second_audit = assistant._select_graph_search_features(permuted, profile, "target")
+
+    assert first == second
+    assert first[0] == "signal"
+    assert first_audit["permutation_invariant"] is True
+    assert second_audit["selected"] == first
+    assert {item["reason"] for item in first_audit["excluded_columns"]} == {"explicit_target"}
+
+
+def test_graph_search_feature_tiebreak_is_invariant_to_unit_scaling():
+    values = np.linspace(1.0, 20.0, 40)
+    frame = pd.DataFrame({"a": values, "b": values * 1_000_000.0,
+                          "target": values * 2.0})
+    assistant = MathModelingAssistant(feedback_optimization=False)
+    assistant._datasets = {"data": frame}
+    assistant.profile_datasets("根据数据预测 target")
+    profile = assistant._profiles["data"]
+
+    selected, audit = assistant._select_graph_search_features(
+        frame, profile, "target", max_features=1,
+    )
+    rescaled = frame.assign(a=frame["a"] * 1e12, b=frame["b"] * 1e-9)
+    selected_after_scale, _ = assistant._select_graph_search_features(
+        rescaled, profile, "target", max_features=1,
+    )
+    assert selected == selected_after_scale == ["a"]
+    assert audit["unit_scale_invariant_tiebreak"] is True
+    assert audit["row_partitions"]["final_withheld"]["count"] > 0
+
+
+def test_graph_search_feature_selection_recovers_pure_pairwise_interaction():
+    rng = np.random.default_rng(991)
+    size = 240
+    x1 = rng.choice([-1.0, 1.0], size=size)
+    x2 = rng.choice([-1.0, 1.0], size=size)
+    frame = pd.DataFrame({"noise_a": rng.normal(size=size), "x1": x1,
+                          "noise_b": rng.normal(size=size), "x2": x2,
+                          "noise_c": rng.normal(size=size), "target": x1 * x2})
+    assistant = MathModelingAssistant(feedback_optimization=False)
+    assistant._datasets = {"data": frame}
+    assistant.profile_datasets("预测 target")
+    selected, audit = assistant._select_graph_search_features(
+        frame, assistant._profiles["data"], "target", max_features=2,
+    )
+    assert set(selected) == {"x1", "x2"}
+    ranking = {item["column"]: item for item in audit["ranking"]}
+    assert ranking["x1"]["pairwise_interaction_gain"] > 0.9
+    assert ranking["x2"]["pairwise_interaction_gain"] > 0.9
+    assert audit["interaction_screen"]["coverage_complete"] is True
+
+
+def test_ordinary_research_flow_attempts_raw_table_modeling_without_dynamic_contract(tmp_path):
+    products = pd.DataFrame([
+        {"item": "A", "profit": 6.0, "labor": 2.0, "material": 1.0},
+        {"item": "B", "profit": 5.0, "labor": 1.0, "material": 2.0},
+    ])
+    capacities = pd.DataFrame([
+        {"resource": "labor", "capacity": 8.0},
+        {"resource": "material", "capacity": 8.0},
+    ])
+    result = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False).run(
+        "决定各产品非负生产量，在资源容量内最大化总利润。",
+        {"products": products, "capacities": capacities},
+        run_modeling=False, generate_plots=False,
+    )
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["status"] == "completed"
+    assert modeled["model"]["structure"] == "resource_allocation_lp"
+    assert modeled["objective"] == pytest.approx(88.0 / 3.0)
+    assert "dynamic_model_competition" not in result.specialized_results
+
+
+def test_ordinary_research_flow_binds_explicit_prediction_query_from_problem(tmp_path):
+    observations = pd.DataFrame({
+        "input": [-3.0, -1.0, 0.0, 2.0, 4.0],
+        "observed_value": [-8.5, -3.5, -1.0, 4.0, 9.0],
+    })
+    result = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False).run(
+        "根据观测识别关系，并预测 input = 5 时的 observed_value。",
+        {"measurements": observations}, run_modeling=False, generate_plots=False,
+    )
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["status"] == "completed"
+    assert modeled["model"]["response_variable"] == "observed_value"
+    assert modeled["predictions"] == pytest.approx([11.5])
+
+
+def test_main_research_uses_validated_symbolic_portfolio_by_default(tmp_path, monkeypatch):
+    observations = pd.DataFrame({
+        "input": np.linspace(-4.0, 4.0, 80),
+        "observed_value": 2.5 * np.linspace(-4.0, 4.0, 80) - 1.0,
+    })
+    seen = []
+    def portfolio(payload, *, seed, enable_discontinuity_gate, routing_policy):
+        seen.append((payload, seed, enable_discontinuity_gate, routing_policy))
+        return {"status": "completed", "family": "modeling_algebra",
+                "result_grade": "validated_candidate", "recommended_action": "use_with_stated_scope",
+                "model": {"structure": "affine", "input_variables": ["input"],
+                          "coefficients": [2.5, -1.0]}, "predictions": [11.5]}
+    monkeypatch.setattr("core.symbolic_portfolio.run_validation_routed_portfolio", portfolio)
+    monkeypatch.setattr(
+        "core.automatic_modeling.induce_and_solve_modeling_task_isolated",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("preliminary_solver_must_not_run")),
+    )
+    result = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False).run(
+        "根据观测识别关系，并预测 input = 5 时的 observed_value。",
+        {"measurements": observations}, run_modeling=False, generate_plots=False,
+    )
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["entrypoint"] == "main_research_default_symbolic_portfolio"
+    assert modeled["result_grade"] == "validated_candidate"
+    assert modeled["original_response_variable"] == "observed_value"
+    assert "automatic_modeling_single_solver" not in result.specialized_results
+    assert seen[0][0]["attachments"][0]["rows"][0].get("response") is not None
+    assert "observed_value" not in seen[0][0]["attachments"][0]["rows"][0]
+    assert seen[0][2] is True
+    assert seen[0][3] == "current_then_fallback"
+
+
+def test_main_research_forwards_explicit_target_for_non_alias_response(tmp_path, monkeypatch):
+    temperatures = np.linspace(-4.0, 4.0, 80)
+    observations = pd.DataFrame({
+        "temperature": temperatures,
+        "net_demand_kw": 3.0 * temperatures + 2.0,
+    })
+    seen = []
+    def portfolio(payload, *, seed, enable_discontinuity_gate, routing_policy):
+        seen.append(payload)
+        return {"status": "completed", "family": "modeling_algebra",
+                "result_grade": "validated_candidate", "recommended_action": "use_with_stated_scope",
+                "model": {"structure": "affine", "input_variables": ["temperature"],
+                          "coefficients": [3.0, 2.0]}, "predictions": [17.0]}
+    monkeypatch.setattr("core.symbolic_portfolio.run_validation_routed_portfolio", portfolio)
+    result = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False).run(
+        "根据观测识别关系，并预测 temperature = 5 时的净需求。",
+        {"meter_readings": observations}, target="net_demand_kw",
+        run_modeling=False, generate_plots=False,
+    )
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["status"] == "completed"
+    assert modeled["original_response_variable"] == "net_demand_kw"
+    assert modeled["predictions"] == [17.0]
+    assert seen[0]["attachments"][0]["rows"][0]["response"] == pytest.approx(
+        observations.iloc[0]["net_demand_kw"])
+
+
+@pytest.mark.parametrize(
+    "target, expected_reason",
+    [
+        ("missing_target", "explicit_target_column_not_found"),
+        (["net_demand_kw", "temperature"], "automatic_modeling_requires_single_target"),
+        ("other_table.net_demand_kw", "explicit_target_dataset_not_found"),
+    ],
+)
+def test_main_research_rejects_unsupported_explicit_target_binding(
+    tmp_path, target, expected_reason,
+):
+    observations = pd.DataFrame({
+        "temperature": [-1.0, 0.0, 1.0, 2.0],
+        "net_demand_kw": [-1.0, 2.0, 5.0, 8.0],
+    })
+    result = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False).run(
+        "根据观测识别关系，并预测 temperature = 5 时的净需求。",
+        {"meter_readings": observations}, target=target,
+        run_modeling=False, generate_plots=False,
+    )
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["status"] == "needs_input"
+    assert modeled["reason"] == expected_reason
+
+
+def test_main_research_exposes_portfolio_abstention_as_the_default_decision(tmp_path, monkeypatch):
+    x = np.linspace(-4.0, 4.0, 80)
+    observations = pd.DataFrame({"input": x, "observed_value": 2.5 * x - 1.0})
+    monkeypatch.setattr("core.symbolic_portfolio.run_validation_routed_portfolio", lambda *_args, **_kwargs: {
+        "status": "needs_input", "reason": "portfolio_no_validated_candidate",
+        "result_grade": "abstain",
+        "recommended_action": "collect_more_observations_or_expand_declared_model_scope",
+    })
+    result = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False).run(
+        "根据观测识别关系，并预测 input = 5 时的 observed_value。",
+        {"measurements": observations}, run_modeling=False, generate_plots=False,
+    )
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["status"] == "needs_input"
+    assert modeled["result_grade"] == "abstain"
+    assert modeled["recommended_action"].startswith("collect_more_observations")
+    assert "automatic_modeling_single_solver" not in result.specialized_results
+
+
+def test_main_research_uses_exploratory_single_solver_only_after_portfolio_technical_failure(
+    tmp_path, monkeypatch,
+):
+    x = np.linspace(-4.0, 4.0, 80)
+    observations = pd.DataFrame({"input": x, "observed_value": 2.5 * x - 1.0})
+    monkeypatch.setattr("core.symbolic_portfolio.run_validation_routed_portfolio", lambda *_args, **_kwargs: {
+        "status": "not_assessed", "reason": "portfolio_all_arms_failed",
+        "result_grade": "not_assessed", "recommended_action": "resolve_solver_failure",
+    })
+    result = MathModelingAssistant(output_dir=str(tmp_path), feedback_optimization=False).run(
+        "根据观测识别关系，并预测 input = 5 时的 observed_value。",
+        {"measurements": observations}, run_modeling=False, generate_plots=False,
+    )
+    assert result.specialized_results["symbolic_portfolio"]["status"] == "not_assessed"
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["status"] == "completed"
+    assert modeled["predictions"] == pytest.approx([11.5])
+    assert modeled.get("result_grade") != "validated_candidate"
 
 
 def test_research_result_includes_conservative_external_method_plan(tmp_path):
@@ -1224,6 +1459,35 @@ def test_custom_analyzer_is_extensible_and_failure_is_isolated(tmp_path):
     )
     assert Path(degraded.report_path).is_file()
     assert any("扩展分析器" in warning and "已隔离" in warning for warning in degraded.warnings)
+
+
+def test_main_research_pipeline_executes_typed_dynamic_competition(tmp_path):
+    """The opt-in dynamic route must be reachable from the main assistant."""
+    contract = {
+        "families": [{
+            "family": "ode", "comparison_group": "decay",
+            "candidates": [{
+                "id": "decay", "state_dim": 1, "basis": ["linear"],
+                "coefficients": [[-0.5]],
+            }],
+            "cases": [{
+                "times": [0.0, 0.5, 1.0], "initial": [1.0],
+                "observations": [[1.0], [0.7788008], [0.6065307]],
+            }],
+        }],
+        "cegis_config": {"max_rounds": 1, "max_candidates": 2, "max_repairs": 0},
+    }
+    result = MathModelingAssistant(
+        output_dir=str(tmp_path), feedback_optimization=False,
+        enable_dynamic_competition=True,
+    ).run(
+        "模拟一个衰减过程并评估模型",
+        datasets={}, run_modeling=False, generate_plots=False,
+        dynamic_contract=contract,
+    )
+    dynamic = result.specialized_results["dynamic_model_competition"]
+    assert dynamic["status"] == "completed"
+    assert dynamic["result"]["candidate_count"] == 1
 
 
 def test_credibility_audit_rejects_a_target_copy_even_when_score_is_high(tmp_path):

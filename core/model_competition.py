@@ -14,9 +14,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from .model_family_adapters import ModelFamilyAdapter, run_model_family_cegis
 from .model_set_assessment import ModelSetAssessmentError, assess_model_set
 from .model_verdict import build_model_verdict
 from .staged_evaluation import StageSpec, run_staged_evaluation
+from .cegis_controller import CEGISConfig, _candidate_hash
 
 
 class ModelCompetitionError(ValueError):
@@ -209,4 +211,158 @@ def compete_models_staged(
     }
 
 
-__all__ = ["ModelCompetitionError", "compete_models", "compete_models_staged"]
+def compete_dynamic_families(
+    families: Sequence[Mapping[str, Any]], *,
+    config: CEGISConfig | None = None,
+    counterexamples: Sequence[Mapping[str, Any]] = (),
+    uncertainty: Mapping[str, Any] | None = None,
+    assumptions: Sequence[str] = (),
+    next_questions: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Execute and compare multiple mathematical model families.
+
+    Each item must contain ``family``, a :class:`ModelFamilyAdapter`,
+    ``initial_candidates`` and immutable ``cases``.  An optional
+    ``metric_builder(candidate, evaluation)`` must return the same explicit
+    ``predictions`` and ``metrics`` contract accepted by :func:`compete_models`.
+    There is intentionally no guessed cross-family metric: if a backend does
+    not expose comparable evidence, its candidate remains unresolved.  This
+    prevents an ODE RMSE, an optimization objective and a table-model score
+    from being silently treated as the same quantity.
+
+    CEGIS is run before the final comparison so repair evidence and budget
+    exhaustion are visible alongside the Pareto result.  A CEGIS ``pass`` is
+    eligibility evidence, never an approval certificate.
+    """
+    if not isinstance(families, Sequence) or isinstance(families, (str, bytes)):
+        raise ModelCompetitionError("dynamic_families_must_be_a_sequence")
+    if not 1 <= len(families) <= 16:
+        raise ModelCompetitionError("dynamic_family_count_out_of_bounds")
+    config = config or CEGISConfig()
+    groups: dict[str, list[dict[str, Any]]] = {}
+    family_reports: list[dict[str, Any]] = []
+    for family_index, spec in enumerate(families):
+        if not isinstance(spec, Mapping):
+            raise ModelCompetitionError("dynamic_family_must_be_a_mapping")
+        family = str(spec.get("family", "")).strip()
+        adapter = spec.get("adapter")
+        if not family or len(family) > 80 or not isinstance(adapter, ModelFamilyAdapter):
+            raise ModelCompetitionError("dynamic_family_contract_invalid")
+        adapter.validate()
+        initial = spec.get("initial_candidates")
+        cases = spec.get("cases")
+        if not isinstance(initial, Sequence) or isinstance(initial, (str, bytes)) or not initial:
+            raise ModelCompetitionError("dynamic_initial_candidates_invalid")
+        if not isinstance(cases, Sequence) or isinstance(cases, (str, bytes)):
+            raise ModelCompetitionError("dynamic_cases_invalid")
+        metric_builder = spec.get("metric_builder")
+        if metric_builder is not None and not callable(metric_builder):
+            raise ModelCompetitionError("dynamic_metric_builder_invalid")
+        comparison_group = str(spec.get("comparison_group", family)).strip()[:80] or family
+        try:
+            cegis = run_model_family_cegis(adapter, initial, cases, config=config)
+        except Exception as exc:
+            cegis = {
+                "status": "not_assessed", "adapter_family": family,
+                "failure_code": "dynamic_cegis_failed",
+                "diagnostic": type(exc).__name__, "records": [],
+            }
+        candidate_pool: list[Mapping[str, Any]] = []
+        candidate_hashes: set[str] = set()
+        for raw_candidate in list(initial) + list(cegis.get("accepted_candidate_snapshots", [])):
+            if not isinstance(raw_candidate, Mapping):
+                continue
+            try:
+                digest = _candidate_hash(raw_candidate)
+            except Exception:
+                continue
+            if digest not in candidate_hashes:
+                candidate_hashes.add(digest)
+                candidate_pool.append(raw_candidate)
+        evaluated: list[dict[str, Any]] = []
+        used_ids: set[str] = set()
+        for candidate_index, raw_candidate in enumerate(candidate_pool):
+            candidate = dict(raw_candidate)
+            local_id = str(candidate.get("id", f"candidate_{candidate_index}")).strip()[:100]
+            base_identifier = f"{family}:{local_id or candidate_index}"
+            identifier = base_identifier
+            suffix = 1
+            while identifier in used_ids:
+                identifier = f"{base_identifier}#{suffix}"
+                suffix += 1
+            used_ids.add(identifier)
+            try:
+                compiled = adapter.compile(candidate)
+                result = adapter.evaluate(compiled, tuple(dict(case) for case in cases))
+                if not isinstance(result, Mapping):
+                    result = {"status": "not_assessed", "failure_code": "evaluator_result_invalid"}
+                result = dict(result)
+            except Exception as exc:
+                result = {"status": "not_assessed", "failure_code": "compile_or_evaluate_failed",
+                          "diagnostic": type(exc).__name__}
+            enriched: dict[str, Any] = {
+                "id": identifier, "label": local_id or identifier, "family": family,
+                "status": str(result.get("status", "not_assessed")),
+                "evaluation_evidence": {
+                    key: result[key] for key in ("status", "score", "failure_code", "violations", "cost_units")
+                    if key in result
+                },
+            }
+            try:
+                metrics_payload = metric_builder(candidate, result) if metric_builder else result
+            except Exception as exc:
+                metrics_payload = {"metric_error": type(exc).__name__}
+            if isinstance(metrics_payload, Mapping):
+                if isinstance(metrics_payload.get("predictions"), (list, tuple, np.ndarray)):
+                    enriched["predictions"] = metrics_payload["predictions"]
+                if isinstance(metrics_payload.get("metrics"), Mapping):
+                    enriched["metrics"] = dict(metrics_payload["metrics"])
+            if enriched["status"] == "pass" and "predictions" in enriched and "metrics" in enriched:
+                enriched["status"] = "candidate_evaluated"
+            elif enriched["status"] == "fail" and result.get("violations"):
+                enriched["status"] = "counterexample"
+            else:
+                enriched["status"] = "not_assessed"
+            evaluated.append(enriched)
+            groups.setdefault(comparison_group, []).append(enriched)
+        family_reports.append({
+            "family": family, "comparison_group": comparison_group,
+            "cegis": cegis, "candidate_count": len(evaluated),
+            "candidates": evaluated,
+            "policy": {
+                "cegis_runs_before_comparison": True,
+                "missing_metrics_remain_unresolved": True,
+                "cross_family_metrics_require_explicit_comparison_group": True,
+            },
+        })
+
+    comparisons: dict[str, Any] = {}
+    for group, candidates in groups.items():
+        # IDs are globally prefixed above; compare_models can therefore safely
+        # preserve candidates from different adapters in one declared group.
+        comparisons[group] = compete_models(
+            candidates, counterexamples=counterexamples,
+            uncertainty=uncertainty, assumptions=assumptions,
+            next_questions=next_questions,
+        )
+    comparable_count = sum(
+        int(item.get("comparison", {}).get("candidate_count", 0))
+        for item in comparisons.values()
+    )
+    return {
+        "schema_version": "mathmodel.dynamic-model-competition/v1",
+        "status": "completed" if family_reports else "candidate_set_inadequate",
+        "families": family_reports,
+        "comparisons": comparisons,
+        "candidate_count": sum(item["candidate_count"] for item in family_reports),
+        "comparable_candidate_count": comparable_count,
+        "policy": {
+            "dynamic_execution_before_comparison": True,
+            "cegis_pass_is_not_approval": True,
+            "unknown_metrics_are_not_imputed": True,
+            "comparison_groups_are_explicit": True,
+        },
+    }
+
+
+__all__ = ["ModelCompetitionError", "compete_models", "compete_models_staged", "compete_dynamic_families"]

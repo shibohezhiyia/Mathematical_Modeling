@@ -1,7 +1,10 @@
 import pytest
 import threading
 
-from core.model_competition import ModelCompetitionError, compete_models, compete_models_staged
+from core.model_competition import (
+    ModelCompetitionError, compete_dynamic_families, compete_models, compete_models_staged,
+)
+from core.model_family_adapters import ModelFamilyAdapter
 from core.staged_evaluation import StageSpec
 
 
@@ -119,3 +122,53 @@ def test_staged_competition_keeps_pruned_candidates_unresolved():
     )
     assert result["competition"]["comparison"]["candidate_count"] == 1
     assert result["competition"]["verdict"]["unresolved_candidate_ids"] == ["b"]
+
+
+def test_dynamic_family_competition_executes_adapters_before_pareto():
+    calls = []
+
+    def evaluate(compiled, cases):
+        calls.append((compiled["id"], len(cases)))
+        loss = float(compiled["loss"])
+        return {
+            "status": "pass", "score": loss, "predictions": [loss, loss + 1.0],
+            "metrics": {
+                "validation_loss": loss, "complexity": float(compiled.get("complexity", 1)),
+                "constraint_violation": 0.0, "instability": 0.0,
+            }, "violations": [], "cost_units": 1,
+        }
+
+    adapter = ModelFamilyAdapter(
+        family="toy_dynamic", compile=lambda candidate: dict(candidate),
+        evaluate=evaluate, diagnose=lambda _: {"step": 0.1},
+        patch=lambda *_: (),
+    )
+    result = compete_dynamic_families([
+        {"family": "toy_dynamic", "adapter": adapter,
+         "initial_candidates": [
+             {"id": "simple", "loss": 1.0, "complexity": 1},
+             {"id": "accurate", "loss": 0.2, "complexity": 3},
+         ], "cases": [{"id": "case"}]},
+    ])
+    assert result["status"] == "completed"
+    assert result["candidate_count"] == 2
+    assert result["comparable_candidate_count"] == 2
+    assert result["comparisons"]["toy_dynamic"]["pareto_candidate_ids"]
+    assert len(calls) >= 2  # CEGIS plus the final comparison evaluation
+    assert result["policy"]["dynamic_execution_before_comparison"] is True
+
+
+def test_dynamic_family_missing_metrics_is_unresolved_not_imputed():
+    adapter = ModelFamilyAdapter(
+        family="incomplete", compile=lambda candidate: dict(candidate),
+        evaluate=lambda *_: {"status": "pass", "score": 1.0, "predictions": [1.0], "violations": []},
+        diagnose=lambda _: {}, patch=lambda *_: (),
+    )
+    result = compete_dynamic_families([
+        {"family": "incomplete", "adapter": adapter,
+         "initial_candidates": [{"id": "x"}], "cases": [{}]},
+    ])
+    comparison = result["comparisons"]["incomplete"]
+    assert comparison["comparison"]["candidate_count"] == 0
+    assert comparison["verdict"]["unresolved_candidate_ids"] == ["incomplete:x"]
+    assert result["policy"]["unknown_metrics_are_not_imputed"] is True

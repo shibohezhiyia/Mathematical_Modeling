@@ -31,6 +31,9 @@ let currentResearchResult = null;
 let hypothesisPreviewTimer = null;
 let hypothesisPreviewController = null;
 let hypothesisPreviewRevision = 0;
+let uploadActive = false;
+let toastTimer = null;
+let animeDockOpen = false;
 
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', () => {
@@ -42,6 +45,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTransformCapabilities();
     onResearchSemanticProviderChange();
     initResearchImageUpload();
+    initAccessibleNavigation();
+    initAnimeWidget();
 });
 
 window.addEventListener('resize', () => {
@@ -50,11 +55,23 @@ window.addEventListener('resize', () => {
 
 // ==================== 步骤导航 ====================
 function goStep(n) {
+    const stepItem = document.querySelector(`.step-item[data-step="${n}"]`);
+    const stepPanel = document.getElementById(`step-${n}`);
+    if (!stepItem || !stepPanel) return;
     currentStep = n;
-    document.querySelectorAll('.step-item').forEach(el => el.classList.remove('active'));
-    document.querySelector(`.step-item[data-step="${n}"]`).classList.add('active');
+    document.querySelectorAll('.step-item').forEach(el => {
+        el.classList.remove('active');
+        el.removeAttribute('aria-current');
+    });
+    stepItem.classList.add('active');
+    stepItem.setAttribute('aria-current', 'step');
     document.querySelectorAll('.step-panel').forEach(el => el.classList.remove('active'));
-    document.getElementById(`step-${n}`).classList.add('active');
+    stepPanel.classList.add('active');
+
+    if (window.matchMedia('(max-width: 800px)').matches) {
+        stepItem.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    }
+    updateAnimeWidget();
 
     // 步骤特定加载
     if (n === 2 && uploadedData) loadEDA();
@@ -85,6 +102,11 @@ function initUpload() {
 
     area.addEventListener('click', e => {
         if (e.target.closest('label')) return;
+        input.click();
+    });
+    area.addEventListener('keydown', e => {
+        if (e.target !== area || (e.key !== 'Enter' && e.key !== ' ')) return;
+        e.preventDefault();
         input.click();
     });
 }
@@ -142,6 +164,79 @@ async function analyzeProblem() {
         }
     } catch (e) {
         if (contentDiv) contentDiv.innerHTML = '<div class="hint">错误: ' + e.message + '</div>';
+    }
+}
+
+function initAccessibleNavigation() {
+    document.querySelectorAll('.step-item').forEach(item => {
+        item.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            goStep(Number(item.dataset.step));
+        });
+    });
+}
+
+function initAnimeWidget() {
+    let enabled = false;
+    try { enabled = localStorage.getItem('smartchart_anime_theme') === '1'; } catch (_) { /* optional storage */ }
+    document.body.classList.toggle('anime-theme', enabled);
+    updateAnimeThemeButton(enabled);
+    updateAnimeWidget();
+}
+
+function toggleAnimeDock() {
+    const panel = document.getElementById('anime-dock-panel');
+    const toggle = document.getElementById('anime-dock-toggle');
+    if (!panel || !toggle) return;
+    animeDockOpen = !animeDockOpen;
+    panel.hidden = !animeDockOpen;
+    toggle.setAttribute('aria-expanded', String(animeDockOpen));
+    toggle.setAttribute('aria-label', animeDockOpen ? '关闭快捷助手' : '打开快捷助手');
+}
+
+function animeQuickUpload() {
+    goStep(1);
+    document.getElementById('file-input')?.click();
+}
+
+function animeQuickAnalyze() {
+    goStep(1);
+    const input = document.getElementById('problem-description');
+    if (!input) return;
+    if (input.value.trim()) {
+        analyzeProblem();
+    } else {
+        input.focus();
+        showToast('先填写题目描述，小助手才能帮你分析～', 'info');
+    }
+}
+
+function updateAnimeThemeButton(enabled = document.body.classList.contains('anime-theme')) {
+    const button = document.getElementById('anime-theme-toggle');
+    if (!button) return;
+    button.setAttribute('aria-pressed', String(enabled));
+    button.querySelector('span:last-child').textContent = enabled ? '关闭萌系皮肤' : '开启萌系皮肤';
+}
+
+function toggleAnimeTheme() {
+    const enabled = document.body.classList.toggle('anime-theme');
+    updateAnimeThemeButton(enabled);
+    try { localStorage.setItem('smartchart_anime_theme', enabled ? '1' : '0'); } catch (_) { /* optional storage */ }
+    showToast(enabled ? '萌系皮肤已开启，今天也要顺利建模喵～' : '已恢复标准工作台样式');
+}
+
+function updateAnimeWidget() {
+    const stepNames = {1: '数据上传', 2: '数据概览', 3: '报表设计', 4: '建模配置', 5: '训练与评估', 6: '结果可视化', 7: 'AI 智能分析'};
+    const step = document.getElementById('anime-current-step');
+    const data = document.getElementById('anime-data-state');
+    const tip = document.getElementById('anime-dock-tip');
+    if (step) step.textContent = `当前：${stepNames[currentStep] || '工作台'}`;
+    if (data) data.textContent = uploadedData ? '数据已就绪' : '等待数据';
+    if (tip) {
+        tip.textContent = uploadedData
+            ? '数据已经就绪，选择一个步骤继续探索吧～'
+            : '先上传一份数据，我们一起开始建模吧～';
     }
 }
 
@@ -372,6 +467,18 @@ async function runResearch() {
         const semanticEnabled = document.getElementById('research-semantic-model').checked;
         const hypothesisEnabled = document.getElementById('research-hypothesis-generation')?.checked || false;
         const clarificationContractHash = pendingResearchContractHash;
+        const dynamicContractText = document.getElementById('research-dynamic-contract')?.value.trim() || '';
+        let dynamicContract = null;
+        if (dynamicContractText) {
+            try {
+                dynamicContract = JSON.parse(dynamicContractText);
+                if (!dynamicContract || typeof dynamicContract !== 'object' || Array.isArray(dynamicContract)) {
+                    throw new Error('动态合同必须是 JSON 对象');
+                }
+            } catch (error) {
+                throw new Error('动态模型合同 JSON 无效：' + error.message);
+            }
+        }
         const response = await fetch('/api/research/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -395,6 +502,7 @@ async function runResearch() {
                     mime_type: image.mime_type,
                     data_url: image.data_url,
                 })),
+                dynamic_contract: dynamicContract,
                 async: true,
                 generate_plots: true
             })
@@ -783,6 +891,70 @@ function renderResearchResult(result) {
         .some(([key, value]) => key !== 'mechanistic_model' && Boolean(value));
     if (hasMechanism || hasOtherSpecialized) {
         html += '<details class="research-section" open><summary>专项数学分析</summary>';
+        const automaticModeling = specialized.automatic_modeling || null;
+        if (automaticModeling) {
+            const automaticComplete = automaticModeling.status === 'completed';
+            const automaticGrade = automaticModeling.result_grade || (automaticComplete ? 'exploratory' : 'not_assessed');
+            const automaticGradeLabels = {
+                validated_candidate: '通过当前验证的候选', exploratory: '探索性结果，尚未独立验证',
+                abstain: '需要补充观测', not_assessed: '尚未完成可靠性判断'
+            };
+            const automaticActions = {
+                use_with_stated_scope: '可在已声明的模型和数据范围内使用；关键决策仍需独立复核。',
+                collect_observations_within_suggested_transition_interval: '请在过渡区间增加观测，以区分陡峭光滑变化、跳变和量化效应。',
+                collect_more_observations_or_expand_declared_model_scope: '请补充观测，或明确扩大允许的模型结构后重新验证。',
+                resolve_solver_failure: '请检查求解环境和资源限制后重试。',
+                increase_solver_budget_or_collect_more_observations: '当前预算只够验证一个求解器；可允许第二求解器运行，或补充观测后再试。',
+                increase_solver_budget_or_resolve_solver_failure: '当前求解器执行失败且预算已用尽；可提高求解预算或先排查运行环境。',
+                use_single_solver_result_and_check_optional_dependency: '当前仅有单求解器探索结果；请检查可选依赖后重新验证。'
+            };
+            const automaticReasons = {
+                portfolio_transition_region_underobserved: '过渡区观测不足，尚不能判断是真实跳变还是陡峭光滑变化。',
+                portfolio_no_validated_candidate: '当前候选均未达到预设验证标准。',
+                portfolio_second_arm_budget_unavailable: '首个候选未通过验证，剩余预算不足以调用第二求解器。',
+                model_identified_but_prediction_query_missing: '已识别模型，但尚未给出预测位置。',
+                explicit_target_column_not_found: '选择的目标列在当前数据表中不存在。',
+                explicit_target_dataset_not_found: '选择的目标数据表不存在。',
+                automatic_modeling_requires_single_target: '当前自动建模一次只支持一个明确目标。'
+            };
+            const automaticClass = automaticGrade === 'validated_candidate' ? 'research-safe' : 'research-risk';
+            const automaticModel = automaticModeling.model || {};
+            html += `<h4>题意与原始表自动建模 <span class="${automaticClass}">${escapeHtml(automaticGradeLabels[automaticGrade] || automaticGradeLabels.not_assessed)}</span></h4>`;
+            if (automaticModeling.recommended_action) {
+                html += `<p><strong>下一步：</strong>${escapeHtml(automaticActions[automaticModeling.recommended_action] || '请检查任务条件与验证记录后决定是否继续。')}</p>`;
+            }
+            const transitionInterval = (automaticModeling.routing_evidence || {}).suggested_observation_interval;
+            if (Array.isArray(transitionInterval) && transitionInterval.length === 2) {
+                html += `<p><strong>建议补点区间：</strong>${formatResearchValue(transitionInterval[0])} ～ ${formatResearchValue(transitionInterval[1])}</p>`;
+            }
+            const route = automaticModeling.routing_evidence || {};
+            const routeMetrics = route.validation_metrics || {};
+            const selectedArm = route.selected_arm;
+            if (selectedArm) {
+                const selectedMetrics = routeMetrics[selectedArm] || {};
+                html += `<p class="hint"><strong>验证依据：</strong>${escapeHtml(selectedArm)}；拟合 ${formatResearchValue(route.training_row_count)} 行，验证 ${formatResearchValue(route.validation_row_count)} 行；验证 NMSE ${formatResearchValue(selectedMetrics.nmse)}，ACC0.1 ${formatResearchValue(selectedMetrics['acc_0.1'])}。此验证不等于真实模型已被证明。</p>`;
+            }
+            if (automaticModel.family || automaticModel.structure) {
+                html += `<div class="research-metrics"><span><small>模型族</small><strong>${escapeHtml(automaticModel.family || automaticModeling.family || '-')}</strong></span><span><small>识别结构</small><strong>${escapeHtml(automaticModel.structure || '-')}</strong></span><span><small>选择方法</small><strong>${escapeHtml(automaticModel.selection || '-')}</strong></span><span><small>人工介入</small><strong>${formatResearchValue((automaticModeling.usage || {}).manual_interventions)}</strong></span></div>`;
+            }
+            if (automaticModeling.objective !== undefined) {
+                html += `<p><strong>独立可重算目标值：</strong>${formatResearchValue(automaticModeling.objective)}</p>`;
+            }
+            if (automaticModeling.solution) {
+                html += `<p><strong>决策：</strong>${escapeHtml(JSON.stringify(automaticModeling.solution))}</p>`;
+            }
+            if (automaticModeling.group_totals) {
+                html += `<p><strong>分组结果：</strong>${escapeHtml(JSON.stringify(automaticModeling.group_totals))}</p>`;
+            }
+            if (automaticModeling.predictions || automaticModeling.trajectory) {
+                html += `<p><strong>预测：</strong>${escapeHtml(JSON.stringify(automaticModeling.predictions || automaticModeling.trajectory))}</p>`;
+            }
+            if (!automaticComplete) {
+                const reason = automaticReasons[automaticModeling.reason] || '输入条件或验证证据不足；请查看完整报告。';
+                html += `<p class="research-warning">${escapeHtml(reason)}</p>`;
+            }
+            html += '<p class="hint">这是受限记录模式的确定性归纳结果；不支持的结构不会由系统猜造。</p>';
+        }
         html += renderModelDiagnostics(specialized.model_diagnostics);
         const dataCompilation = specialized.mathematical_data_compilation || null;
         if (dataCompilation) {
@@ -1294,6 +1466,8 @@ async function runHypothesisPreview(contract, input, preview) {
         bindings: contract.bindings,
         graph: contract.graph,
         output_ids: contract.output_ids,
+        dynamic_contract: contract.dynamic_contract,
+        dynamic_paths: contract.dynamic_paths,
     };
     try {
         const response = await fetch('/api/research/hypothesis-preview', {
@@ -1304,10 +1478,14 @@ async function runHypothesisPreview(contract, input, preview) {
         if (revision !== hypothesisPreviewRevision) return;
         if (!response.ok || !data.success) throw new Error(data.error || '预览执行失败');
         const execution = data.execution || {};
+        const dynamicExecution = data.dynamic_execution || {};
         const outputs = execution.outputs && typeof execution.outputs === 'object'
             ? Object.entries(execution.outputs).map(([key, val]) => `${key}=${formatResearchValue(val)}`).join('；')
             : '已完成参数校验，当前图没有可展示输出';
-        if (preview) preview.textContent = `预览已重算（探索结果）：${outputs}。版本 ${data.preview?.version ?? '-'}；仍需完整验证后才能形成结论。`;
+        const dynamicText = dynamicExecution.status
+            ? `动态竞争已重算（${escapeHtml(String(dynamicExecution.status))}）`
+            : '';
+        if (preview) preview.textContent = `预览已重算（探索结果）：${outputs}。${dynamicText} 版本 ${data.preview?.version ?? '-'}；仍需完整验证后才能形成结论。`;
     } catch (error) {
         if (error.name === 'AbortError' || revision !== hypothesisPreviewRevision) return;
         if (preview) preview.textContent = `预览未完成：${error.message}。原结果保持不变。`;
@@ -1315,7 +1493,11 @@ async function runHypothesisPreview(contract, input, preview) {
 }
 
 async function handleUpload(files) {
+    if (uploadActive) return;
     const fileList = Array.from(files);
+    if (!fileList.length) return;
+    uploadActive = true;
+    document.getElementById('upload-area')?.setAttribute('aria-busy', 'true');
     const isAppend = uploadedFiles.length > 0;
     showToast(`正在上传 ${fileList.length} 个文件...`);
     const formData = new FormData();
@@ -1352,6 +1534,9 @@ async function handleUpload(files) {
         }
     } catch (e) {
         showToast('上传出错: ' + e.message, 'error');
+    } finally {
+        uploadActive = false;
+        document.getElementById('upload-area')?.removeAttribute('aria-busy');
     }
 }
 
@@ -6051,13 +6236,15 @@ async function handlePredictUpload(file) {
 // ==================== 工具函数 ====================
 function showToast(msg, type = 'info') {
     const toast = document.getElementById('toast');
+    if (!toast) return;
+    clearTimeout(toastTimer);
     toast.textContent = msg;
-    toast.className = 'toast show';
-    if (type === 'error') toast.style.background = 'var(--danger)';
-    else if (type === 'success') toast.style.background = 'var(--success)';
-    else toast.style.background = 'var(--text)';
+    toast.className = `toast toast-${type} show`;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
 
-    setTimeout(() => { toast.className = 'toast hidden'; }, 3000);
+    toastTimer = setTimeout(() => {
+        toast.className = 'toast hidden';
+    }, 3000);
 }
 
 function resetAll() {

@@ -4,6 +4,12 @@
 
 `compete_models_staged` 在此边界前接入 `StageSpec` 分级评价：低成本阶段可以按显式硬失败和分数筛选，但只有最终确认阶段的幸存者才进入 Pareto 比较。被剪枝、预算耗尽或执行异常的候选保留为 `not_assessed`，不会因为没有进入最终阶段而被当成差模型；分级通过也不等于批准，仍需独立证据和判决门。
 
+`compete_dynamic_families` 将该比较器接到多个数学模型族：每个族先运行自己的
+`ModelFamilyAdapter` CEGIS（编译、求解、反例、修复），再把明确提供的
+`predictions` 和四个比较轴送入同一 `comparison_group`。不同语义的 ODE 误差、优化
+目标和多表行数不会自动混比；缺少轴的候选仍显示在未决分母中。JSON 用户入口为
+`dynamic-compile` 的 `kind=dynamic_competition`。
+
 Pareto 非支配只表示“当前四个比较轴上没有被另一候选全面压过”，不等于获准。只有调用方明确提供 `verdict_state="approved"`、证据引用和批准依据，判决书才可能给出推荐；候选反例会撤销推荐。分数不会归一化为概率，候选集不足会返回 `candidate_set_inadequate`。
 
 主研究链路现在会把同一目标的交叉验证候选和回归均值基线送入该比较器，并输出 `model_competitions` 及 `evidence/model_competitions.json`。均值基线只使用同一 OOF/开发目标切片，不读取锁定测试段；它用于判断复杂模型是否超过最简单解释，不会因为复杂度低就自动获准。预测只确定性等距保留至多 512 点；比较轴为验证损失、已拟合结构规模代理、折间不稳定性和训练墙钟成本。普通预测任务没有声明数学硬约束时，约束违反轴对所有候选记为零并明确标注“不代表现实约束已验证”。这些比较使用开发/OOF 证据，因此不会自动产生 `approved` 推荐。

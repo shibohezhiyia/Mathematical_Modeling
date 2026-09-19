@@ -153,4 +153,102 @@ def discover_linear_causal_dag(
             "policy": "order_constrained_linear_structure_screen;_not_interventional_causal_identification"}
 
 
-__all__ = ["CausalDAGError", "build_causal_dag_contract", "restrict_interactions_to_dag", "discover_linear_causal_dag"]
+def discover_temporal_causal_graph(
+    data: Sequence[Sequence[float]], variable_names: Sequence[str], *,
+    max_lag: int = 3, edge_threshold: float = 0.1,
+    min_validation_gain: float = 0.0, bootstrap: int = 20,
+    max_edges: int = 64, random_state: int = 0,
+) -> dict[str, Any]:
+    """Screen lagged predictive edges with a chronological holdout.
+
+    This is deliberately a *temporal interaction* screen, not a causal
+    identification algorithm.  Each candidate adds one source lag to a
+    target's autoregressive baseline, then is retained only when it improves a
+    future block.  Bootstrap sign stability is evidence for prioritising a
+    follow-up model, never an intervention or causal proof.
+    """
+    matrix = np.asarray(data, dtype=float)
+    names = [str(item) for item in variable_names]
+    if (matrix.ndim != 2 or matrix.shape[0] < 80 or matrix.shape[1] != len(names)
+            or not 2 <= matrix.shape[1] <= 16 or not np.isfinite(matrix).all()):
+        raise CausalDAGError("temporal_data_shape_invalid")
+    if len(set(names)) != len(names) or any(not name.strip() for name in names):
+        raise CausalDAGError("temporal_variable_names_invalid")
+    if (type(max_lag) is not int or not 1 <= max_lag <= 12
+            or type(bootstrap) is not int or not 8 <= bootstrap <= 200
+            or type(max_edges) is not int or not 1 <= max_edges <= 256
+            or not np.isfinite(float(edge_threshold)) or float(edge_threshold) < 0
+            or not np.isfinite(float(min_validation_gain))):
+        raise CausalDAGError("temporal_discovery_options_invalid")
+    if matrix.shape[0] <= max_lag + 30:
+        raise CausalDAGError("temporal_history_too_short")
+
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    scales = np.maximum(centered.std(axis=0, keepdims=True), 1e-8)
+    standardized = centered / scales
+    times = np.arange(max_lag, standardized.shape[0])
+    # Keep the holdout chronological and large enough to estimate an RMSE.
+    split = max(20, int(round(times.size * 0.7)))
+    split = min(times.size - 10, split)
+    train_times, valid_times = times[:split], times[split:]
+
+    def design(at: np.ndarray, source: int | None = None, lag: int | None = None) -> np.ndarray:
+        columns = [np.ones(len(at), dtype=float)]
+        for own_lag in range(1, max_lag + 1):
+            columns.append(standardized[at - own_lag, target])
+        if source is not None and lag is not None:
+            columns.append(standardized[at - lag, source])
+        return np.column_stack(columns)
+
+    rng = np.random.default_rng(random_state)
+    edges: list[dict[str, Any]] = []
+    for target in range(standardized.shape[1]):
+        baseline_train = design(train_times)
+        baseline_valid = design(valid_times)
+        base_coef, *_ = np.linalg.lstsq(baseline_train, standardized[train_times, target], rcond=None)
+        base_prediction = baseline_valid @ base_coef
+        base_rmse = float(np.sqrt(np.mean((base_prediction - standardized[valid_times, target]) ** 2)))
+        for source in range(standardized.shape[1]):
+            if source == target:
+                continue
+            for lag in range(1, max_lag + 1):
+                augmented_train = design(train_times, source, lag)
+                augmented_valid = design(valid_times, source, lag)
+                coef, *_ = np.linalg.lstsq(augmented_train, standardized[train_times, target], rcond=None)
+                prediction = augmented_valid @ coef
+                augmented_rmse = float(np.sqrt(np.mean((prediction - standardized[valid_times, target]) ** 2)))
+                gain = base_rmse - augmented_rmse
+                coefficient = float(coef[-1])
+                if abs(coefficient) < float(edge_threshold) or gain < float(min_validation_gain):
+                    continue
+                signs = 0
+                for _ in range(bootstrap):
+                    # Resample contiguous-ish time rows by circular block starts;
+                    # this preserves more local dependence than iid row shuffling.
+                    starts = rng.integers(0, max(1, train_times.size - 4), size=max(2, train_times.size // 4))
+                    sampled = np.concatenate([train_times[start:start + 4] for start in starts])[:train_times.size]
+                    boot_design = design(sampled, source, lag)
+                    boot_coef, *_ = np.linalg.lstsq(boot_design, standardized[sampled, target], rcond=None)
+                    if np.sign(float(boot_coef[-1])) == np.sign(coefficient):
+                        signs += 1
+                edges.append({
+                    "source": names[source], "target": names[target], "lag": int(lag),
+                    "coefficient": coefficient, "validation_rmse_gain": float(gain),
+                    "stability": float(signs / bootstrap),
+                    "evidence_status": "screened_temporal_predictive",
+                })
+    edges.sort(key=lambda item: (-float(item["validation_rmse_gain"]), -float(item["stability"]), item["source"], item["target"], item["lag"]))
+    edges = edges[:max_edges]
+    return {
+        "schema_version": "mathmodel.temporal-causal-screen/v1",
+        "status": "hypothesis_found" if edges else "no_edge_found",
+        "variables": names, "max_lag": int(max_lag),
+        "train_rows": int(len(train_times)), "validation_rows": int(len(valid_times)),
+        "edges": edges, "bootstrap": int(bootstrap),
+        "graph_type": "directed_lagged_interaction_graph",
+        "policy": "chronological_holdout_and_block_bootstrap_screen;_not_interventional_causal_identification",
+    }
+
+
+__all__ = ["CausalDAGError", "build_causal_dag_contract", "restrict_interactions_to_dag",
+           "discover_linear_causal_dag", "discover_temporal_causal_graph"]

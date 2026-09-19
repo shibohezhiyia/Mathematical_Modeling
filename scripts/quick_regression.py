@@ -111,6 +111,14 @@ QUICK_TESTS = [
     "tests/test_external_dataset_catalog.py",
     "tests/test_external_data_benchmark.py",
     "tests/test_evaluation_freeze.py",
+    "tests/test_automated_benchmark.py",
+    "tests/test_automated_benchmark_suite.py",
+    "tests/test_modeling_benchmark_suite.py",
+    "tests/test_automatic_modeling.py",
+    "tests/test_modeling_confirmation_suite.py",
+    "tests/test_modeling_structure_challenge.py",
+    "tests/test_modeling_extension_development.py",
+    "tests/test_benchmark_holdout.py",
 ]
 
 

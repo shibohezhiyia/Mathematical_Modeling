@@ -1,0 +1,2 @@
+# Optional, frozen mature symbolic-regression comparison dependency.
+gplearn @ git+https://github.com/trevorstephens/gplearn.git@0390aea8639ce5f6c0b388400e07b58c05acad6a

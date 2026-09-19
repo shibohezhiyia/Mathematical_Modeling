@@ -60,6 +60,42 @@ def test_dynamic_compile_async_endpoint_exposes_owner_scoped_task():
         assert client.post(f'/api/research/dynamic-compile/cancel/{task_id}').get_json()['task']['status'] == 'completed'
 
 
+def test_dynamic_compile_endpoint_accepts_unseen_problem_statement():
+    app.config.update(TESTING=True)
+    with app.test_client() as client:
+        response = client.post('/api/research/dynamic-compile', json={
+            'kind': 'problem_statement',
+            'payload': {
+                'problem': '研究一个带约束的资源配置问题，并说明需要哪些证据才能验证模型。',
+                'candidate_budget': 2,
+            },
+        })
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body['success'] is True
+    assert body['result']['kind'] == 'problem_statement'
+    assert body['result']['result']['structure_candidates']['candidate_count'] == 2
+
+
+def test_dynamic_compile_problem_statement_uses_persistent_worker_path():
+    app.config.update(TESTING=True)
+    with app.test_client() as client:
+        response = client.post('/api/research/dynamic-compile', json={
+            'kind': 'problem_statement',
+            'payload': {'problem': '分析带有不确定参数的网络调度问题。'},
+            'async': True,
+        })
+        assert response.status_code == 202
+        task_id = response.get_json()['task']['task_id']
+        for _ in range(100):
+            status = client.get(f'/api/research/dynamic-compile/status/{task_id}').get_json()['task']
+            if status['status'] in {'completed', 'failed', 'cancelled'}:
+                break
+            time.sleep(0.01)
+    assert status['status'] == 'completed'
+    assert status['result']['kind'] == 'problem_statement'
+
+
 def test_evaluation_sources_endpoint_exposes_audit_without_source_content():
     app.config.update(TESTING=True)
     with app.test_client() as client:
@@ -289,6 +325,45 @@ def test_hypothesis_preview_recomputes_typed_graph_with_slider_value():
     assert body['success'] is True
     assert body['preview']['bindings']['k'] == 1.5
     assert body['execution']['outputs']['out'] == 3.5
+
+
+def test_hypothesis_preview_recomputes_dynamic_competition_from_slider_value():
+    """A slider must reach the typed dynamic runtime, not just update UI state."""
+    app.config.update(TESTING=True)
+    dynamic_contract = {
+        'families': [{
+            'family': 'ode', 'comparison_group': 'decay',
+            'candidates': [{
+                'id': 'candidate', 'state_dim': 1, 'basis': ['linear'],
+                'coefficients': [[-0.5]],
+            }],
+            'cases': [{
+                'times': [0.0, 0.5, 1.0], 'initial': [1.0],
+                'observations': [[1.0], [0.7788008], [0.6065307]],
+            }],
+        }],
+        'cegis_config': {'max_rounds': 1, 'max_candidates': 2, 'max_repairs': 0},
+    }
+    with app.test_client() as client:
+        response = client.post('/api/research/hypothesis-preview', json={
+            'controls': [{
+                'id': 'decay_rate', 'parameter_id': 'rate',
+                'min': -1.0, 'max': 0.0, 'default': -0.5, 'step': 0.1,
+                'affected_nodes': ['rate'],
+            }],
+            'values': {'decay_rate': -0.2},
+            'bindings': {'rate': -0.5},
+            'dynamic_contract': dynamic_contract,
+            'dynamic_paths': {
+                'rate': 'families.0.candidates.0.coefficients.0.0',
+            },
+        })
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body['success'] is True
+    assert body['preview']['bindings']['rate'] == pytest.approx(-0.2)
+    assert body['dynamic_execution']['status'] == 'completed'
+    assert body['policy'] == 'finite_control_values_recomputed_and_revalidated_in_typed_runtime'
 
 
 def test_research_cancel_endpoint_signals_running_worker_without_force_kill():
@@ -630,6 +705,7 @@ def test_async_research_returns_status_and_completed_result():
                 assert payload["result"]["problem"] == "预测 target"
                 assert payload["result"]["report_url"] == "/api/research/report"
                 assert assistant_class.call_args.kwargs["credibility_audit"] is True
+                assert assistant_class.call_args.kwargs["enable_symbolic_portfolio"] is True
     finally:
         user_sessions.pop(sid, None)
 
@@ -724,6 +800,37 @@ def test_research_accepts_problem_statement_without_uploaded_dataset():
                 assert payload["success"] is True
                 assert payload["result"]["input_mode"] == "mechanistic_no_dataset"
                 assert assistant_class.return_value.run.call_args.kwargs["datasets"] == {}
+    finally:
+        user_sessions.pop(sid, None)
+
+
+def test_research_auto_generates_dynamic_contract_sliders_without_manual_schema():
+    sid = "research-auto-dynamic-controls-test"
+    app.config.update(TESTING=True)
+    user_sessions[sid] = {"train_events": [], "train_live_results": []}
+    dynamic_contract = {
+        "families": [{"family": "ode", "candidates": [{
+            "state_dim": 1, "basis": ["linear"], "coefficients": [[-0.5]],
+        }], "cases": []}],
+    }
+    try:
+        with app.test_client() as client:
+            with client.session_transaction() as flask_session:
+                flask_session["sid"] = sid
+            with patch("core.modeling_assistant.MathModelingAssistant") as assistant_class:
+                assistant_class.return_value.run.return_value.to_dict.return_value = {
+                    "problem": "动力学", "charts": [], "model_results": [],
+                    "input_mode": "mechanistic_no_dataset",
+                }
+                response = client.post("/api/research/run", json={
+                    "description": "动力学", "run_modeling": False,
+                    "generate_plots": False, "dynamic_contract": dynamic_contract,
+                })
+                assert response.status_code == 200
+                result = response.get_json()["result"]
+                assert result["hypothesis_controls"]["status"] == "validated"
+                assert result["hypothesis_preview_contract"]["dynamic_paths"]
+                assert result["hypothesis_preview_contract"]["bindings"]
     finally:
         user_sessions.pop(sid, None)
 
@@ -1200,3 +1307,96 @@ def test_causal_discovery_endpoint_returns_partial_dag_hypothesis():
     payload = response.get_json()
     assert payload['success'] is True
     assert payload['result']['contract']['evidence_status'] == 'partial'
+
+
+def test_causal_discovery_endpoint_supports_chronological_lag_screen():
+    rng = np.random.default_rng(7)
+    n = 120
+    source = rng.normal(size=n)
+    target = np.zeros(n)
+    for index in range(1, n):
+        target[index] = 0.8 * source[index - 1] + 0.1 * rng.normal()
+    with app.test_client() as client:
+        response = client.post('/api/research/causal-discovery', json={
+            'data': np.column_stack([source, target]).tolist(),
+            'variable_names': ['source', 'target'], 'time_lags': 2,
+            'edge_threshold': 0.2, 'bootstrap': 8,
+        })
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['result']['graph_type'] == 'directed_lagged_interaction_graph'
+    assert any(edge['source'] == 'source' and edge['target'] == 'target' and edge['lag'] == 1
+               for edge in payload['result']['edges'])
+    assert 'not_interventional' in payload['execution_policy']
+
+
+def test_research_ui_explains_model_grade_and_local_resampling_action():
+    script = (Path(__file__).resolve().parents[1] / 'web' / 'static' / 'js' / 'app.js').read_text(
+        encoding='utf-8')
+    assert "automaticGrade === 'validated_candidate' ? 'research-safe' : 'research-risk'" in script
+    assert '探索性结果，尚未独立验证' in script
+    assert '过渡区观测不足，尚不能判断是真实跳变还是陡峭光滑变化。' in script
+    assert 'suggested_observation_interval' in script
+    assert 'recommended_action' in script
+
+
+def test_research_api_runs_validated_portfolio_from_plain_problem_and_raw_table():
+    sid = 'research-portfolio-raw-api-test'
+    app.config.update(TESTING=True)
+    x = np.linspace(-3.0, 3.0, 80)
+    user_sessions[sid] = {
+        'df': pd.DataFrame({'ambient_load': x, 'measured_kw': 1.6 * x + 0.4}),
+        'train_events': [], 'train_live_results': [],
+    }
+    try:
+        with app.test_client() as client:
+            with client.session_transaction() as flask_session:
+                flask_session['sid'] = sid
+            response = client.post('/api/research/run', json={
+                'description': '根据原始记录建模，并预测 ambient_load = 1.25 时的 measured_kw。',
+                'target': 'measured_kw', 'run_modeling': False,
+                'generate_plots': False, 'feedback_optimization': False,
+                'credibility_audit': False,
+            })
+            assert response.status_code == 200
+            body = response.get_json()
+            assert body['success'] is True
+            modeled = body['result']['specialized_results']['automatic_modeling']
+            assert modeled['entrypoint'] == 'main_research_default_symbolic_portfolio'
+            assert modeled['status'] == 'completed'
+            assert modeled['result_grade'] == 'validated_candidate'
+            assert modeled['usage']['numerical_solver_calls'] == 1
+            assert abs(modeled['predictions'][0] - 2.4) < 1e-8
+    finally:
+        user_sessions.pop(sid, None)
+
+
+def test_production_sync_research_forwards_symbolic_portfolio_switch():
+    sid = 'research-portfolio-process-switch-test'
+    was_testing = app.config.get('TESTING', False)
+    app.config.update(TESTING=False)
+    user_sessions[sid] = {
+        'df': pd.DataFrame({'driver': [0.0, 1.0], 'output': [0.0, 1.0]}),
+        'train_events': [], 'train_live_results': [],
+    }
+    try:
+        with app.test_client() as client, patch('web.app._research_process_service') as service:
+            with client.session_transaction() as flask_session:
+                flask_session['sid'] = sid
+            service.submit_research.return_value = {'task_id': 'fake-task'}
+            service.wait.return_value = {'status': 'completed', 'result': {
+                'problem': 'test', 'specialized_results': {},
+            }}
+            response = client.post('/api/research/run', json={
+                'description': '预测 driver = 0.5 时的 output',
+                'target': 'output', 'enable_symbolic_portfolio': False,
+                'run_modeling': False, 'generate_plots': False,
+            })
+            assert response.status_code == 200
+            assert response.get_json()['execution_mode'] == 'spawn_process'
+            payload = service.submit_research.call_args.args[1]
+            assert payload['options']['enable_symbolic_portfolio'] is False
+    finally:
+        app.config.update(TESTING=was_testing)
+        user_sessions.pop(sid, None)

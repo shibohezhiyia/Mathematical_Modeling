@@ -30,6 +30,8 @@ def run_research_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         credibility_audit=bool(options.get("credibility_audit", True)),
         enable_gnn_screen=bool(options.get("enable_gnn_screen", False)),
         enable_graph_search=bool(options.get("enable_graph_search", False)),
+        enable_dynamic_competition=bool(options.get("enable_dynamic_competition", False)),
+        enable_symbolic_portfolio=bool(options.get("enable_symbolic_portfolio", True)),
     )
     problem_contract = None
     if isinstance(payload.get("problem_contract"), Mapping):
@@ -41,6 +43,7 @@ def run_research_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         generate_plots=bool(options.get("generate_plots", True)),
         mechanistic_ir=payload.get("mechanistic_ir"), problem_images=payload.get("problem_images", []),
         problem_contract=problem_contract,
+        dynamic_contract=payload.get("dynamic_contract"),
     ).to_dict()
     result["run_id"] = str(payload.get("run_id") or create_run_id())
     result["execution_policy"] = "main_research_spawn_worker"

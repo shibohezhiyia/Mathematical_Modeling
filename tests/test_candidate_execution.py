@@ -3,6 +3,7 @@ import pytest
 from core.candidate_execution import (
     evaluate_structure_candidate,
     execute_structure_candidate,
+    propose_arithmetic_repairs,
     run_arithmetic_candidate_cegis,
 )
 from core.cegis_controller import CEGISConfig
@@ -71,3 +72,12 @@ def test_arithmetic_candidate_cegis_repairs_constant_with_bounded_mutations():
     assert result["status"] == "accepted_candidates"
     assert result["accepted_candidate_hashes"]
     assert result["repair_count"] > 0
+
+
+def test_arithmetic_repairs_can_mutate_operator_after_constant_budget():
+    candidate = _candidate()
+    candidate["primitive_graph"]["nodes"][0]["op"] = "subtract"
+    candidate["primitive_graph"]["nodes"][2]["attributes"]["value"] = 1.0
+    proposals = propose_arithmetic_repairs(candidate, {"violations": [{"reason": "witness"}], "allow_structural": True})
+    assert any(item["primitive_graph"]["nodes"][0]["op"] == "add" for item in proposals)
+    assert all(item["primitive_graph"]["nodes"][0]["inputs"] == ["x", "one"] for item in proposals)
