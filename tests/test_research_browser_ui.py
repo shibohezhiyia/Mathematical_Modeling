@@ -94,6 +94,7 @@ def test_browser_upload_problem_and_run_reaches_validated_result():
                     "根据原始记录建模，并预测 driver = 1.25 时的 measured_kw。"
                 )
                 page.locator("#research-target").fill("measured_kw")
+                assert page.locator("#research-symbolic-arm-budget").input_value() == "2"
                 page.locator("#research-run-model").uncheck(force=True)
                 page.locator("#research-feedback-optimize").uncheck(force=True)
                 page.locator("#research-credibility-audit").uncheck(force=True)
@@ -106,6 +107,15 @@ def test_browser_upload_problem_and_run_reaches_validated_result():
                 assert "验证依据" in result_text
                 assert "预测" in result_text
                 assert "2.4" in result_text
+                page.locator('#research-result details').filter(has_text='本浏览器会话的输入负担').click()
+                burden_text = page.locator('#research-result').inner_text()
+                assert '本浏览器会话的输入负担' in burden_text
+                assert '首尾操作间隔' in burden_text
+                assert '不是人工操作耗时' in burden_text
+                session_burdens = [sdata.get('research_input_burden') for sid, sdata in user_sessions.items()
+                                   if sid not in session_ids_before and sdata.get('research_input_burden')]
+                assert any(row.get('uploaded_files') == 1 and row.get('run_submissions') == 1
+                           and row.get('explicit_target_submissions') == 1 for row in session_burdens)
             finally:
                 browser.close()
     finally:

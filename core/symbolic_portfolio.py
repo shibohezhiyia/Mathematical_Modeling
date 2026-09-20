@@ -126,6 +126,47 @@ def _observed_transition_ambiguity(payload: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
+def _observation_integrity_gap(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Identify missing or malformed numeric observations before splitting."""
+    attachments = payload.get("attachments")
+    if not isinstance(attachments, list) or len(attachments) != 1:
+        return None
+    rows = attachments[0].get("rows") if isinstance(attachments[0], Mapping) else None
+    if not isinstance(rows, list) or not rows or not all(isinstance(row, Mapping) for row in rows):
+        return None
+    affected: dict[str, int] = {}
+    affected_rows = 0
+    invalid_found = False
+    for row in rows:
+        row_affected = False
+        for name, value in row.items():
+            detected = None
+            if value is None or (isinstance(value, str) and not value.strip()):
+                detected = "missing"
+            elif type(value) is bool:
+                detected = "invalid"
+            else:
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    detected = "invalid"
+                else:
+                    if np.isnan(numeric):
+                        detected = "missing"
+                    elif not np.isfinite(numeric):
+                        detected = "invalid"
+            if detected is not None:
+                affected[str(name)] = affected.get(str(name), 0) + 1
+                row_affected = True
+                invalid_found |= detected == "invalid"
+        affected_rows += int(row_affected)
+    if not affected:
+        return None
+    return {"reason": ("portfolio_observation_values_invalid" if invalid_found else
+                       "portfolio_observation_values_missing"),
+            "affected_columns": affected, "affected_row_count": affected_rows}
+
+
 def run_validation_routed_portfolio(
     payload: Mapping[str, Any], *, seed: int = 20261012, validation_fraction: float = 0.2,
     enable_discontinuity_gate: bool = True,
@@ -150,6 +191,18 @@ def run_validation_routed_portfolio(
             or type(validation_fraction) not in (int, float)
             or not 0.1 <= float(validation_fraction) <= 0.4):
         raise SymbolicPortfolioError("portfolio_configuration_invalid")
+    integrity_gap = _observation_integrity_gap(payload)
+    if integrity_gap is not None:
+        return {
+            "status": "needs_input", "reason": integrity_gap["reason"],
+            "result_grade": "abstain",
+            "recommended_action": "repair_or_exclude_missing_observations_before_validation",
+            "routing_evidence": {**integrity_gap,
+                                 "selection_rule": "abstain_before_split_on_invalid_observations"},
+            "usage": {"model_api_calls": 0, "numerical_solver_calls": 0,
+                      "manual_interventions": 0},
+            "policy": "missingness_is_not_imputed;validation_split_not_started",
+        }
     transition_ambiguity = (_observed_transition_ambiguity(payload)
                             if enable_discontinuity_gate else None)
     if transition_ambiguity is not None:
@@ -176,6 +229,9 @@ def run_validation_routed_portfolio(
         }
     fit_payload, validation_queries, validation_reference, validation_count = _split_training_validation(
         payload, seed=seed, validation_fraction=float(validation_fraction))
+    # Relax the sparse branch only inside this independently validated route.
+    # The direct modeling entry keeps its near-exact training gate.
+    fit_payload["validation_gated_sparse_fit"] = True
     training_count = len(fit_payload["attachments"][0]["rows"])
 
     solvers = {"current_bounded_grammar": current_solver, "official_gplearn": gplearn_solver}

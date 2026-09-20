@@ -227,6 +227,40 @@ def test_multivariate_power_law_recovers_unlisted_ratio_topology():
     assert ablated["model"]["structure"] != "signed_absolute_power_law"
 
 
+@pytest.mark.parametrize('dimensions', [5, 6])
+def test_wide_inputs_use_bounded_low_order_interactions(dimensions):
+    from core.model_submission_evaluator import reexecute_submitted_model
+
+    rng = np.random.default_rng(912 + dimensions)
+    features = rng.uniform(0.3, 2.0, size=(128, dimensions))
+    response = (1.2 + 0.7 * features[:, 0] - 0.4 * features[:, -1]
+                + 0.9 * features[:, 1] * features[:, -2]
+                + 0.3 * features[:, 0] * features[:, 2] * features[:, -1])
+    rows = [{**{f'f{column}': float(features[index, column])
+                 for column in range(dimensions)}, 'response': float(response[index])}
+            for index in range(100)]
+    queries = features[100:].tolist()
+    result = induce_and_solve_modeling_task({
+        'attachments': [{'name': 'measurements', 'format': 'records', 'rows': rows}],
+        'query_inputs': queries,
+    })
+    assert result['status'] == 'completed'
+    assert result['model']['search_scope'] == 'low_order_interactions_only_for_wide_input'
+    assert result['predictions'] == pytest.approx(response[100:].tolist(), abs=1e-9)
+    independently_executed = reexecute_submitted_model(result['model'], queries)
+    assert independently_executed == pytest.approx(response[100:].tolist(), abs=1e-9)
+
+
+def test_more_than_six_algebra_inputs_still_rejected_explicitly():
+    rows = [{**{f'f{column}': float(index + column) for column in range(7)},
+             'response': float(index)} for index in range(8)]
+    with pytest.raises(AutomaticModelingError, match='algebra_input_count_unsupported'):
+        induce_and_solve_modeling_task({
+            'attachments': [{'name': 'measurements', 'format': 'records', 'rows': rows}],
+            'query_inputs': [[1.0] * 7],
+        })
+
+
 def test_multivariate_rational_recovers_affine_over_interaction_denominator():
     left = np.linspace(0.5, 3.5, 80)
     right = np.linspace(0.8, 2.4, 80)[np.random.default_rng(4).permutation(80)]

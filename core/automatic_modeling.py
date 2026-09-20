@@ -300,7 +300,7 @@ def _fit_algebra(payload: Mapping[str, Any], tables: Mapping[str, list[dict[str,
     if rows is None:
         raise AutomaticModelingError("algebra_observations_missing")
     inputs = sorted(column for column in rows[0] if column != response)
-    if not inputs or len(inputs) > 4:
+    if not inputs or len(inputs) > 6:
         raise AutomaticModelingError("algebra_input_count_unsupported")
     x = np.asarray([[row[name] for name in inputs] for row in rows], dtype=float)
     y = np.asarray([row[response] for row in rows], dtype=float)
@@ -398,6 +398,10 @@ def _fit_algebra(payload: Mapping[str, Any], tables: Mapping[str, list[dict[str,
     enable_multivariate_nonlinear = payload.get("enable_multivariate_nonlinear", True)
     if type(enable_multivariate_nonlinear) is not bool:
         raise AutomaticModelingError("multivariate_nonlinear_flag_invalid")
+    # Keep the expensive rational/Laurent/operator grammar at its tested
+    # four-variable bound. Five and six inputs use only the low-order library.
+    if len(inputs) > 4:
+        enable_multivariate_nonlinear = False
     enable_trigonometric_rational = payload.get("enable_trigonometric_rational_features", True)
     if type(enable_trigonometric_rational) is not bool:
         raise AutomaticModelingError("trigonometric_rational_flag_invalid")
@@ -416,6 +420,25 @@ def _fit_algebra(payload: Mapping[str, Any], tables: Mapping[str, list[dict[str,
     enable_product_angle_rational = payload.get("enable_product_angle_rational_composition", True)
     if type(enable_product_angle_rational) is not bool:
         raise AutomaticModelingError("product_angle_rational_flag_invalid")
+    enable_sparse_laurent_outer = payload.get("enable_sparse_laurent_outer", True)
+    if type(enable_sparse_laurent_outer) is not bool:
+        raise AutomaticModelingError("sparse_laurent_outer_flag_invalid")
+    validation_gated_sparse_fit = payload.get("validation_gated_sparse_fit", False)
+    if type(validation_gated_sparse_fit) is not bool:
+        raise AutomaticModelingError("validation_gated_sparse_fit_flag_invalid")
+    sparse_selection_criterion = payload.get("sparse_laurent_selection_criterion", "nmse")
+    if type(sparse_selection_criterion) is not str or sparse_selection_criterion not in {"bic", "nmse"}:
+        raise AutomaticModelingError("sparse_laurent_selection_criterion_invalid")
+    sparse_search_starts = payload.get("sparse_laurent_search_starts", 1)
+    if type(sparse_search_starts) is not int or not 1 <= sparse_search_starts <= 16:
+        raise AutomaticModelingError("sparse_laurent_search_starts_invalid")
+    sparse_start_strategy = payload.get("sparse_laurent_start_strategy", "top_correlation")
+    if (type(sparse_start_strategy) is not str
+            or sparse_start_strategy not in {"top_correlation", "random"}):
+        raise AutomaticModelingError("sparse_laurent_start_strategy_invalid")
+    sparse_search_seed = payload.get("sparse_laurent_search_seed", 0)
+    if type(sparse_search_seed) is not int or not 0 <= sparse_search_seed <= 2**32 - 1:
+        raise AutomaticModelingError("sparse_laurent_search_seed_invalid")
     if (enable_multivariate_nonlinear
             and math.sqrt(polynomial_rss / len(y)) / y_scale > 1e-8
             and np.all(np.abs(x) > 1e-12) and np.all(np.abs(y) > 1e-12)
@@ -777,6 +800,68 @@ def _fit_algebra(payload: Mapping[str, Any], tables: Mapping[str, list[dict[str,
         if not np.isfinite(predictions).all():
             raise AutomaticModelingError("product_angle_query_singularity")
         return {"model": model, "predictions": predictions.tolist()}
+    if (enable_multivariate_nonlinear and enable_extended_composition
+            and enable_transformed_power_laurent and enable_sparse_laurent_outer
+            and math.sqrt(polynomial_rss / len(y)) / y_scale > 1e-8):
+        from .sparse_operator_grammar import evaluate_sparse_laurent_outer, fit_sparse_laurent_outer
+        sparse_model = fit_sparse_laurent_outer(
+            x, y, maximum_normalized_mse=(0.01 if validation_gated_sparse_fit else 1e-8),
+            selection_criterion=sparse_selection_criterion,
+            search_starts=sparse_search_starts,
+            start_strategy=sparse_start_strategy, seed=sparse_search_seed)
+        if sparse_model is not None:
+            sparse_prediction = evaluate_sparse_laurent_outer(sparse_model, x)
+            sparse_rss = float(np.sum((sparse_prediction - y) ** 2))
+            sparse_parameter_count = len(sparse_model["coefficients"]) + (
+                sparse_model["outer_transform"] != "identity")
+            sparse_bic = len(y) * math.log(max(sparse_rss / len(y), 1e-24)) \
+                + sparse_parameter_count * math.log(len(y))
+            def existing_exact(bic: float | None, parameter_count: int) -> bool:
+                if bic is None:
+                    return False
+                mean_square_error = math.exp(min(700.0, (
+                    bic - parameter_count * math.log(len(y))) / len(y)))
+                return mean_square_error <= 1e-8 * max(float(np.var(y)), 1e-24)
+            rational_parameter_count = (
+                len(rational_candidate[0]) - 1 if rational_candidate is not None else 0)
+            rational_identifiable = bool(rational_candidate is not None
+                                         and rational_parameter_count + 16 <= len(y))
+            simpler_exact = any((
+                existing_exact(power_candidate[2], len(power_candidate[1]))
+                if power_candidate is not None else False,
+                existing_exact(root_form_candidate[2], len(root_form_candidate[1]))
+                if root_form_candidate is not None else False,
+                existing_exact(angular_projection_candidate[2], 3)
+                if angular_projection_candidate is not None else False,
+                existing_exact(rational_candidate[3], rational_parameter_count)
+                if rational_identifiable else False,
+            ))
+            competing_bics = [polynomial_bic]
+            competing_bics.extend(item for item in (
+                power_candidate[2] if power_candidate is not None else None,
+                rational_candidate[3] if rational_identifiable else None,
+                root_form_candidate[2] if root_form_candidate is not None else None,
+                angular_projection_candidate[2] if angular_projection_candidate is not None else None,
+            ) if item is not None)
+            # A high-dimensional rational interpolation can have a spectacular
+            # training BIC without enough observations to identify its many
+            # coefficients. Prefer a compact exact grammar in that situation,
+            # while keeping established identifiable exact fits unchanged.
+            if not simpler_exact and sparse_bic + 2.0 < min(competing_bics):
+                model = {**sparse_model, "family": "modeling_algebra",
+                         "input_variables": inputs, "response_variable": response,
+                         "feature_grammar": "bounded_sparse_laurent_exponents_and_outer_transform",
+                         "training_nmse": float(sparse_rss / len(y) / max(float(np.var(y)), 1e-24))}
+                if query_missing:
+                    return {"status": "needs_input", "model": model, "missing": ["query_inputs"],
+                            "reason": "model_identified_but_prediction_query_missing"}
+                try:
+                    predictions = evaluate_sparse_laurent_outer(model, queries)
+                except ValueError as exc:
+                    raise AutomaticModelingError(str(exc)) from exc
+                return {"model": model, "predictions": predictions.tolist(),
+                        "result_grade": "exploratory",
+                        "recommended_action": "run_independent_validation_before_using_prediction"}
     if rational_candidate is not None and (power_candidate is None
             or rational_candidate[3] < power_candidate[2]) and (root_form_candidate is None
             or rational_candidate[3] < root_form_candidate[2]) and (
@@ -913,6 +998,8 @@ def _fit_algebra(payload: Mapping[str, Any], tables: Mapping[str, list[dict[str,
                  list(indices) if isinstance(indices, tuple) else [indices]
              )} for kind, indices in terms],
              "selection": "bounded_main_effect_pairwise_three_way_library"}
+    if len(inputs) > 4:
+        model["search_scope"] = "low_order_interactions_only_for_wide_input"
     if query_missing:
         return {"status": "needs_input", "model": model, "missing": ["query_inputs"],
                 "reason": "model_identified_but_prediction_query_missing"}

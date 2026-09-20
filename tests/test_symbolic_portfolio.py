@@ -28,6 +28,27 @@ def test_training_only_router_selects_better_arm_and_executes_its_model():
     assert output["execution_supervision"]["child_runs"] == 2
 
 
+def test_approximate_sparse_fit_is_only_requested_inside_validation_split():
+    rows = [{"x": float(index), "response": float(2 * index)} for index in range(80)]
+    payload = {"attachments": [{"name": "observations", "format": "records", "rows": rows}],
+               "query_inputs": [[3.5]]}
+    seen = []
+
+    def recording_solver(local_payload):
+        seen.append((local_payload.get("validation_gated_sparse_fit"),
+                     len(local_payload["attachments"][0]["rows"])))
+        return _solver(2.0)(local_payload)
+
+    result = run_validation_routed_portfolio(
+        payload, seed=7, routing_policy="current_then_fallback", solver_arm_budget=1,
+        current_solver=recording_solver,
+    )
+    assert result["status"] == "completed"
+    assert result["result_grade"] == "validated_candidate"
+    assert seen == [(True, 64)]
+    assert "validation_gated_sparse_fit" not in payload
+
+
 def test_router_uses_a_stable_name_tie_break_without_test_answers():
     rows = [{"x": float(index), "response": float(index)} for index in range(80)]
     payload = {"attachments": [{"name": "observations", "format": "records", "rows": rows}],
@@ -155,6 +176,31 @@ def test_invalid_observation_is_not_misreported_as_transition_evidence():
     payload = {"attachments": [{"name": "invalid", "format": "records", "rows": rows}],
                "query_inputs": [[3.0]]}
     assert _observed_transition_ambiguity(payload) is None
+
+
+def test_missing_and_malformed_observations_abstain_before_any_solver():
+    rows = [{"x": float(index), "response": float(index)} for index in range(80)]
+    calls = []
+    def forbidden(_payload):
+        calls.append(True)
+        raise AssertionError('solver_must_not_run')
+    for value, reason in ((None, 'portfolio_observation_values_missing'),
+                          (float('nan'), 'portfolio_observation_values_missing'),
+                          (float('inf'), 'portfolio_observation_values_invalid'),
+                          ('unreadable', 'portfolio_observation_values_invalid'),
+                          (True, 'portfolio_observation_values_invalid')):
+        changed = [dict(row) for row in rows]
+        changed[20]['response'] = value
+        result = run_validation_routed_portfolio(
+            {'attachments': [{'name': 'measurements', 'format': 'records', 'rows': changed}],
+             'query_inputs': [[1.5]]}, current_solver=forbidden, gplearn_solver=forbidden)
+        assert result['status'] == 'needs_input'
+        assert result['reason'] == reason
+        assert result['result_grade'] == 'abstain'
+        assert result['routing_evidence']['affected_row_count'] == 1
+        assert result['routing_evidence']['affected_columns'] == {'response': 1}
+        assert result['usage']['numerical_solver_calls'] == 0
+    assert calls == []
 
 
 def test_on_demand_router_skips_second_solver_when_current_passes():

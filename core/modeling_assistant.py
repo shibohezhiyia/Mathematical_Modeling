@@ -1070,7 +1070,8 @@ class MathModelingAssistant:
                         portfolio["entrypoint"] = "main_research_default_symbolic_portfolio"
                         portfolio["original_response_variable"] = response
                         portfolio["binding_evidence"] = binding
-                        if portfolio.get("status") in {"completed", "needs_input"}:
+                        if (portfolio.get("status") in {"completed", "needs_input"}
+                                or portfolio.get("reason") == "portfolio_second_arm_budget_unavailable"):
                             specialized_results["automatic_modeling"] = portfolio
                         else:
                             single_solver = induce_and_solve_modeling_task_isolated(automatic_payload)

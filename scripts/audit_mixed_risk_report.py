@@ -6,16 +6,10 @@ from copy import deepcopy
 from hashlib import sha256
 import json
 from pathlib import Path
+from typing import Any, Mapping
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="artifacts/product-workflow-confirmation/mixed-risk-20261020.json")
-    parser.add_argument("--output", default="artifacts/product-workflow-confirmation/mixed-risk-20261020-erratum.json")
-    args = parser.parse_args()
-    source = Path(args.input)
-    raw = source.read_bytes()
-    report = json.loads(raw)
+def derive_erratum(report: Mapping[str, Any], *, source: str, source_sha256: str) -> dict[str, Any]:
     if report.get("schema_version") != "mathmodel.mixed-risk-confirmation/v1":
         raise ValueError("mixed_risk_report_schema_invalid")
     compiler = deepcopy(report["compiler_summary"])
@@ -29,9 +23,9 @@ def main() -> int:
         "solver_arm_launch_count"
     )
     product["single_solver"]["solver_arm_launch_count"] = None
-    audit = {
+    return {
         "schema_version": "mathmodel.mixed-risk-erratum/v1",
-        "source_report": str(source), "source_sha256": sha256(raw).hexdigest(),
+        "source_report": source, "source_sha256": source_sha256,
         "source_freeze_digest": report["freeze"]["freeze_digest"],
         "source_freeze_status": [report["freeze_before"]["status"], report["freeze_after"]["status"]],
         "corrected_compiler_summary": compiler, "corrected_product_summary": product,
@@ -41,6 +35,17 @@ def main() -> int:
         ],
         "policy": "row_level_recalculation_only;original_frozen_report_not_overwritten",
     }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default="artifacts/product-workflow-confirmation/mixed-risk-20261020.json")
+    parser.add_argument("--output", default="artifacts/product-workflow-confirmation/mixed-risk-20261020-erratum.json")
+    args = parser.parse_args()
+    source = Path(args.input)
+    raw = source.read_bytes()
+    report = json.loads(raw)
+    audit = derive_erratum(report, source=str(source), source_sha256=sha256(raw).hexdigest())
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -254,6 +254,53 @@ def get_session() -> Dict[str, Any]:
     return sdata
 
 
+def _research_input_burden(sdata: Dict[str, Any]) -> Dict[str, Any]:
+    """Session-local interaction counts, not an estimate of preparation time."""
+    counts = sdata.get('research_input_burden') or {}
+    submissions = int(counts.get('run_submissions', 0))
+    first = counts.get('first_run_submitted_at')
+    last = counts.get('last_recorded_action_at')
+    span = round(max(0.0, last - first), 3) if isinstance(first, (int, float)) and isinstance(last, (int, float)) else None
+    return {
+        'scope': 'current_process_browser_session',
+        'run_submissions': submissions,
+        'rerun_submissions': max(0, submissions - 1),
+        'clarification_answers': int(counts.get('clarification_answers', 0)),
+        'uploaded_files': int(counts.get('uploaded_files', 0)),
+        'files_uploaded_after_first_run': int(counts.get('files_uploaded_after_first_run', 0)),
+        'explicit_target_submissions': int(counts.get('explicit_target_submissions', 0)),
+        'typed_contract_submissions': int(counts.get('typed_contract_submissions', 0)),
+        'first_run_submitted_at': counts.get('first_run_submitted_at'),
+        'last_run_submitted_at': counts.get('last_run_submitted_at'),
+        'last_clarification_answered_at': counts.get('last_clarification_answered_at'),
+        'last_recorded_action_at': last,
+        'recorded_action_span_seconds': span,
+        'interpretation': 'Counts submitted browser-session actions; span includes solver wait and idle time, excludes preparation before first run.',
+    }
+
+
+def _record_research_input_action(sdata: Dict[str, Any], action: str, *, amount: int = 1,
+                                  explicit_target: bool = False, typed_contract: bool = False) -> None:
+    counts = sdata.setdefault('research_input_burden', {})
+    now = time.time()
+    counts['last_recorded_action_at'] = now
+    if action == 'run':
+        counts['run_submissions'] = int(counts.get('run_submissions', 0)) + 1
+        counts.setdefault('first_run_submitted_at', now)
+        counts['last_run_submitted_at'] = now
+        if explicit_target:
+            counts['explicit_target_submissions'] = int(counts.get('explicit_target_submissions', 0)) + 1
+        if typed_contract:
+            counts['typed_contract_submissions'] = int(counts.get('typed_contract_submissions', 0)) + 1
+    elif action == 'clarification':
+        counts['clarification_answers'] = int(counts.get('clarification_answers', 0)) + 1
+        counts['last_clarification_answered_at'] = now
+    elif action == 'upload':
+        counts['uploaded_files'] = int(counts.get('uploaded_files', 0)) + amount
+        if counts.get('run_submissions', 0):
+            counts['files_uploaded_after_first_run'] = int(counts.get('files_uploaded_after_first_run', 0)) + amount
+
+
 def clear_session():
     """清空当前会话"""
     sid = session.get('sid')
@@ -599,6 +646,7 @@ def api_upload():
         sdata['active_sheet'] = new_first.get('active_sheet')
         sdata['df_info'] = df_to_dict(df_first)
         _clear_transform_history(sdata)
+        _record_research_input_action(sdata, 'upload', amount=len(files))
         
         # 自动推断目标列
         target_hint = None
@@ -951,6 +999,9 @@ def api_research_run():
         feedback_trials = max(2, min(int(data.get('feedback_trials', 6)), 20))
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': 'feedback_trials 必须是整数'}), 400
+    solver_arm_budget = data.get('symbolic_solver_arm_budget', 2)
+    if type(solver_arm_budget) is not int or solver_arm_budget not in (1, 2):
+        return jsonify({'success': False, 'error': 'symbolic_solver_arm_budget 必须为 1 或 2'}), 400
 
     requested_contract = None
     requested_contract_hash = data.get('clarification_contract_hash')
@@ -981,6 +1032,12 @@ def api_research_run():
             if normalized in {'false', '0', 'no', 'off', ''}:
                 return False
         return bool(value)
+
+    _record_research_input_action(
+        sdata, 'run',
+        explicit_target=bool(data.get('targets') or data.get('target')),
+        typed_contract=isinstance(data.get('dynamic_contract'), dict),
+    )
 
     def execute_research():
         # Cancellation is cooperative: the worker is never force-killed, but
@@ -1028,6 +1085,7 @@ def api_research_run():
                 or isinstance(data.get('dynamic_contract'), dict)
             ),
             enable_symbolic_portfolio=request_bool('enable_symbolic_portfolio', True),
+            symbolic_solver_arm_budget=solver_arm_budget,
         )
         result = assistant.run(
             problem=description,
@@ -1165,6 +1223,7 @@ def api_research_run():
                             or isinstance(data.get('dynamic_contract'), dict)
                         ),
                         'enable_symbolic_portfolio': request_bool('enable_symbolic_portfolio', True),
+                        'symbolic_solver_arm_budget': solver_arm_budget,
                         'run_modeling': request_bool('run_modeling', True), 'generate_plots': request_bool('generate_plots', True),
                     },
                     'dynamic_contract': data.get('dynamic_contract'),
@@ -1178,7 +1237,7 @@ def api_research_run():
                 sdata['research_output_dir'] = str(process_output_dir)
                 sdata['research_result'] = None
                 sdata['research_error'] = None
-                return jsonify({'success': True, 'status': 'running', 'task_id': task['task_id'], 'execution_mode': 'spawn_process'}), 202
+                return jsonify({'success': True, 'status': 'running', 'task_id': task['task_id'], 'execution_mode': 'spawn_process', 'input_burden': _research_input_burden(sdata)}), 202
             except (TypeError, ValueError, KeyError) as exc:
                 return jsonify({'success': False, 'error': str(exc)}), 409
         if sdata.get('research_status') in {'running', 'cancelling'}:
@@ -1219,7 +1278,7 @@ def api_research_run():
 
         thread = threading.Thread(target=research_task, daemon=True)
         thread.start()
-        return jsonify({'success': True, 'status': 'running'})
+        return jsonify({'success': True, 'status': 'running', 'input_burden': _research_input_burden(sdata)})
 
     if not app.config.get('TESTING', False):
         try:
@@ -1243,6 +1302,7 @@ def api_research_run():
                         or isinstance(data.get('dynamic_contract'), dict)
                     ),
                     'enable_symbolic_portfolio': request_bool('enable_symbolic_portfolio', True),
+                    'symbolic_solver_arm_budget': solver_arm_budget,
                     'run_modeling': request_bool('run_modeling', True), 'generate_plots': request_bool('generate_plots', True),
                 },
                 'dynamic_contract': data.get('dynamic_contract'),
@@ -1253,7 +1313,7 @@ def api_research_run():
                 return jsonify({'success': False, 'error': done.get('error') or done['status'], 'status': done['status']}), 504 if done['status'] == 'timeout' else 500
             sdata['research_status'] = 'done'; sdata['research_task_id'] = task['task_id']; sdata['research_output_dir'] = str(process_output_dir)
             sdata['research_result'] = done.get('result')
-            return jsonify(clean_for_json({'success': True, 'result': done.get('result'), 'execution_mode': 'spawn_process'}))
+            return jsonify(clean_for_json({'success': True, 'result': done.get('result'), 'execution_mode': 'spawn_process', 'input_burden': _research_input_burden(sdata)}))
         except (TypeError, ValueError, KeyError) as exc:
             return jsonify({'success': False, 'error': str(exc)}), 409
         except Exception as exc:
@@ -1266,7 +1326,7 @@ def api_research_run():
         sdata.pop('research_cancel_event', None)
         sdata.pop('research_task_id', None)
         result = execute_research()
-        return jsonify(clean_for_json({'success': True, 'result': result}))
+        return jsonify(clean_for_json({'success': True, 'result': result, 'input_burden': _research_input_burden(sdata)}))
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
@@ -1892,6 +1952,7 @@ def api_research_clarify():
 
     revised_payload = revised.public()
     sdata['research_clarification_contract'] = revised_payload
+    _record_research_input_action(sdata, 'clarification')
     return jsonify(clean_for_json({
         'success': True,
         'contract': revised_payload,
@@ -1899,6 +1960,7 @@ def api_research_clarify():
         'revision': revised_payload['revision'],
         'question_index': question_index,
         'rerun_required': True,
+        'input_burden': _research_input_burden(sdata),
         'policy': {
             'source': 'explicit_user_confirmation',
             'previous_result_mutated': False,
@@ -1935,7 +1997,14 @@ def api_research_status():
     }
     if status == 'done':
         payload['result'] = sdata.get('research_result')
+    payload['input_burden'] = _research_input_burden(sdata)
     return jsonify(clean_for_json(payload)), 200 if status != 'error' else 500
+
+
+@app.route('/api/research/input-burden', methods=['GET'])
+def api_research_input_burden():
+    """Expose only aggregate session interaction counts, never raw input text."""
+    return jsonify({'success': True, 'input_burden': _research_input_burden(get_session())})
 
 
 @app.route('/api/research/cancel', methods=['POST'])

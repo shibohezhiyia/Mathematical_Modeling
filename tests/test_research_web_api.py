@@ -12,7 +12,8 @@ import pytest
 
 from web.app import (app, user_sessions, _prepare_research_frame, _read_large_csv_representation,
                      _read_large_parquet_representation, _read_large_xlsx_representation,
-                     _read_file_with_sheets, df_to_dict)
+                     _read_file_with_sheets, df_to_dict, _research_input_burden,
+                     _record_research_input_action)
 from core.artifact_manager import RunArtifactManager
 
 
@@ -1178,6 +1179,8 @@ def test_research_clarification_creates_server_bound_revision_and_rerun_uses_it(
             assert "恒定为 20 摄氏度。" in payload["contract"]["statement"]
             assert payload["contract"]["hard_constraint_ids"] == ["user_confirmation_1"]
             assert original_result["specialized_results"]["model_hypotheses"]["problem_contract"]["revision"] == 1
+            assert payload["input_burden"]["clarification_answers"] == 1
+            assert payload["input_burden"]["run_submissions"] == 0
 
             fake_result = {"charts": [], "model_results": [], "specialized_results": {}}
             with patch("core.modeling_assistant.MathModelingAssistant") as assistant_class:
@@ -1192,8 +1195,74 @@ def test_research_clarification_creates_server_bound_revision_and_rerun_uses_it(
                 rebound = assistant_class.return_value.run.call_args.kwargs["problem_contract"]
                 assert rebound.digest == payload["contract_hash"]
                 assert rebound.public()["revision"] == 2
+                burden = rerun.get_json()["input_burden"]
+                assert burden["run_submissions"] == 1
+                assert burden["clarification_answers"] == 1
+                assert "恒定为 20" not in str(burden)
+                assert client.get("/api/research/input-burden").get_json()["input_burden"] == burden
     finally:
         user_sessions.pop(sid, None)
+
+
+def test_research_input_burden_counts_only_events_without_retaining_content():
+    sdata = {}
+    _record_research_input_action(sdata, 'upload', amount=2)
+    _record_research_input_action(sdata, 'run', explicit_target=True)
+    _record_research_input_action(sdata, 'upload', amount=1)
+    _record_research_input_action(sdata, 'clarification')
+    _record_research_input_action(sdata, 'run', typed_contract=True)
+    burden = _research_input_burden(sdata)
+    assert burden['run_submissions'] == 2
+    assert burden['rerun_submissions'] == 1
+    assert burden['uploaded_files'] == 3
+    assert burden['files_uploaded_after_first_run'] == 1
+    assert burden['clarification_answers'] == 1
+    assert burden['explicit_target_submissions'] == 1
+    assert burden['typed_contract_submissions'] == 1
+    assert burden['first_run_submitted_at'] <= burden['last_run_submitted_at']
+    assert burden['recorded_action_span_seconds'] >= 0
+    assert set(sdata) == {'research_input_burden'}
+    assert not any(key in str(sdata) for key in ('raw_answer', 'description', 'target_name'))
+
+
+def test_research_input_burden_rejects_invalid_request_and_is_session_scoped():
+    app.config.update(TESTING=True)
+    first_sid = 'research-burden-first-test'
+    second_sid = 'research-burden-second-test'
+    user_sessions[first_sid] = {}
+    user_sessions[second_sid] = {}
+    try:
+        with app.test_client() as first:
+            with first.session_transaction() as flask_session:
+                flask_session['sid'] = first_sid
+            invalid = first.post('/api/research/run', json={
+                'description': '研究数据变化。', 'symbolic_solver_arm_budget': 3,
+            })
+            assert invalid.status_code == 400
+            assert first.get('/api/research/input-burden').get_json()['input_burden']['run_submissions'] == 0
+
+            fake_result = {'charts': [], 'model_results': [], 'specialized_results': {}}
+            with patch('core.modeling_assistant.MathModelingAssistant') as assistant_class:
+                assistant_class.return_value.run.return_value.to_dict.return_value = fake_result
+                accepted = first.post('/api/research/run', json={
+                    'description': '研究数据变化。', 'target': 'measured_value',
+                    'run_modeling': False, 'generate_plots': False,
+                })
+            assert accepted.status_code == 200
+            burden = accepted.get_json()['input_burden']
+            assert burden['run_submissions'] == 1
+            assert burden['explicit_target_submissions'] == 1
+            assert 'measured_value' not in str(burden)
+
+        with app.test_client() as second:
+            with second.session_transaction() as flask_session:
+                flask_session['sid'] = second_sid
+            other = second.get('/api/research/input-burden').get_json()['input_burden']
+            assert other['run_submissions'] == 0
+            assert other['explicit_target_submissions'] == 0
+    finally:
+        user_sessions.pop(first_sid, None)
+        user_sessions.pop(second_sid, None)
 
 
 def test_research_clarification_rejects_unknown_question_and_stale_contract_hash():
@@ -1397,6 +1466,18 @@ def test_production_sync_research_forwards_symbolic_portfolio_switch():
             assert response.get_json()['execution_mode'] == 'spawn_process'
             payload = service.submit_research.call_args.args[1]
             assert payload['options']['enable_symbolic_portfolio'] is False
+            assert payload['options']['symbolic_solver_arm_budget'] == 2
     finally:
         app.config.update(TESTING=was_testing)
         user_sessions.pop(sid, None)
+
+
+def test_research_api_rejects_invalid_symbolic_solver_budget():
+    app.config.update(TESTING=True)
+    with app.test_client() as client:
+        for invalid in (0, 3, True, "2"):
+            response = client.post('/api/research/run', json={
+                'description': '预测', 'symbolic_solver_arm_budget': invalid,
+            })
+            assert response.status_code == 400
+            assert 'symbolic_solver_arm_budget' in response.get_json()['error']

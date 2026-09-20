@@ -44,7 +44,7 @@ def fit_gplearn_baseline(
     if "response" not in columns or any(set(row) != columns for row in rows):
         raise GPLearnBaselineError("gplearn_response_binding_required")
     inputs = sorted(columns - {"response"})
-    if not 1 <= len(inputs) <= 4:
+    if not 1 <= len(inputs) <= 6:
         raise GPLearnBaselineError("gplearn_input_count_unsupported")
     x = np.asarray([[row[name] for name in inputs] for row in rows], dtype=float)
     y = np.asarray([row["response"] for row in rows], dtype=float)

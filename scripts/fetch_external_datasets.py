@@ -33,7 +33,8 @@ def main() -> int:
         print(json.dumps({"schema_version": "mathmodel.external-dataset-fetch/v1", "count": len(receipts), "datasets": receipts}, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, ExternalDatasetError) as exc:
-        print(json.dumps({"status": "rejected", "reason": str(exc)}, ensure_ascii=False))
+        # Console code pages on Windows may not encode localized socket errors.
+        print(json.dumps({"status": "rejected", "reason": str(exc)}, ensure_ascii=True))
         return 2
 
 

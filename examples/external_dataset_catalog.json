@@ -73,6 +73,20 @@
       "sha256": "5c7767ba53ad827d3f48ba1eb9434117f4892df8f10bc4c99e118a9e8a7ae07c",
       "target_hint": "scaled-sound-pressure",
       "tags": ["tabular", "physics", "units", "regression"]
+    },
+    {
+      "id": "uci-yacht-hydrodynamics",
+      "title": "Yacht Hydrodynamics",
+      "provider": "UCI Machine Learning Repository",
+      "license": "CC BY 4.0",
+      "task_family": "regression",
+      "format": "zip",
+      "filename": "uci-yacht-hydrodynamics.zip",
+      "url": "https://archive.ics.uci.edu/static/public/243/yacht%2Bhydrodynamics.zip",
+      "bytes": 11633,
+      "sha256": "aa52b68f88c4bb552187a53ef4c5753fa178f6a36035a3771c5bc04e078487ac",
+      "target_hint": "residuary resistance per unit weight of displacement",
+      "tags": ["tabular", "physics", "units", "regression"]
     }
   ]
 }

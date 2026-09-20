@@ -168,8 +168,11 @@ def reexecute_submitted_model(model: Mapping[str, Any], query_inputs: Sequence[S
             elif name == "mul":
                 value = arguments[0] * arguments[1]
             elif name == "div":
-                value = np.where(np.abs(arguments[1]) > 0.001,
-                                 arguments[0] / arguments[1], 1.0)
+                # np.where evaluates both branches first; protected division
+                # must not divide by zero even when that branch is discarded.
+                value = np.divide(arguments[0], arguments[1],
+                                  out=np.ones_like(arguments[0], dtype=float),
+                                  where=np.abs(arguments[1]) > 0.001)
             elif name == "sqrt":
                 value = np.sqrt(np.abs(arguments[0]))
             elif name == "sin":
@@ -184,6 +187,38 @@ def reexecute_submitted_model(model: Mapping[str, Any], query_inputs: Sequence[S
         if not np.isfinite(y_center) or not np.isfinite(y_scale) or y_scale <= 0:
             raise ModelReexecutionError("gplearn_output_scaling_invalid")
         prediction = y_center + y_scale * standardized_prediction
+    elif structure == "sparse_laurent_outer":
+        raw_exponents = model.get("feature_exponents")
+        if (not 1 <= queries.shape[1] <= 4 or not isinstance(raw_exponents, list)
+                or not 1 <= len(raw_exponents) <= 4
+                or any(not isinstance(row, list) or len(row) != queries.shape[1]
+                       or any(type(value) is not int or abs(value) > 2 for value in row)
+                       or sum(abs(value) for value in row) > 4
+                       or sum(value != 0 for value in row) > 3 for row in raw_exponents)):
+            raise ModelReexecutionError("sparse_laurent_exponents_invalid")
+        exponents = np.asarray(raw_exponents, dtype=int)
+        coefficients = _array(model.get("coefficients"), name="coefficients")
+        if coefficients.shape != (len(exponents) + 1,):
+            raise ModelReexecutionError("sparse_laurent_coefficients_invalid")
+        if np.any((queries == 0)[:, None, :] & (exponents[None, :, :] < 0)):
+            raise ModelReexecutionError("sparse_laurent_zero_denominator")
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            features = np.prod(queries[:, None, :] ** exponents[None, :, :], axis=2)
+            inner = coefficients[0] + features @ coefficients[1:]
+        if not np.isfinite(inner).all():
+            raise ModelReexecutionError("sparse_laurent_prediction_invalid")
+        outer = model.get("outer_transform")
+        if outer == "identity":
+            prediction = inner
+        elif outer == "signed_sqrt":
+            if (np.any(inner <= 1e-12) or type(model.get("output_sign")) is not int
+                    or model["output_sign"] not in (-1, 1)):
+                raise ModelReexecutionError("sparse_laurent_sqrt_domain_invalid")
+            prediction = float(model["output_sign"]) * np.sqrt(inner)
+        elif outer == "arctan":
+            prediction = np.arctan(inner)
+        else:
+            raise ModelReexecutionError("sparse_laurent_outer_invalid")
     elif structure in {"affine", "quadratic", "cubic"}:
         coefficients = _array(model.get("coefficients"), name="coefficients")
         prediction = np.polyval(coefficients, queries[:, 0])

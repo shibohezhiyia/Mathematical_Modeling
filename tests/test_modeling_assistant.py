@@ -193,8 +193,8 @@ def test_main_research_uses_validated_symbolic_portfolio_by_default(tmp_path, mo
         "observed_value": 2.5 * np.linspace(-4.0, 4.0, 80) - 1.0,
     })
     seen = []
-    def portfolio(payload, *, seed, enable_discontinuity_gate, routing_policy):
-        seen.append((payload, seed, enable_discontinuity_gate, routing_policy))
+    def portfolio(payload, *, seed, enable_discontinuity_gate, routing_policy, solver_arm_budget):
+        seen.append((payload, seed, enable_discontinuity_gate, routing_policy, solver_arm_budget))
         return {"status": "completed", "family": "modeling_algebra",
                 "result_grade": "validated_candidate", "recommended_action": "use_with_stated_scope",
                 "model": {"structure": "affine", "input_variables": ["input"],
@@ -217,6 +217,7 @@ def test_main_research_uses_validated_symbolic_portfolio_by_default(tmp_path, mo
     assert "observed_value" not in seen[0][0]["attachments"][0]["rows"][0]
     assert seen[0][2] is True
     assert seen[0][3] == "current_then_fallback"
+    assert seen[0][4] == 2
 
 
 def test_main_research_forwards_explicit_target_for_non_alias_response(tmp_path, monkeypatch):
@@ -226,7 +227,7 @@ def test_main_research_forwards_explicit_target_for_non_alias_response(tmp_path,
         "net_demand_kw": 3.0 * temperatures + 2.0,
     })
     seen = []
-    def portfolio(payload, *, seed, enable_discontinuity_gate, routing_policy):
+    def portfolio(payload, *, seed, enable_discontinuity_gate, routing_policy, solver_arm_budget):
         seen.append(payload)
         return {"status": "completed", "family": "modeling_algebra",
                 "result_grade": "validated_candidate", "recommended_action": "use_with_stated_scope",
@@ -288,6 +289,30 @@ def test_main_research_exposes_portfolio_abstention_as_the_default_decision(tmp_
     assert modeled["result_grade"] == "abstain"
     assert modeled["recommended_action"].startswith("collect_more_observations")
     assert "automatic_modeling_single_solver" not in result.specialized_results
+
+
+def test_main_research_does_not_exceed_one_arm_budget_after_technical_failure(tmp_path, monkeypatch):
+    x = np.linspace(-4.0, 4.0, 80)
+    observations = pd.DataFrame({"input": x, "observed_value": 2.5 * x - 1.0})
+    monkeypatch.setattr("core.symbolic_portfolio.run_validation_routed_portfolio", lambda *_args, **_kwargs: {
+        "status": "not_assessed", "reason": "portfolio_second_arm_budget_unavailable",
+        "result_grade": "not_assessed", "recommended_action": "increase_solver_budget_or_resolve_solver_failure",
+        "usage": {"numerical_solver_calls": 1},
+    })
+    monkeypatch.setattr(
+        "core.automatic_modeling.induce_and_solve_modeling_task_isolated",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("budget_exceeded_by_fallback")),
+    )
+    result = MathModelingAssistant(
+        output_dir=str(tmp_path), feedback_optimization=False,
+        symbolic_solver_arm_budget=1,
+    ).run(
+        "根据观测识别关系，并预测 input = 5 时的 observed_value。",
+        {"measurements": observations}, run_modeling=False, generate_plots=False,
+    )
+    modeled = result.specialized_results["automatic_modeling"]
+    assert modeled["status"] == "not_assessed"
+    assert modeled["usage"]["numerical_solver_calls"] == 1
 
 
 def test_main_research_uses_exploratory_single_solver_only_after_portfolio_technical_failure(

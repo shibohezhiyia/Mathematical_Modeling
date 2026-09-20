@@ -32,6 +32,7 @@ def run_research_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         enable_graph_search=bool(options.get("enable_graph_search", False)),
         enable_dynamic_competition=bool(options.get("enable_dynamic_competition", False)),
         enable_symbolic_portfolio=bool(options.get("enable_symbolic_portfolio", True)),
+        symbolic_solver_arm_budget=int(options.get("symbolic_solver_arm_budget", 2)),
     )
     problem_contract = None
     if isinstance(payload.get("problem_contract"), Mapping):

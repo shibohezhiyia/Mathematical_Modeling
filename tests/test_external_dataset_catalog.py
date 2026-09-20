@@ -8,7 +8,7 @@ from core.external_dataset_catalog import ExternalDatasetError, load_catalog, va
 def test_public_catalog_is_pinned_and_allowlisted():
     path = Path(__file__).parents[1] / "examples" / "external_dataset_catalog.json"
     payload = load_catalog(path)
-    assert len(payload["datasets"]) == 5
+    assert len(payload["datasets"]) == 6
     assert all(item["sha256"] and item["bytes"] > 0 for item in payload["datasets"])
 
 

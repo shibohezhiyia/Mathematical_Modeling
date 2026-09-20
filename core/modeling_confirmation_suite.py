@@ -47,7 +47,17 @@ def reserve_modeling_confirmation(
                            "product-routing-confirmation-v23",
                            "product-fallback-confirmation-v24",
                            "product-rescue-confirmation-v25",
-                           "mixed-risk-confirmation-v26"}:
+                           "mixed-risk-confirmation-v26",
+                           "budget-decision-confirmation-v27",
+                           "sparse-operator-topology-confirmation-v28",
+                           "scipy-function-confirmation-v29",
+                           "sparse-robustness-confirmation-v30",
+                           "validation-gated-sparse-confirmation-v31",
+                           "airfoil-raw-source-confirmation-v32",
+                           "sparse-irregular-noise-confirmation-v33",
+                           "sparse-structure-selection-confirmation-v34",
+                           "sparse-multistart-search-confirmation-v35",
+                           "yacht-group-holdout-confirmation-v36"}:
         raise ValueError("confirmation_protocol_invalid")
     if type(seed) is not int or not 0 <= seed <= 2**32 - 1:
         raise ValueError("confirmation_seed_invalid")

@@ -139,7 +139,7 @@ def score_product_workflow_output(output: Mapping[str, Any], reference: Mapping[
     actual_status = output.get("status")
     grade = output.get("result_grade")
     covered = actual_status == "completed"
-    abstained = actual_status == "needs_input" and grade == "abstain"
+    abstained = actual_status == "needs_input"
     if expected_status == "completed":
         prediction = output.get("predictions")
         try:
@@ -160,7 +160,7 @@ def score_product_workflow_output(output: Mapping[str, Any], reference: Mapping[
                 "false_abstain": abstained,
                 "unsafe_accept": incorrect_prediction_accept}
     if expected_status == "abstain":
-        return {"valid": abstained, "absolute_error": None, "covered": covered,
+        return {"valid": abstained and grade == "abstain", "absolute_error": None, "covered": covered,
                 "abstained": abstained, "accepted_correct": False,
                 "validated_accepted": covered and grade == "validated_candidate",
                 "out_of_scope_accept": covered, "incorrect_prediction_accept": False,

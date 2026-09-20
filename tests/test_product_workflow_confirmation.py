@@ -25,6 +25,9 @@ def test_product_workflow_scorer_counts_wrong_refusal_separately():
     assert scored["false_abstain"] is True
     assert scored["unsafe_accept"] is False
     assert scored["covered"] is False
+    ungraded = score_product_workflow_output({"status": "needs_input"}, reference)
+    assert ungraded["false_abstain"] is True
+    assert ungraded["abstained"] is True
 
 
 def test_product_workflow_risk_summary_keeps_acceptance_errors_and_accuracy_distinct():

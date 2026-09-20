@@ -185,6 +185,13 @@
                             <label>目标列（可选，可多个）</label>
                             <input id="research-target" type="text" placeholder="数据集.列名；多个用逗号分隔；留空自动识别">
                         </div>
+                        <div class="form-group">
+                            <label for="research-symbolic-arm-budget">符号求解预算</label>
+                            <select id="research-symbolic-arm-budget">
+                                <option value="2" selected>最多两臂：失败时尝试补救</option>
+                                <option value="1">只运行一臂：失败时请求补充</option>
+                            </select>
+                        </div>
                         <label class="research-checkbox"><input type="checkbox" id="research-run-model" checked> 自动运行预测模型</label>
                         <label class="research-checkbox"><input type="checkbox" id="research-feedback-optimize" checked> 根据验证结果反馈调参</label>
                         <label class="research-checkbox"><input type="checkbox" id="research-credibility-audit" checked> 自动反证与可信度审计</label>
@@ -1746,6 +1753,6 @@
 
     <script src="{{ url_for('static', filename='js/model_diagnostics.js') }}?v=1"></script>
     <script src="{{ url_for('static', filename='js/graph_lab.js') }}?v=1"></script>
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=17"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=19"></script>
 </body>
 </html>

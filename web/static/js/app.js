@@ -486,6 +486,7 @@ async function runResearch() {
                 description,
                 clarification_contract_hash: clarificationContractHash,
                 target: target || null,
+                symbolic_solver_arm_budget: Number(document.getElementById('research-symbolic-arm-budget').value),
                 run_modeling: document.getElementById('research-run-model').checked,
                 feedback_optimization: document.getElementById('research-feedback-optimize').checked,
                 credibility_audit: document.getElementById('research-credibility-audit').checked,
@@ -518,14 +519,14 @@ async function runResearch() {
                 if (statusData.status === 'error') throw new Error(statusData.error || '研究任务执行失败');
                 if (statusData.status === 'cancelled') throw new Error('研究任务已取消');
                 if (statusData.status === 'done') {
-                    data = { success: true, result: statusData.result };
+                    data = { success: true, result: statusData.result, input_burden: statusData.input_burden };
                     completed = true;
                     break;
                 }
             }
             if (!completed) throw new Error('研究任务超过等待时限，请稍后重试');
         }
-        renderResearchResult(data.result);
+        renderResearchResult(data.result, data.input_burden);
         pendingResearchContractHash = null;
         resultBox.classList.remove('hidden');
         showToast('研究完成：已生成可审计数学证据包', 'success');
@@ -671,7 +672,7 @@ function renderInteractiveSurfaces(surfaces) {
     return html;
 }
 
-function renderResearchResult(result) {
+function renderResearchResult(result, inputBurden = null) {
     const box = document.getElementById('research-result');
     currentResearchResult = result || null;
     const profiles = result.dataset_profiles || [];
@@ -710,6 +711,9 @@ function renderResearchResult(result) {
     let html = '<div class="research-hero">';
     html += `<div><span class="research-kicker">自动研究已完成</span><h3>${escapeHtml(result.problem_analysis.model_class || '数学建模分析')}</h3><p>${escapeHtml(result.problem_analysis.model_description || '')}</p></div>`;
     html += `<div class="research-score">${result.problem_analysis.confidence || '-'}<small>% 题型识别置信度</small></div></div>`;
+    if (inputBurden) {
+        html += `<details class="research-section"><summary>本浏览器会话的输入负担</summary><div class="research-metrics"><span><small>提交研究</small><strong>${Number(inputBurden.run_submissions || 0)}</strong></span><span><small>重新提交</small><strong>${Number(inputBurden.rerun_submissions || 0)}</strong></span><span><small>回答澄清</small><strong>${Number(inputBurden.clarification_answers || 0)}</strong></span><span><small>首轮后补传文件</small><strong>${Number(inputBurden.files_uploaded_after_first_run || 0)}</strong></span><span><small>显式指定目标</small><strong>${Number(inputBurden.explicit_target_submissions || 0)}</strong></span><span><small>首尾操作间隔</small><strong>${formatResearchValue(inputBurden.recorded_action_span_seconds)} 秒</strong></span></div><p class="hint">只统计本会话已提交的网页操作；首尾间隔包含求解等待与闲置，不是人工操作耗时，且不含首轮前线下整理。自动题的“人工介入为零”不能替代这里的用户负担。</p></details>`;
+    }
 
     const hypothesisControls = result.hypothesis_controls || {};
     if (Array.isArray(hypothesisControls.controls) && hypothesisControls.controls.length) {
@@ -906,12 +910,16 @@ function renderResearchResult(result) {
                 resolve_solver_failure: '请检查求解环境和资源限制后重试。',
                 increase_solver_budget_or_collect_more_observations: '当前预算只够验证一个求解器；可允许第二求解器运行，或补充观测后再试。',
                 increase_solver_budget_or_resolve_solver_failure: '当前求解器执行失败且预算已用尽；可提高求解预算或先排查运行环境。',
-                use_single_solver_result_and_check_optional_dependency: '当前仅有单求解器探索结果；请检查可选依赖后重新验证。'
+                use_single_solver_result_and_check_optional_dependency: '当前仅有单求解器探索结果；请检查可选依赖后重新验证。',
+                run_independent_validation_before_using_prediction: '当前为未独立验证的探索性模型；请用留出观测复核后再使用预测。',
+                repair_or_exclude_missing_observations_before_validation: '观测中有缺失或非数值字段；请核对原始记录，明确剔除或补测规则后重新验证。'
             };
             const automaticReasons = {
                 portfolio_transition_region_underobserved: '过渡区观测不足，尚不能判断是真实跳变还是陡峭光滑变化。',
                 portfolio_no_validated_candidate: '当前候选均未达到预设验证标准。',
                 portfolio_second_arm_budget_unavailable: '首个候选未通过验证，剩余预算不足以调用第二求解器。',
+                portfolio_observation_values_missing: '观测中存在缺失值，尚未执行模型拟合。',
+                portfolio_observation_values_invalid: '观测中存在非数值字段，尚未执行模型拟合。',
                 model_identified_but_prediction_query_missing: '已识别模型，但尚未给出预测位置。',
                 explicit_target_column_not_found: '选择的目标列在当前数据表中不存在。',
                 explicit_target_dataset_not_found: '选择的目标数据表不存在。',
